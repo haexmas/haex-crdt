@@ -8,6 +8,13 @@
 //! Public surface is a working skeleton: types and trait shapes are in place;
 //! the CRDT implementation itself (triggers, scanner, apply pipeline, HLC
 //! service) is ported from `haex-vault` in a follow-up step.
+//!
+//! # Public dependency version contract
+//!
+//! The signer API exposes types from `rusqlite`, `sqlparser`, and `uhlc`.
+//! These crates are re-exported below so consumers can use the exact versions
+//! resolved by `haex-crdt`. Changing those versions may require downstream
+//! consumers to migrate their signer implementations.
 
 pub mod crdt;
 pub mod db;
@@ -17,14 +24,21 @@ pub mod migration;
 pub mod signature;
 pub mod table_names;
 
+/// Re-export used by [`PostWriteSigner`] implementations to name transactions.
+pub use rusqlite;
+/// Re-export used by [`WriteContext`] consumers to inspect transformed SQL.
+pub use sqlparser;
+/// Re-export used by [`WriteContext`] consumers to inspect transaction HLCs.
+pub use uhlc;
+
 pub use device_id::{DeviceIdProvider, StaticDeviceId};
 pub use error::{Error, MigrationJournal, Result};
 pub use migration::{MigrationName, MigrationSource, StaticMigrationSource};
 pub use signature::{AuthorId, NoopSignatureProvider, RemoteChanges, SignatureProvider};
 
 pub use crdt::hlc::{
-    compare_hlc_strings, device_uuid_to_hlc_node, hlc_is_from_node, hlc_is_newer, hlc_max,
-    hlc_min, hlc_node_id_suffix, parse_hlc_node_hex, HlcError, HlcService,
+    compare_hlc_strings, device_uuid_to_hlc_node, hlc_is_from_node, hlc_is_newer, hlc_max, hlc_min,
+    hlc_node_id_suffix, parse_hlc_node_hex, HlcError, HlcService,
 };
 pub use crdt::trigger::{
     drop_triggers_for_table, ensure_crdt_columns, ensure_crdt_columns_and_triggers,
@@ -37,8 +51,8 @@ pub use db::core::{
     convert_value_ref_to_json, execute, execute_with_crdt, extract_primary_table_name_from_sql,
     extract_table_names_from_sql, extract_table_names_from_statement, install_tx_hlc_hooks,
     open_and_init_db, parse_single_statement, parse_sql_statements, register_current_hlc_udf,
-    select, select_with_crdt, statement_has_returning, strip_main_schema_prefix,
-    with_connection, write_payload_too_large, ValueConverter, DRIZZLE_STATEMENT_BREAKPOINT,
+    select, select_with_crdt, statement_has_returning, strip_main_schema_prefix, with_connection,
+    write_payload_too_large, ValueConverter, DRIZZLE_STATEMENT_BREAKPOINT,
     MAX_CRDT_TRANSACTION_BYTES,
 };
 pub use db::execute_hook::{

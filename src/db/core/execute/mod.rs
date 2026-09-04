@@ -2,9 +2,9 @@
 //!
 //! - [`execute`] runs a statement without CRDT rewriting. Triggers are
 //!   suppressed for the duration of the statement by flipping
-//!   `triggers_enabled` in the CRDT config table to `'0'` and back to `'1'`
-//!   inside the same transaction. Sync-facing readers never see the flag on
-//!   `'0'`.
+//!   `triggers_enabled` in the CRDT config table to `'0'` and then restoring
+//!   its previous state inside the same transaction. Sync-facing readers
+//!   never see the flag on `'0'`.
 //!
 //! - [`execute_with_crdt`] runs a statement through
 //!   [`crate::crdt::transformer::CrdtTransformer`] with the transaction-
@@ -29,7 +29,7 @@ use crate::db::execute_hook::{PostWriteSigner, TouchedColumns, TouchedTable, Wri
 use crate::db::DbConnection;
 use crate::table_names::TABLE_CRDT_CONFIGS;
 use rusqlite::types::Value as RusqliteValue;
-use rusqlite::{params_from_iter, ToSql, Transaction};
+use rusqlite::{params_from_iter, OptionalExtension, ToSql, Transaction};
 use serde_json::Value as JsonValue;
 use sqlparser::ast::{AssignmentTarget, ObjectName, Statement, TableFactor, TableObject};
 use std::str::FromStr;
@@ -105,17 +105,17 @@ pub fn execute_with_crdt(
     with_connection(connection, |conn| {
         let tx = conn.transaction()?;
 
-        let (result, tx_hlc) = if has_returning {
-            let (_ts, rows) = query_internal(&tx, hlc_service, &sql, &params)?;
-            (rows, _ts)
+        let (result, tx_hlc, transformed_statement) = if has_returning {
+            let (ts, transformed, rows) = query_internal(&tx, hlc_service, statement, &params)?;
+            (rows, ts, transformed)
         } else {
-            let ts = execute_internal(&tx, hlc_service, &sql, &params)?;
-            (vec![], ts)
+            let (ts, transformed) = execute_internal(&tx, hlc_service, statement, &params)?;
+            (vec![], ts, transformed)
         };
 
         if !signers.is_empty() {
             let ctx = WriteContext {
-                statement: &statement,
+                statement: &transformed_statement,
                 touched,
                 hlc: &tx_hlc,
             };
@@ -131,10 +131,10 @@ pub fn execute_with_crdt(
 
 /// Executes a statement without CRDT rewriting. Suppresses triggers for the
 /// duration of the write by flipping [`TABLE_CRDT_CONFIGS`]'s
-/// `triggers_enabled` row to `'0'` inside the transaction and back to `'1'`
-/// before commit. Concurrent sync-facing connections never see the flag on
-/// `'0'` because SQLite's transaction isolation shields the intermediate
-/// value.
+/// `triggers_enabled` row to `'0'` inside the transaction and restoring its
+/// previous value (or absence) before commit. Concurrent sync-facing
+/// connections never see the flag on `'0'` because SQLite's transaction
+/// isolation shields the intermediate value.
 pub fn execute(
     sql: String,
     params: Vec<JsonValue>,
@@ -153,6 +153,14 @@ pub fn execute(
 
     with_connection(connection, |conn| {
         let tx = conn.transaction()?;
+
+        let previous_triggers_enabled: Option<Option<String>> = tx
+            .query_row(
+                &format!("SELECT value FROM {TABLE_CRDT_CONFIGS} WHERE key = 'triggers_enabled'"),
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
 
         let disable_sql = format!(
             "INSERT INTO {TABLE_CRDT_CONFIGS} (key, type, value) VALUES ('triggers_enabled', 'system', '0') \
@@ -190,11 +198,22 @@ pub fn execute(
             vec![]
         };
 
-        let enable_sql = format!(
-            "INSERT INTO {TABLE_CRDT_CONFIGS} (key, type, value) VALUES ('triggers_enabled', 'system', '1') \
-             ON CONFLICT(key) DO UPDATE SET value = '1'"
-        );
-        tx.execute(&enable_sql, [])?;
+        match previous_triggers_enabled {
+            Some(previous_value) => {
+                tx.execute(
+                    &format!(
+                        "UPDATE {TABLE_CRDT_CONFIGS} SET value = ?1 WHERE key = 'triggers_enabled'"
+                    ),
+                    [previous_value],
+                )?;
+            }
+            None => {
+                tx.execute(
+                    &format!("DELETE FROM {TABLE_CRDT_CONFIGS} WHERE key = 'triggers_enabled'"),
+                    [],
+                )?;
+            }
+        }
 
         tx.commit()?;
         Ok(result)
@@ -204,15 +223,14 @@ pub fn execute(
 // ---- private helpers -----------------------------------------------------
 
 /// Reads the transaction-scoped HLC, aligns [`HlcService`] with it, and
-/// persists it to `haex_hlc_state`. Every write inside one transaction goes
-/// through this once at the top so the transformer's SQL literal and the
-/// `current_hlc()` UDF (used by triggers) return the same value.
-fn tx_scoped_hlc(
-    tx: &Transaction,
-    hlc_service: &HlcService,
-) -> Result<Timestamp, DatabaseError> {
+/// persists it to the HLC row in [`TABLE_CRDT_CONFIGS`]. Every write inside
+/// one transaction goes through this once at the top so the transformer's SQL
+/// literal and the `current_hlc()` UDF (used by triggers) return the same value.
+fn tx_scoped_hlc(tx: &Transaction, hlc_service: &HlcService) -> Result<Timestamp, DatabaseError> {
     let hlc_str: String = tx
-        .query_row(&format!("SELECT {HLC_FUNCTION_NAME}()"), [], |row| row.get(0))
+        .query_row(&format!("SELECT {HLC_FUNCTION_NAME}()"), [], |row| {
+            row.get(0)
+        })
         .map_err(|e| DatabaseError::HlcError {
             reason: format!("Failed to read {HLC_FUNCTION_NAME}(): {e}"),
         })?;
@@ -235,18 +253,17 @@ fn tx_scoped_hlc(
 }
 
 /// Runs a non-RETURNING write through the CRDT transformer + main-prefix
-/// stripping and executes it against `tx`. Returns the tx-scoped HLC so the
-/// caller can hand it to [`PostWriteSigner`]s.
+/// stripping and executes it against `tx`. Returns the tx-scoped HLC and
+/// transformed statement so the caller can hand both to [`PostWriteSigner`]s.
 fn execute_internal(
     tx: &Transaction,
     hlc_service: &HlcService,
-    sql: &str,
+    mut statement: Statement,
     params: &[JsonValue],
-) -> Result<Timestamp, DatabaseError> {
+) -> Result<(Timestamp, Statement), DatabaseError> {
     let sql_params = ValueConverter::convert_params(params)?;
     let param_refs: Vec<&dyn ToSql> = sql_params.iter().map(|p| p as &dyn ToSql).collect();
 
-    let mut statement = parse_single_statement(sql)?;
     let transformer = CrdtTransformer::new();
     let hlc_timestamp = tx_scoped_hlc(tx, hlc_service)?;
 
@@ -262,21 +279,20 @@ fn execute_internal(
             reason: format!("Execute failed: {e}"),
         })?;
 
-    Ok(hlc_timestamp)
+    Ok((hlc_timestamp, statement))
 }
 
-/// RETURNING variant of [`execute_internal`]. Returns `(hlc, rows)` so the
-/// caller can hand the HLC to signers and the rows back to its caller.
+/// RETURNING variant of [`execute_internal`]. Returns the HLC, transformed
+/// statement, and rows so the caller can supply signer context and results.
 fn query_internal(
     tx: &Transaction,
     hlc_service: &HlcService,
-    sql: &str,
+    mut statement: Statement,
     params: &[JsonValue],
-) -> Result<(Timestamp, Vec<Vec<JsonValue>>), DatabaseError> {
+) -> Result<(Timestamp, Statement, Vec<Vec<JsonValue>>), DatabaseError> {
     let sql_params = ValueConverter::convert_params(params)?;
     let param_refs: Vec<&dyn ToSql> = sql_params.iter().map(|p| p as &dyn ToSql).collect();
 
-    let mut statement = parse_single_statement(sql)?;
     let transformer = CrdtTransformer::new();
     let hlc_timestamp = tx_scoped_hlc(tx, hlc_service)?;
 
@@ -320,7 +336,7 @@ fn query_internal(
         result_vec.push(row_values);
     }
 
-    Ok((hlc_timestamp, result_vec))
+    Ok((hlc_timestamp, statement, result_vec))
 }
 
 /// Extracts `(target_table, touched_columns)` for statements that carry
@@ -356,15 +372,19 @@ pub(crate) fn extract_touched_for_signing(
                 TableFactor::Table { name, .. } => object_name_last(name)?,
                 _ => return None,
             };
-            let cols: Vec<String> = update
-                .assignments
-                .iter()
-                .filter_map(|a| match &a.target {
-                    AssignmentTarget::ColumnName(obj) => object_name_last(obj),
-                    _ => None,
-                })
-                .map(|c| c.to_ascii_lowercase())
-                .collect();
+            let mut cols = Vec::new();
+            for assignment in &update.assignments {
+                let targets: &[ObjectName] = match &assignment.target {
+                    AssignmentTarget::ColumnName(target) => std::slice::from_ref(target),
+                    AssignmentTarget::Tuple(targets) => targets,
+                };
+                cols.extend(
+                    targets
+                        .iter()
+                        .filter_map(object_name_last)
+                        .map(|column| column.to_ascii_lowercase()),
+                );
+            }
             Some((
                 TouchedTable::from_raw(&name),
                 TouchedColumns::Explicit(cols),
@@ -374,6 +394,7 @@ pub(crate) fn extract_touched_for_signing(
     }
 }
 
+/// Returns the unqualified final identifier from an object name.
 fn object_name_last(obj: &ObjectName) -> Option<String> {
     obj.0
         .last()
@@ -383,6 +404,7 @@ fn object_name_last(obj: &ObjectName) -> Option<String> {
 
 /// True iff `col` is one of the CRDT meta columns whose value must be
 /// produced by the CRDT layer, not by the caller.
+/// Whether a column is maintained exclusively by the CRDT write path.
 fn is_crdt_meta_column(col: &str) -> bool {
     col == HLC_TIMESTAMP_COLUMN || col == COLUMN_HLCS_COLUMN || col == COLUMN_SIGS_COLUMN
 }

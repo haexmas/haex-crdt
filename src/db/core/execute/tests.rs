@@ -91,6 +91,14 @@ fn extract_touched_lowercases_update_target_and_assignment_names() {
 }
 
 #[test]
+fn extract_touched_includes_every_tuple_assignment_target() {
+    let stmt = parse_stmt("UPDATE Items SET (Name, Body) = ('x', 'y') WHERE id = 1");
+    let (table, cols) = extract_touched_for_signing(&stmt).unwrap();
+    assert_eq!(table.as_str(), "items");
+    assert_eq!(cols.explicit(), &["name".to_string(), "body".to_string()]);
+}
+
+#[test]
 fn extract_touched_returns_none_for_select_delete_and_ddl() {
     assert!(extract_touched_for_signing(&parse_stmt("SELECT * FROM t")).is_none());
     assert!(extract_touched_for_signing(&parse_stmt("DELETE FROM t WHERE id = 1")).is_none());
@@ -136,10 +144,6 @@ fn setup_bookkeeping_tables(conn: &Connection) {
              {HLC_TIMESTAMP_COLUMN} TEXT,
              {COLUMN_HLCS_COLUMN} TEXT NOT NULL DEFAULT '{{}}',
              {COLUMN_SIGS_COLUMN} TEXT NOT NULL DEFAULT '{{}}'
-         );
-         CREATE TABLE haex_hlc_state (
-             id INTEGER PRIMARY KEY CHECK (id = 1),
-             timestamp TEXT NOT NULL
          );"
     ))
     .expect("bookkeeping tables");
@@ -184,8 +188,13 @@ fn setup_fixture() -> Fixture {
 #[test]
 fn execute_without_crdt_bypasses_triggers_and_leaves_dirty_tables_empty() {
     let fx = setup_fixture();
-    // Seed the config row so triggers can consult it (bookkeeping table exists
-    // but is empty by default; the execute path INSERT-OR-UPDATEs it).
+    // Triggers must start enabled so this test exercises execute's suppression.
+    with_connection(&fx.connection, |conn| {
+        ensure_triggers_initialized(conn, 1).unwrap();
+        Ok(())
+    })
+    .unwrap();
+
     execute(
         "INSERT INTO items (id, name, body, haex_hlc) VALUES ('i1', 'a', 'b', 'seed-hlc')"
             .to_string(),
@@ -233,6 +242,61 @@ fn execute_returning_yields_row_values() {
     assert_eq!(rows[0][1], json!("a"));
 }
 
+#[test]
+fn execute_restores_disabled_trigger_state() {
+    let fx = setup_fixture();
+    with_connection(&fx.connection, |conn| {
+        conn.execute(
+            &format!(
+                "INSERT INTO {TABLE_CRDT_CONFIGS} (key, type, value) VALUES ('triggers_enabled', 'system', '0')"
+            ),
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    execute(
+        "INSERT INTO items (id, name, body, haex_hlc) VALUES ('i1', 'a', 'b', 'h')".to_string(),
+        vec![],
+        &fx.connection,
+    )
+    .unwrap();
+
+    with_connection(&fx.connection, |conn| {
+        let value: String = conn.query_row(
+            &format!("SELECT value FROM {TABLE_CRDT_CONFIGS} WHERE key = 'triggers_enabled'"),
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(value, "0");
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn execute_restores_missing_trigger_state() {
+    let fx = setup_fixture();
+    execute(
+        "INSERT INTO items (id, name, body, haex_hlc) VALUES ('i1', 'a', 'b', 'h')".to_string(),
+        vec![],
+        &fx.connection,
+    )
+    .unwrap();
+
+    with_connection(&fx.connection, |conn| {
+        let count: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM {TABLE_CRDT_CONFIGS} WHERE key = 'triggers_enabled'"),
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(count, 0);
+        Ok(())
+    })
+    .unwrap();
+}
+
 // -------------------------------------------------------------------------
 // execute_with_crdt
 // -------------------------------------------------------------------------
@@ -251,7 +315,9 @@ fn execute_with_crdt_populates_haex_hlc_and_marks_table_dirty() {
 
     with_connection(&fx.connection, |conn| {
         let hlc: Option<String> = conn
-            .query_row("SELECT haex_hlc FROM items WHERE id = 'i1'", [], |r| r.get(0))
+            .query_row("SELECT haex_hlc FROM items WHERE id = 'i1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert!(hlc.is_some(), "haex_hlc must be populated");
 
@@ -300,10 +366,31 @@ fn execute_with_crdt_rejects_write_to_haex_column_hlcs_meta_column() {
         &[],
     )
     .unwrap_err();
-    assert!(matches!(err, DatabaseError::CrdtMetaColumnWriteForbidden { .. }));
+    assert!(matches!(
+        err,
+        DatabaseError::CrdtMetaColumnWriteForbidden { .. }
+    ));
 }
 
 #[test]
+fn execute_with_crdt_rejects_meta_column_in_tuple_assignment() {
+    let fx = setup_fixture();
+    for protected_column in [HLC_TIMESTAMP_COLUMN, COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN] {
+        let sql = format!(
+            "UPDATE items SET (name, {protected_column}) = ('x', 'forged') WHERE id = 'i1'"
+        );
+        let err = execute_with_crdt(sql, vec![], &fx.connection, &fx.hlc_service, &[]).unwrap_err();
+        match err {
+            DatabaseError::CrdtMetaColumnWriteForbidden { column } => {
+                assert_eq!(column, protected_column);
+            }
+            other => panic!("expected CrdtMetaColumnWriteForbidden, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+#[ignore = "allocates over 100 MiB to exercise the production limit"]
 fn execute_with_crdt_rejects_oversized_payload_before_any_write() {
     let fx = setup_fixture();
     let huge = "x".repeat(MAX_CRDT_TRANSACTION_BYTES + 10);
@@ -355,6 +442,18 @@ fn execute_with_crdt_update_touches_only_named_columns() {
         &[],
     )
     .unwrap();
+
+    let original_name_hlc = with_connection(&fx.connection, |conn| {
+        let hlcs: String = conn.query_row(
+            "SELECT haex_column_hlcs FROM items WHERE id = 'i1'",
+            [],
+            |row| row.get(0),
+        )?;
+        let parsed: serde_json::Value = serde_json::from_str(&hlcs).unwrap();
+        Ok(parsed["name"].clone())
+    })
+    .unwrap();
+
     execute_with_crdt(
         "UPDATE items SET body = 'b2' WHERE id = 'i1'".to_string(),
         vec![],
@@ -376,7 +475,14 @@ fn execute_with_crdt_update_touches_only_named_columns() {
         let parsed: serde_json::Value = serde_json::from_str(&hlcs).unwrap();
         assert!(parsed["body"].is_string());
         assert!(parsed["name"].is_string());
-        assert_ne!(parsed["body"], parsed["name"], "body HLC advanced past name HLC");
+        assert_eq!(
+            parsed["name"], original_name_hlc,
+            "name HLC must not change"
+        );
+        assert_ne!(
+            parsed["body"], parsed["name"],
+            "body HLC advanced past name HLC"
+        );
         Ok(())
     })
     .unwrap();
@@ -419,6 +525,21 @@ impl PostWriteSigner for FailingSigner {
         Err(DatabaseError::StatementError {
             reason: "signer said no".to_string(),
         })
+    }
+}
+
+struct StatementSpySigner {
+    statement: Arc<Mutex<Option<String>>>,
+}
+
+impl PostWriteSigner for StatementSpySigner {
+    fn on_after_write(
+        &self,
+        _tx: &Transaction,
+        ctx: &WriteContext<'_>,
+    ) -> Result<(), DatabaseError> {
+        *self.statement.lock().unwrap() = Some(ctx.statement.to_string());
+        Ok(())
     }
 }
 
@@ -491,6 +612,31 @@ fn spy_signer_receives_touched_table_and_columns() {
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0].0, "items");
     assert_eq!(recorded[0].1, vec!["id", "name", "body"]);
+}
+
+#[test]
+fn signer_receives_transformed_statement() {
+    let fx = setup_fixture();
+    let observed = Arc::new(Mutex::new(None));
+    let signer: Arc<dyn PostWriteSigner> = Arc::new(StatementSpySigner {
+        statement: observed.clone(),
+    });
+
+    let rows = execute_with_crdt(
+        "INSERT INTO items (id, name, body) VALUES ('i1', 'a', 'b') RETURNING id".to_string(),
+        vec![],
+        &fx.connection,
+        &fx.hlc_service,
+        &[signer],
+    )
+    .unwrap();
+
+    assert_eq!(rows, vec![vec![json!("i1")]]);
+    let statement = observed.lock().unwrap().clone().unwrap();
+    assert!(
+        statement.to_ascii_lowercase().contains("haex_hlc"),
+        "signer must receive the transformer output: {statement}"
+    );
 }
 
 #[test]
@@ -626,7 +772,10 @@ fn later_signer_is_skipped_when_earlier_signer_errors() {
             }),
         ],
     );
-    assert!(!*downstream.lock().unwrap(), "downstream signer must not have run");
+    assert!(
+        !*downstream.lock().unwrap(),
+        "downstream signer must not have run"
+    );
 }
 
 // -------------------------------------------------------------------------

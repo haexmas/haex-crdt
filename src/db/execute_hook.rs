@@ -1,6 +1,6 @@
 //! Post-write hook the executor invokes inside the SQL transaction, before
 //! commit. Consumers register one or more [`PostWriteSigner`] implementations
-//! on [`crate::db::execute_with_crdt`]; each is called after the CRDT
+//! on [`crate::execute_with_crdt`]; each is called after the CRDT
 //! transformer has written the row (and the after-insert / after-update
 //! triggers have populated `haex_column_hlcs` and the dirty-tables entry),
 //! but before `tx.commit()` runs. Any implementation returning `Err` rolls
@@ -37,6 +37,7 @@ use uhlc::Timestamp;
 pub struct TouchedTable(String);
 
 impl TouchedTable {
+    /// Returns the canonical lowercase table name.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -74,6 +75,7 @@ impl TouchedColumns {
         }
     }
 
+    /// Whether the statement writes every column positionally.
     pub fn is_all_columns(&self) -> bool {
         matches!(self, Self::AllColumns)
     }
@@ -109,11 +111,10 @@ pub struct WriteContext<'a> {
 /// order. The first `Err` aborts the transaction — later signers are
 /// skipped.
 pub trait PostWriteSigner: Send + Sync {
-    fn on_after_write(
-        &self,
-        tx: &Transaction,
-        ctx: &WriteContext<'_>,
-    ) -> Result<(), DatabaseError>;
+    /// Applies post-write policy or derived writes in the active transaction.
+    /// Returning an error aborts the transaction and skips later signers.
+    fn on_after_write(&self, tx: &Transaction, ctx: &WriteContext<'_>)
+        -> Result<(), DatabaseError>;
 }
 
 /// Executor-side default: does nothing, accepts any batch. Consumers who

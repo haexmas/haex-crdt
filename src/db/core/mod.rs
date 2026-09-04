@@ -17,7 +17,9 @@ pub mod select;
 pub mod value;
 
 pub use connection::with_connection;
-pub use execute::{execute, execute_with_crdt, write_payload_too_large, MAX_CRDT_TRANSACTION_BYTES};
+pub use execute::{
+    execute, execute_with_crdt, write_payload_too_large, MAX_CRDT_TRANSACTION_BYTES,
+};
 pub use extract::{
     extract_primary_table_name_from_sql, extract_table_names_from_sql,
     extract_table_names_from_statement,
