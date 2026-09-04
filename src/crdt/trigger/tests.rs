@@ -263,6 +263,61 @@ fn insert_populates_column_hlcs_and_marks_table_dirty() {
 }
 
 #[test]
+fn missing_triggers_enabled_config_defaults_to_enabled_for_all_triggers() {
+    let conn = setup_trigger_fixture();
+    conn.execute(
+        &format!("DELETE FROM {TABLE_CRDT_CONFIGS} WHERE key = 'triggers_enabled'"),
+        [],
+    )
+    .unwrap();
+
+    conn.execute(
+        &format!("INSERT INTO items (id, name, body, {HLC_TIMESTAMP_COLUMN}) VALUES ('i1', 'a', 'b', 'hlc-1')"),
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        &format!("UPDATE items SET body = 'b2', {HLC_TIMESTAMP_COLUMN} = 'hlc-2' WHERE id = 'i1'"),
+        [],
+    )
+    .unwrap();
+
+    let hlcs_json: String = conn
+        .query_row(
+            &format!("SELECT {COLUMN_HLCS_COLUMN} FROM items WHERE id = 'i1'"),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&hlcs_json).unwrap();
+    assert_eq!(parsed["body"], "hlc-2");
+
+    conn.execute("DELETE FROM items WHERE id = 'i1'", [])
+        .unwrap();
+
+    let delete_events: i64 = conn
+        .query_row(
+            &format!("SELECT COUNT(*) FROM {DELETED_ROWS_TABLE}"),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(delete_events, 1);
+
+    let dirty_tables: i64 = conn
+        .query_row(
+            &format!("SELECT COUNT(*) FROM {TABLE_CRDT_DIRTY_TABLES}"),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        dirty_tables, 2,
+        "INSERT/UPDATE and delete-log triggers must run"
+    );
+}
+
+#[test]
 fn update_advances_only_changed_columns_hlc() {
     let conn = setup_trigger_fixture();
 
@@ -458,6 +513,131 @@ fn setup_on_deleted_rows_table_does_not_install_self_referencing_delete_trigger(
         )
         .unwrap();
     assert_eq!(count, 0, "no DELETE trigger on the delete-event log itself");
+}
+
+#[test]
+fn ensure_on_deleted_rows_table_is_idempotent_without_delete_trigger() {
+    let conn = Connection::open_in_memory().unwrap();
+    register_test_udfs(&conn);
+    setup_crdt_bookkeeping(&conn);
+
+    let tx = conn.unchecked_transaction().unwrap();
+    assert_eq!(
+        ensure_crdt_columns_and_triggers(&tx, DELETED_ROWS_TABLE).unwrap(),
+        (false, true)
+    );
+    tx.commit().unwrap();
+
+    let tx = conn.unchecked_transaction().unwrap();
+    assert_eq!(
+        ensure_crdt_columns_and_triggers(&tx, DELETED_ROWS_TABLE).unwrap(),
+        (false, false)
+    );
+}
+
+#[test]
+fn setup_recreates_any_missing_trigger() {
+    let conn = setup_trigger_fixture();
+    conn.execute_batch(
+        "DROP TRIGGER z_dirty_items_update;
+         DROP TRIGGER z_dirty_items_delete;",
+    )
+    .unwrap();
+
+    let tx = conn.unchecked_transaction().unwrap();
+    let result = ensure_crdt_columns_and_triggers(&tx, "items").unwrap();
+    tx.commit().unwrap();
+
+    assert_eq!(result, (false, true));
+    let trigger_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'z_dirty_items_%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(trigger_count, 3);
+}
+
+#[test]
+fn setup_rejects_unsafe_tracked_column_names_before_sql_generation() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute(
+        &format!(
+            "CREATE TABLE items (
+                id TEXT PRIMARY KEY,
+                \"bad'column\" TEXT,
+                {HLC_TIMESTAMP_COLUMN} TEXT
+            )"
+        ),
+        [],
+    )
+    .unwrap();
+
+    let tx = conn.unchecked_transaction().unwrap();
+    let err = setup_triggers_for_table(&tx, "items", false).unwrap_err();
+    assert!(matches!(err, CrdtSetupError::UnsafeIdentifier { .. }));
+}
+
+#[test]
+fn setup_rejects_unsafe_primary_key_names_before_sql_generation() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute(
+        &format!(
+            "CREATE TABLE items (
+                \"bad\"\"key\" TEXT PRIMARY KEY,
+                {HLC_TIMESTAMP_COLUMN} TEXT
+            )"
+        ),
+        [],
+    )
+    .unwrap();
+
+    let tx = conn.unchecked_transaction().unwrap();
+    let err = setup_triggers_for_table(&tx, "items", false).unwrap_err();
+    assert!(matches!(err, CrdtSetupError::UnsafeIdentifier { .. }));
+}
+
+#[test]
+fn setup_accepts_hyphenated_column_names() {
+    let conn = Connection::open_in_memory().unwrap();
+    register_test_udfs(&conn);
+    setup_crdt_bookkeeping(&conn);
+    conn.execute_batch(&format!(
+        "CREATE TABLE items (
+             id TEXT PRIMARY KEY,
+             \"display-name\" TEXT,
+             {HLC_TIMESTAMP_COLUMN} TEXT,
+             {COLUMN_HLCS_COLUMN} TEXT NOT NULL DEFAULT '{{}}',
+             {COLUMN_SIGS_COLUMN} TEXT NOT NULL DEFAULT '{{}}'
+         );"
+    ))
+    .unwrap();
+
+    let tx = conn.unchecked_transaction().unwrap();
+    setup_triggers_for_table(&tx, "items", false).unwrap();
+    tx.commit().unwrap();
+
+    conn.execute(
+        &format!("INSERT INTO items (id, \"display-name\", {HLC_TIMESTAMP_COLUMN}) VALUES ('i1', 'a', 'hlc-1')"),
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        &format!("UPDATE items SET \"display-name\" = 'b', {HLC_TIMESTAMP_COLUMN} = 'hlc-2' WHERE id = 'i1'"),
+        [],
+    )
+    .unwrap();
+
+    let hlcs_json: String = conn
+        .query_row(
+            &format!("SELECT {COLUMN_HLCS_COLUMN} FROM items WHERE id = 'i1'"),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&hlcs_json).unwrap();
+    assert_eq!(parsed["display-name"], "hlc-2");
 }
 
 #[test]

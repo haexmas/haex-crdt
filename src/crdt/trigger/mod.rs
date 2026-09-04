@@ -43,6 +43,10 @@ pub enum CrdtSetupError {
 
     #[error("table '{table_name}' has no primary key")]
     PrimaryKeyMissing { table_name: String },
+
+    /// A table column name would be unsafe to interpolate into trigger SQL.
+    #[error("column '{name}' is not a safe SQL identifier")]
+    UnsafeIdentifier { name: String },
 }
 
 impl From<CrdtSetupError> for DatabaseError {
@@ -137,6 +141,14 @@ pub fn setup_triggers_for_table(
         .map(|c| c.name.clone())
         .collect();
 
+    for column_name in pks.iter().chain(cols_to_track.iter()) {
+        if !is_safe_identifier(column_name) {
+            return Err(CrdtSetupError::UnsafeIdentifier {
+                name: column_name.clone(),
+            });
+        }
+    }
+
     let insert_trigger_sql = generate_insert_trigger_sql(table_name, &cols_to_track, &pks);
     let update_trigger_sql = generate_update_trigger_sql(table_name, &cols_to_track, &pks);
 
@@ -220,7 +232,7 @@ fn generate_insert_trigger_sql(
             AFTER INSERT ON \"{table_name}\"
             FOR EACH ROW
             WHEN NEW.{HLC_TIMESTAMP_COLUMN} IS NOT NULL
-                AND (SELECT COALESCE(value, '1') FROM {TABLE_CRDT_CONFIGS} WHERE key = 'triggers_enabled') = '1'
+                AND COALESCE((SELECT value FROM {TABLE_CRDT_CONFIGS} WHERE key = 'triggers_enabled'), '1') = '1'
             BEGIN
             UPDATE \"{table_name}\"
             SET {COLUMN_HLCS_COLUMN} = {json_object}
@@ -278,7 +290,7 @@ fn generate_update_trigger_sql(
             AFTER UPDATE ON \"{table_name}\"
             FOR EACH ROW
             WHEN NEW.{HLC_TIMESTAMP_COLUMN} IS NOT NULL
-                AND (SELECT COALESCE(value, '1') FROM {TABLE_CRDT_CONFIGS} WHERE key = 'triggers_enabled') = '1'
+                AND COALESCE((SELECT value FROM {TABLE_CRDT_CONFIGS} WHERE key = 'triggers_enabled'), '1') = '1'
             BEGIN
             {all_updates}
 
@@ -302,7 +314,7 @@ fn generate_delete_trigger_sql(table_name: &str, pks: &[String]) -> String {
         "CREATE TRIGGER IF NOT EXISTS \"{trigger_name}\"
             BEFORE DELETE ON \"{table_name}\"
             FOR EACH ROW
-            WHEN (SELECT COALESCE(value, '1') FROM {TABLE_CRDT_CONFIGS} WHERE key = 'triggers_enabled') = '1'
+            WHEN COALESCE((SELECT value FROM {TABLE_CRDT_CONFIGS} WHERE key = 'triggers_enabled'), '1') = '1'
             BEGIN
             INSERT INTO {DELETED_ROWS_TABLE} (id, table_name, row_pks, {HLC_TIMESTAMP_COLUMN}, {COLUMN_HLCS_COLUMN})
             VALUES ({UUID_FUNCTION_NAME}(), '{table_name}', json_object({row_pks_json}), {HLC_FUNCTION_NAME}(), '{{}}');
@@ -358,25 +370,32 @@ pub fn ensure_crdt_columns(tx: &Transaction, table_name: &str) -> Result<bool, C
     Ok(added_any)
 }
 
-/// Combines [`ensure_crdt_columns`] and [`setup_triggers_for_table`], skipping
-/// trigger installation if the INSERT trigger already exists. Returns
-/// `(columns_added, triggers_created)`.
+/// Combines [`ensure_crdt_columns`] and [`setup_triggers_for_table`], installing
+/// any missing trigger from the required set. The delete-event log requires
+/// only INSERT and UPDATE triggers because it must not install a self-referential
+/// DELETE trigger. Returns `(columns_added, triggers_created)`.
 pub fn ensure_crdt_columns_and_triggers(
     tx: &Transaction,
     table_name: &str,
 ) -> Result<(bool, bool), CrdtSetupError> {
     let columns_added = ensure_crdt_columns(tx, table_name)?;
 
-    let trigger_name = INSERT_TRIGGER_TPL.replace("{TABLE_NAME}", table_name);
-    let has_trigger: bool = tx
-        .query_row(
+    let trigger_names = if table_name == DELETED_ROWS_TABLE {
+        vec![INSERT_TRIGGER_TPL, UPDATE_TRIGGER_TPL]
+    } else {
+        vec![INSERT_TRIGGER_TPL, UPDATE_TRIGGER_TPL, DELETE_TRIGGER_TPL]
+    };
+    let has_all_triggers = trigger_names.iter().all(|template| {
+        let trigger_name = template.replace("{TABLE_NAME}", table_name);
+        tx.query_row(
             "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'trigger' AND name = ?",
             [&trigger_name],
-            |row| row.get(0),
+            |row| row.get::<_, bool>(0),
         )
-        .unwrap_or(false);
+        .unwrap_or(false)
+    });
 
-    let triggers_created = if !has_trigger {
+    let triggers_created = if !has_all_triggers {
         matches!(
             setup_triggers_for_table(tx, table_name, false)?,
             TriggerSetupResult::Success

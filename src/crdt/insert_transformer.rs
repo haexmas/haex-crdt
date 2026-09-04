@@ -80,6 +80,13 @@ impl InsertTransformer {
         insert_stmt: &mut Insert,
         timestamp: &Timestamp,
     ) -> Result<(), DatabaseError> {
+        if insert_stmt.on.is_some() {
+            return Err(DatabaseError::UnsupportedStatement {
+                sql: insert_stmt.to_string(),
+                reason: "INSERT with a conflict clause is not supported".to_string(),
+            });
+        }
+
         // The rewrite relies on the positional correspondence between the
         // explicit column list and the values/projection. Without a column
         // list, index 0 would overwrite the first caller-supplied value.
@@ -112,12 +119,6 @@ impl InsertTransformer {
         // Add haex_hlc column if not exists
         let hlc_col_index =
             Self::find_or_add_column(&mut insert_stmt.columns, self.hlc_timestamp_column);
-
-        // ON CONFLICT Logik komplett entfernt!
-        // Bei Hard Deletes gibt es keine Soft-Delete-Marker mehr zu reaktivieren —
-        // Deletes leben ausschließlich als Event-Rows im Delete-Log.
-        // UNIQUE Constraint Violations sind echte Fehler.
-        // (ON CONFLICT DO UPDATE ist bewusst nicht unterstützt — siehe Doc-Kommentar oben)
 
         match insert_stmt.source.as_mut() {
             Some(query) => match &mut *query.body {
@@ -270,5 +271,19 @@ mod tests {
             matches!(err, DatabaseError::UnsupportedStatement { .. }),
             "expected UnsupportedStatement, got: {err:?}"
         );
+    }
+
+    #[test]
+    fn conflict_clauses_are_rejected_before_transformation() {
+        for sql in [
+            "INSERT INTO t (id, name) VALUES ('x', 'a') ON CONFLICT DO NOTHING",
+            "INSERT INTO t (id, name) VALUES ('x', 'a') ON CONFLICT (id) DO UPDATE SET name = excluded.name",
+        ] {
+            let err = transform_err(sql);
+            assert!(
+                matches!(err, DatabaseError::UnsupportedStatement { .. }),
+                "expected conflict clause to be rejected: {err:?}"
+            );
+        }
     }
 }
