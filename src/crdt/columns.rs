@@ -15,7 +15,10 @@ pub const COLUMN_HLCS_COLUMN: &str = "haex_column_hlcs";
 /// uses `NoopSignatureProvider`.
 pub const COLUMN_SIGS_COLUMN: &str = "haex_column_sigs";
 
-/// Tombstone table for row-level deletes.
+/// Delete-event log: one row per hard-delete on a CRDT-managed table.
+/// Business tables carry no soft-delete column; the BEFORE-DELETE trigger
+/// writes a row here with `table_name`, `row_pks`, and the transaction HLC
+/// so the scanner can propagate the delete on the next sync.
 pub const DELETED_ROWS_TABLE: &str = "haex_deleted_rows";
 
 /// UDF that returns a fresh UUIDv4, exposed on every SQLCipher connection.

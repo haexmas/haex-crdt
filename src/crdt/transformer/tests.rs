@@ -1,8 +1,10 @@
 //! Tests for the CRDT transformer module.
 //!
-//! Since the delete-log refactor, the transformer no longer injects
-//! `haex_tombstone` columns or tombstone filters. These tests verify the
-//! remaining responsibilities:
+//! The transformer neither injects a soft-delete column nor a WHERE-filter on
+//! one — deletes are hard-deletes plus an event row in `haex_deleted_rows`.
+//! Several assertions below still probe for the string `haex_tombstone` as a
+//! regression guard against reintroducing the old soft-delete column name.
+//! These tests verify the remaining responsibilities:
 //! - CREATE TABLE gets `haex_hlc` + `haex_column_hlcs` added
 //! - CREATE UNIQUE INDEX stays untouched (no partial rewrite)
 //! - DELETE stays a DELETE
@@ -29,7 +31,7 @@ fn parse_and_transform_execute(sql: &str) -> String {
 }
 
 #[test]
-fn test_select_no_longer_adds_tombstone_filter() {
+fn test_select_no_longer_adds_soft_delete_filter() {
     let result = parse_and_transform_execute("SELECT * FROM items");
     assert!(!result.contains("haex_tombstone"), "Got: {result}");
 }

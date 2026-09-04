@@ -26,3 +26,8 @@ pub use crdt::hlc::{
     compare_hlc_strings, device_uuid_to_hlc_node, hlc_is_from_node, hlc_is_newer, hlc_max,
     hlc_min, hlc_node_id_suffix, parse_hlc_node_hex, HlcError, HlcService,
 };
+pub use crdt::trigger::{
+    drop_triggers_for_table, ensure_crdt_columns, ensure_crdt_columns_and_triggers,
+    get_table_schema, is_safe_identifier, setup_triggers_for_table, ColumnInfo, CrdtSetupError,
+    TriggerSetupResult,
+};
