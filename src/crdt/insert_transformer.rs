@@ -18,6 +18,7 @@ impl Default for InsertTransformer {
 }
 
 impl InsertTransformer {
+    /// Creates a transformer that injects the crate's row-level HLC column.
     pub fn new() -> Self {
         Self {
             hlc_timestamp_column: HLC_TIMESTAMP_COLUMN,

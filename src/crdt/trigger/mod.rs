@@ -31,6 +31,7 @@ const UPDATE_TRIGGER_TPL: &str = "z_dirty_{TABLE_NAME}_update";
 const DELETE_TRIGGER_TPL: &str = "z_dirty_{TABLE_NAME}_delete";
 
 #[derive(Debug, Error)]
+/// Errors encountered while inspecting a table or installing its CRDT triggers.
 pub enum CrdtSetupError {
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
@@ -56,21 +57,29 @@ impl From<CrdtSetupError> for DatabaseError {
 }
 
 #[derive(Debug, Serialize)]
+/// Outcome of attempting to install CRDT triggers for a table.
 pub enum TriggerSetupResult {
+    /// The table was found and the requested triggers were installed.
     Success,
+    /// No table with the requested name exists.
     TableNotFound,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+/// Schema metadata used to derive CRDT trigger expressions.
 pub struct ColumnInfo {
+    /// Column name as reported by SQLite.
     pub name: String,
     #[serde(rename = "type")]
+    /// Declared SQLite column type.
     pub column_type: String,
+    /// Whether SQLite marks this column as part of the primary key.
     pub is_pk: bool,
 }
 
 impl ColumnInfo {
+    /// Reads a column description from a `PRAGMA table_info` result row.
     pub fn from_row(row: &Row) -> RusqliteResult<Self> {
         Ok(ColumnInfo {
             name: row.get("name")?,
@@ -80,6 +89,7 @@ impl ColumnInfo {
     }
 }
 
+/// Returns whether `name` can safely be interpolated into generated SQL.
 pub fn is_safe_identifier(name: &str) -> bool {
     !name.is_empty()
         && name
@@ -167,6 +177,7 @@ pub fn setup_triggers_for_table(
     Ok(TriggerSetupResult::Success)
 }
 
+/// Returns SQLite's column metadata for `table_name`.
 pub fn get_table_schema(conn: &Connection, table_name: &str) -> RusqliteResult<Vec<ColumnInfo>> {
     if !is_safe_identifier(table_name) {
         return Err(rusqlite::Error::InvalidParameterName(format!(
@@ -180,6 +191,7 @@ pub fn get_table_schema(conn: &Connection, table_name: &str) -> RusqliteResult<V
     rows.collect()
 }
 
+/// Drops all CRDT trigger names associated with `table_name` if they exist.
 pub fn drop_triggers_for_table(
     tx: &Transaction,
     table_name: &str,
