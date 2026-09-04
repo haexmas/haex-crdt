@@ -1,0 +1,36 @@
+[package]
+name = "haex-crdt"
+version = "0.1.0-pre.0"
+edition = "2021"
+description = "SQLite + SQLCipher storage with column-level LWW CRDT sync (uhlc-based HLC). Extracted from haex-vault."
+authors = ["Haex"]
+repository = "https://github.com/haexmas/haex-crdt"
+readme = "README.md"
+
+[lib]
+name = "haex_crdt"
+
+[features]
+default = []
+# Exposes `Store::with_connection(&rusqlite::Connection)` on the public API.
+# Requires that all downstream consumers link the exact same `rusqlite`
+# version this crate resolves to. See README §rusqlite version contract.
+raw-connection = []
+
+[dependencies]
+rusqlite = { version = "0.40", features = [
+    "bundled-sqlcipher-vendored-openssl",
+    "functions",
+    "hooks",
+] }
+uhlc = "0.9"
+uuid = { version = "1", features = ["v4", "serde"] }
+sqlparser = { version = "0.62", features = ["visitor"] }
+thiserror = "2.0"
+fs2 = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
