@@ -86,6 +86,12 @@ pub struct CrdtTransformer {
     columns: CrdtColumns,
 }
 
+impl Default for CrdtTransformer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CrdtTransformer {
     pub fn new() -> Self {
         Self {
@@ -292,17 +298,26 @@ impl CrdtTransformer {
             return Ok(sql.to_string());
         }
 
-        let stmt = &mut statements[0];
-
-        if let Statement::CreateTable(create_table) = stmt {
-            if self.is_crdt_sync_table(&create_table.name) {
-                self.columns
-                    .add_to_table_definition(&mut create_table.columns);
-                return Ok(stmt.to_string());
+        let mut changed = false;
+        for stmt in &mut statements {
+            if let Statement::CreateTable(create_table) = stmt {
+                if self.is_crdt_sync_table(&create_table.name) {
+                    self.columns
+                        .add_to_table_definition(&mut create_table.columns);
+                    changed = true;
+                }
             }
         }
 
-        Ok(sql.to_string())
+        if !changed {
+            return Ok(sql.to_string());
+        }
+
+        Ok(statements
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; "))
     }
 }
 

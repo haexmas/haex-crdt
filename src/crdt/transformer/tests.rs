@@ -169,6 +169,63 @@ fn test_insert_into_sync_table_gets_hlc_column() {
 }
 
 #[test]
+fn test_insert_without_column_list_is_rejected() {
+    let dialect = SQLiteDialect {};
+    let mut statements =
+        Parser::parse_sql(&dialect, "INSERT INTO items VALUES ('a', 'b')").unwrap();
+    let transformer = CrdtTransformer::new();
+    let hlc = HLC::default();
+    let timestamp = hlc.new_timestamp();
+
+    let error = transformer
+        .transform_execute_statement(&mut statements[0], &timestamp)
+        .expect_err("INSERT without a column list must be rejected");
+    assert!(
+        error.to_string().contains("explicit column list"),
+        "Unexpected error: {error}"
+    );
+}
+
+#[test]
+fn test_insert_select_wildcard_is_rejected() {
+    let dialect = SQLiteDialect {};
+    let mut statements = Parser::parse_sql(
+        &dialect,
+        "INSERT INTO items (id, name) SELECT * FROM source",
+    )
+    .unwrap();
+    let transformer = CrdtTransformer::new();
+    let hlc = HLC::default();
+    let timestamp = hlc.new_timestamp();
+
+    let error = transformer
+        .transform_execute_statement(&mut statements[0], &timestamp)
+        .expect_err("INSERT ... SELECT * must be rejected");
+    assert!(
+        error.to_string().contains("wildcard projection"),
+        "Unexpected error: {error}"
+    );
+}
+
+#[test]
+fn transform_ddl_preserves_following_statements() {
+    let transformer = CrdtTransformer::new();
+    let out = transformer
+        .transform_ddl_statement(
+            "CREATE TABLE items (id TEXT PRIMARY KEY); CREATE INDEX idx_items_id ON items(id)",
+        )
+        .expect("transform_ddl_statement must preserve valid multi-statement SQL");
+
+    let statements = Parser::parse_sql(&SQLiteDialect {}, &out).unwrap();
+    assert_eq!(statements.len(), 2, "Got: {out}");
+    assert!(statements[0].to_string().contains("haex_hlc"), "Got: {out}");
+    assert!(
+        statements[1].to_string().contains("CREATE INDEX"),
+        "Following DDL statement was lost: {out}"
+    );
+}
+
+#[test]
 fn test_delete_from_sync_table_stays_delete() {
     let result = parse_and_transform_execute("DELETE FROM items WHERE id = 'a'");
     assert!(result.to_uppercase().contains("DELETE"));

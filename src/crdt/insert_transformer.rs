@@ -11,6 +11,12 @@ pub struct InsertTransformer {
     hlc_timestamp_column: &'static str,
 }
 
+impl Default for InsertTransformer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InsertTransformer {
     pub fn new() -> Self {
         Self {
@@ -74,6 +80,35 @@ impl InsertTransformer {
         insert_stmt: &mut Insert,
         timestamp: &Timestamp,
     ) -> Result<(), DatabaseError> {
+        // The rewrite relies on the positional correspondence between the
+        // explicit column list and the values/projection. Without a column
+        // list, index 0 would overwrite the first caller-supplied value.
+        if insert_stmt.columns.is_empty() {
+            return Err(DatabaseError::UnsupportedStatement {
+                sql: insert_stmt.to_string(),
+                reason: "INSERT without an explicit column list is not supported".to_string(),
+            });
+        }
+
+        // A wildcard projection does not expose its arity to the rewriter,
+        // so appending the HLC at a positional index would be unsafe.
+        if let Some(query) = insert_stmt.source.as_ref() {
+            if let SetExpr::Select(select) = &*query.body {
+                if select.projection.iter().any(|item| {
+                    matches!(
+                        item,
+                        SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _)
+                    )
+                }) {
+                    return Err(DatabaseError::UnsupportedStatement {
+                        sql: insert_stmt.to_string(),
+                        reason: "INSERT SELECT with a wildcard projection is not supported"
+                            .to_string(),
+                    });
+                }
+            }
+        }
+
         // Add haex_hlc column if not exists
         let hlc_col_index =
             Self::find_or_add_column(&mut insert_stmt.columns, self.hlc_timestamp_column);
