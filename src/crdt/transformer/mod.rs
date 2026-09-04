@@ -141,9 +141,10 @@ impl CrdtTransformer {
     }
 
     /// Transformiert ein SELECT Statement rekursiv (FROM- und JOIN-Subqueries).
-    /// Seit dem Delete-Log-Refactor enthalten Haupt-Tabellen keine Tombstone-Zeilen
-    /// mehr, daher gibt es hier nichts mehr zu filtern — die Funktion bleibt aber
-    /// als Rekursionseinstieg für verschachtelte Queries.
+    /// Deletes sind Hard-Deletes plus ein Event-Row im Delete-Log — Haupt-
+    /// Tabellen führen keine Soft-Delete-Spalte, daher gibt es hier nichts
+    /// mehr zu filtern. Die Funktion bleibt als Rekursionseinstieg für
+    /// verschachtelte Queries.
     fn transform_select(&self, select: &mut Select) {
         for table_with_joins in &mut select.from {
             self.transform_table_factor(&mut table_with_joins.relation);
@@ -234,8 +235,8 @@ impl CrdtTransformer {
     ) -> Result<Option<String>, DatabaseError> {
         match stmt {
             Statement::Query(query) => {
-                // Recurse into subqueries (no tombstone filter anymore — tombstones
-                // don't live in the main tables in the delete-log model).
+                // Recurse into subqueries. Hard-delete + delete-log model: main
+                // tables never carry a soft-delete column, so nothing to filter.
                 self.transform_query(query);
                 Ok(None)
             }
@@ -262,9 +263,9 @@ impl CrdtTransformer {
             Statement::Update(update) => {
                 if let TableFactor::Table { name, .. } = &update.table.relation {
                     if self.is_crdt_sync_table(name) {
-                        // Add HLC timestamp assignment. With the delete-log model
-                        // tombstoned rows no longer live in the target table, so
-                        // there is nothing to filter out.
+                        // Add HLC timestamp assignment. Hard-delete + delete-log
+                        // model: no soft-deleted rows live in the target table,
+                        // so there is nothing to filter out.
                         update
                             .assignments
                             .push(self.columns.create_hlc_assignment(hlc_timestamp));

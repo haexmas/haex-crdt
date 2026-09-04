@@ -31,3 +31,37 @@ impl DeviceIdProvider for StaticDeviceId {
         Ok(self.0)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn static_device_id_returns_wrapped_uuid() {
+        let uuid = Uuid::new_v4();
+        let provider = StaticDeviceId(uuid);
+        assert_eq!(provider.device_id().unwrap(), uuid);
+    }
+
+    #[test]
+    fn static_device_id_is_stable_across_multiple_calls() {
+        // The trait contract forbids returning a fresh UUID per call.
+        let uuid = Uuid::new_v4();
+        let provider = StaticDeviceId(uuid);
+        let first = provider.device_id().unwrap();
+        let second = provider.device_id().unwrap();
+        let third = provider.device_id().unwrap();
+        assert_eq!(first, second);
+        assert_eq!(second, third);
+    }
+
+    #[test]
+    fn device_id_provider_is_object_safe_via_dyn_dispatch() {
+        // Ensures the trait can be stored behind Arc<dyn ...> as
+        // `StoreConfig::device_id` requires (plan §6).
+        let uuid = Uuid::new_v4();
+        let provider: Arc<dyn DeviceIdProvider> = Arc::new(StaticDeviceId(uuid));
+        assert_eq!(provider.device_id().unwrap(), uuid);
+    }
+}

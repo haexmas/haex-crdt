@@ -42,9 +42,9 @@ fn register_test_udfs(conn: &Connection) {
 }
 
 /// Create the CRDT bookkeeping tables the triggers read (`configs`) and write
-/// (`dirty_tables`), plus the tombstone log the BEFORE-DELETE trigger appends
-/// to. Shapes mirror the migration in `haex-vault` so a schema divergence
-/// shows up immediately.
+/// (`dirty_tables`), plus the delete-event log the BEFORE-DELETE trigger
+/// appends to. Shapes mirror the migration in `haex-vault` so a schema
+/// divergence shows up immediately.
 fn setup_crdt_bookkeeping(conn: &Connection) {
     conn.execute_batch(&format!(
         "CREATE TABLE {TABLE_CRDT_CONFIGS} (
@@ -326,7 +326,7 @@ fn update_that_touches_only_meta_column_does_not_mark_dirty() {
 }
 
 #[test]
-fn delete_appends_tombstone_and_marks_deleted_rows_dirty() {
+fn delete_records_event_row_and_marks_deleted_rows_dirty() {
     let conn = setup_trigger_fixture();
     conn.execute(
         &format!("INSERT INTO items (id, name, body, {HLC_TIMESTAMP_COLUMN}) VALUES ('i1', 'a', 'b', 'hlc-1')"),
@@ -388,10 +388,10 @@ fn triggers_disabled_flag_suppresses_all_three_triggers() {
         .unwrap();
     assert_eq!(dirty, 0);
 
-    let tombstones: i64 = conn
+    let delete_events: i64 = conn
         .query_row(&format!("SELECT COUNT(*) FROM {DELETED_ROWS_TABLE}"), [], |r| r.get(0))
         .unwrap();
-    assert_eq!(tombstones, 0);
+    assert_eq!(delete_events, 0);
 }
 
 #[test]
@@ -436,7 +436,7 @@ fn drop_triggers_removes_all_three_installed_triggers() {
 
 #[test]
 fn setup_on_deleted_rows_table_does_not_install_self_referencing_delete_trigger() {
-    // haex_deleted_rows is the tombstone log; a DELETE trigger on it would
+    // haex_deleted_rows is the delete-event log; a DELETE trigger on it would
     // recursively log its own cleanup DELETEs. Guard against regressions.
     let conn = Connection::open_in_memory().unwrap();
     register_test_udfs(&conn);
@@ -457,7 +457,7 @@ fn setup_on_deleted_rows_table_does_not_install_self_referencing_delete_trigger(
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(count, 0, "no DELETE trigger on the tombstone log itself");
+    assert_eq!(count, 0, "no DELETE trigger on the delete-event log itself");
 }
 
 #[test]

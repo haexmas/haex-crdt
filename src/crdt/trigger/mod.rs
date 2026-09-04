@@ -2,9 +2,13 @@
 //!
 //! Ported from `haex-vault`'s `src-tauri/src/crdt/trigger.rs`, trimmed to the
 //! CRDT-generic surface: INSERT/UPDATE/DELETE triggers that populate the
-//! per-column HLC map, append tombstones to [`DELETED_ROWS_TABLE`], and mark
-//! dirty tables in [`TABLE_CRDT_DIRTY_TABLES`] so the scanner picks them up on
-//! the next sync cycle.
+//! per-column HLC map, append delete-events to [`DELETED_ROWS_TABLE`], and
+//! mark dirty tables in [`TABLE_CRDT_DIRTY_TABLES`] so the scanner picks them
+//! up on the next sync cycle.
+//!
+//! Business tables carry no soft-delete column. Deletes are hard-deletes on
+//! the source row plus one event row in [`DELETED_ROWS_TABLE`] — see the
+//! BEFORE-DELETE trigger.
 //!
 //! Haex-vault-specific concerns (shared-space register cascade, per-space
 //! delete-log fanout, MLS-specific skip lists, consumer-schema column
@@ -84,9 +88,9 @@ pub fn is_safe_identifier(name: &str) -> bool {
 /// The table must already carry the three CRDT metadata columns (see
 /// [`ensure_crdt_columns`]) and have at least one primary-key column.
 ///
-/// The BEFORE-DELETE trigger appends a row to [`DELETED_ROWS_TABLE`] on every
-/// hard-delete; that table itself is exempt (a self-referencing DELETE trigger
-/// would loop on cleanup).
+/// The BEFORE-DELETE trigger records the delete as an event row in
+/// [`DELETED_ROWS_TABLE`] on every hard-delete; that table itself is exempt
+/// (a self-referencing DELETE trigger would loop on cleanup).
 pub fn setup_triggers_for_table(
     tx: &Transaction,
     table_name: &str,

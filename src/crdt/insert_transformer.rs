@@ -114,8 +114,9 @@ impl InsertTransformer {
             Self::find_or_add_column(&mut insert_stmt.columns, self.hlc_timestamp_column);
 
         // ON CONFLICT Logik komplett entfernt!
-        // Bei Hard Deletes gibt es keine Tombstone-Einträge mehr zu reaktivieren
-        // UNIQUE Constraint Violations sind echte Fehler
+        // Bei Hard Deletes gibt es keine Soft-Delete-Marker mehr zu reaktivieren —
+        // Deletes leben ausschließlich als Event-Rows im Delete-Log.
+        // UNIQUE Constraint Violations sind echte Fehler.
         // (ON CONFLICT DO UPDATE ist bewusst nicht unterstützt — siehe Doc-Kommentar oben)
 
         match insert_stmt.source.as_mut() {
@@ -149,5 +150,125 @@ impl InsertTransformer {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Direct unit tests for `InsertTransformer`. The outer
+    //! `crate::crdt::transformer` tests exercise the same paths at
+    //! statement-transformation level; these focus on the specific
+    //! contracts of `transform_insert`.
+
+    use super::*;
+    use sqlparser::ast::Statement;
+    use sqlparser::dialect::SQLiteDialect;
+    use sqlparser::parser::Parser;
+    use uhlc::HLC;
+
+    fn hlc_now() -> Timestamp {
+        HLC::default().new_timestamp()
+    }
+
+    fn parse_insert(sql: &str) -> Statement {
+        Parser::parse_sql(&SQLiteDialect {}, sql)
+            .unwrap_or_else(|e| panic!("parse `{sql}`: {e}"))
+            .into_iter()
+            .next()
+            .expect("no statement")
+    }
+
+    fn transform(sql: &str) -> String {
+        let mut stmt = parse_insert(sql);
+        if let Statement::Insert(ref mut insert) = stmt {
+            InsertTransformer::new()
+                .transform_insert(insert, &hlc_now())
+                .expect("transform_insert must succeed");
+            stmt.to_string()
+        } else {
+            panic!("not an INSERT: {sql}");
+        }
+    }
+
+    fn transform_err(sql: &str) -> DatabaseError {
+        let mut stmt = parse_insert(sql);
+        if let Statement::Insert(ref mut insert) = stmt {
+            InsertTransformer::new()
+                .transform_insert(insert, &hlc_now())
+                .expect_err("transform_insert must fail")
+        } else {
+            panic!("not an INSERT: {sql}");
+        }
+    }
+
+    #[test]
+    fn single_row_values_gets_hlc_column_and_value_appended() {
+        let out = transform("INSERT INTO t (id, name) VALUES ('x', 'a')");
+        assert!(
+            out.contains("haex_hlc"),
+            "haex_hlc column must be added; got: {out}"
+        );
+    }
+
+    #[test]
+    fn multi_row_values_gets_hlc_appended_to_each_row() {
+        // With three rows and no pre-existing haex_hlc column, each row must
+        // carry the HLC value in the appended position.
+        let out = transform("INSERT INTO t (id) VALUES ('x'), ('y'), ('z')");
+        let occurrences = out.matches('/').count(); // uhlc timestamps look like `<ns>/<node>`
+        assert!(
+            occurrences >= 3,
+            "expected 3 HLC values (one per row); got: {out}"
+        );
+    }
+
+    #[test]
+    fn haex_hlc_already_in_column_list_overwrites_supplied_value() {
+        // If the caller supplies `haex_hlc` themselves, the transformer must
+        // overwrite the value with its own (authoritative) HLC — otherwise a
+        // client could inject a bogus HLC and skew LWW ordering.
+        let out = transform("INSERT INTO t (id, haex_hlc) VALUES ('x', 'attacker-hlc')");
+        assert!(
+            !out.contains("attacker-hlc"),
+            "caller-supplied haex_hlc must be replaced; got: {out}"
+        );
+    }
+
+    #[test]
+    fn insert_select_with_explicit_projection_gets_hlc_projected() {
+        // Non-wildcard SELECT source: projection must gain the HLC literal at
+        // the new column's index.
+        let out = transform("INSERT INTO t (id) SELECT other_id FROM other");
+        assert!(
+            out.contains("haex_hlc"),
+            "haex_hlc column must be added to INSERT SELECT; got: {out}"
+        );
+    }
+
+    #[test]
+    fn missing_column_list_is_rejected_with_unsupported_statement() {
+        let err = transform_err("INSERT INTO t VALUES ('x', 'a')");
+        assert!(
+            matches!(err, DatabaseError::UnsupportedStatement { .. }),
+            "expected UnsupportedStatement, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn wildcard_projection_is_rejected_with_unsupported_statement() {
+        let err = transform_err("INSERT INTO t (id) SELECT * FROM other");
+        assert!(
+            matches!(err, DatabaseError::UnsupportedStatement { .. }),
+            "expected UnsupportedStatement, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn qualified_wildcard_projection_is_rejected_with_unsupported_statement() {
+        let err = transform_err("INSERT INTO t (id) SELECT other.* FROM other");
+        assert!(
+            matches!(err, DatabaseError::UnsupportedStatement { .. }),
+            "expected UnsupportedStatement, got: {err:?}"
+        );
     }
 }

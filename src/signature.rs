@@ -78,3 +78,60 @@ impl SignatureProvider for NoopSignatureProvider {
         AuthorId::anonymous()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn author_id_anonymous_is_empty_string() {
+        assert_eq!(AuthorId::anonymous().0, "");
+    }
+
+    #[test]
+    fn noop_sign_column_returns_empty_payload_regardless_of_input() {
+        let p = NoopSignatureProvider;
+        assert!(p.sign_column(b"").unwrap().is_empty());
+        assert!(p.sign_column(b"some preimage").unwrap().is_empty());
+        assert!(p.sign_column(&[0xFF; 4096]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn noop_verify_column_accepts_empty_signature() {
+        let p = NoopSignatureProvider;
+        p.verify_column(b"any preimage", &[], &AuthorId("peer".into()))
+            .expect("empty sig must be accepted");
+    }
+
+    #[test]
+    fn noop_verify_column_rejects_non_empty_signature_with_unexpected_variant() {
+        let p = NoopSignatureProvider;
+        let err = p
+            .verify_column(b"preimage", b"not-empty", &AuthorId("peer".into()))
+            .unwrap_err();
+        assert!(matches!(err, Error::UnexpectedSignatureUnderNoop));
+    }
+
+    #[test]
+    fn noop_author_id_returns_anonymous() {
+        let p = NoopSignatureProvider;
+        assert_eq!(p.author_id(), AuthorId::anonymous());
+    }
+
+    #[test]
+    fn noop_on_before_apply_default_accepts_any_batch() {
+        let p = NoopSignatureProvider;
+        let changes = RemoteChanges { raw: vec![1, 2, 3] };
+        p.on_before_apply(&changes)
+            .expect("default on_before_apply must be a no-op");
+    }
+
+    #[test]
+    fn signature_provider_is_object_safe_via_dyn_dispatch() {
+        // Ensures the trait can be stored behind Arc<dyn ...> as
+        // `StoreConfig::signature_provider` requires (plan §6).
+        let provider: std::sync::Arc<dyn SignatureProvider> =
+            std::sync::Arc::new(NoopSignatureProvider);
+        assert_eq!(provider.author_id(), AuthorId::anonymous());
+    }
+}
