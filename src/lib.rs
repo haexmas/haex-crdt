@@ -31,3 +31,18 @@ pub use crdt::trigger::{
     get_table_schema, is_safe_identifier, setup_triggers_for_table, ColumnInfo, CrdtSetupError,
     TriggerSetupResult,
 };
+
+pub use db::connection_context::ConnectionContext;
+pub use db::core::{
+    convert_value_ref_to_json, extract_primary_table_name_from_sql,
+    extract_table_names_from_sql, extract_table_names_from_statement, install_tx_hlc_hooks,
+    open_and_init_db, parse_single_statement, parse_sql_statements, register_current_hlc_udf,
+    select, select_with_crdt, statement_has_returning, strip_main_schema_prefix, with_connection,
+    ValueConverter, DRIZZLE_STATEMENT_BREAKPOINT,
+};
+pub use db::init::{
+    discover_crdt_tables, ensure_triggers_for_all_tables, ensure_triggers_initialized,
+    CONFIG_KEY_TRIGGERS_ENABLED, CONFIG_KEY_TRIGGER_VERSION,
+};
+pub use db::row::{get_bool, get_string};
+pub use db::DbConnection;
