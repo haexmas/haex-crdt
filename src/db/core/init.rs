@@ -4,9 +4,8 @@
 //! Two UDFs are registered on every connection this crate hands out:
 //!
 //! - `gen_uuid()` — fresh UUIDv4 per call (used by the delete-event trigger).
-//! - `current_hlc()` — the transaction-scoped HLC. Marked `INNOCUOUS +
-//!   DETERMINISTIC` so it is legal from a trigger/view context under
-//!   `trusted_schema=OFF` and constant-folded within a single statement.
+//! - `current_hlc()` — the transaction-scoped HLC. Marked `INNOCUOUS` so it is
+//!   legal from a trigger/view context under `trusted_schema=OFF`.
 //!   Cross-statement stability inside a write transaction is provided by the
 //!   [`crate::db::connection_context::ConnectionContext`] cache plus the
 //!   commit/rollback/update hooks installed here.
@@ -100,7 +99,7 @@ pub fn open_and_init_db(
 
 /// Registers `current_hlc()` on the given connection. Exposed so tests that
 /// build bare in-memory connections can wire the UDF with the same
-/// `INNOCUOUS + DETERMINISTIC` flag set the crate uses in production.
+/// `INNOCUOUS` flag set the crate uses in production.
 pub fn register_current_hlc_udf(
     conn: &Connection,
     hlc_service: HlcService,
@@ -109,9 +108,7 @@ pub fn register_current_hlc_udf(
     conn.create_scalar_function(
         HLC_FUNCTION_NAME,
         0,
-        FunctionFlags::SQLITE_UTF8
-            | FunctionFlags::SQLITE_INNOCUOUS
-            | FunctionFlags::SQLITE_DETERMINISTIC,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
         move |_ctx| {
             context
                 .current_or_new_tx_hlc(&hlc_service)

@@ -4,18 +4,18 @@
 //! discussion in the same-named haex-vault module.
 //!
 //! An AST walker strips the qualifier only from actual table references, so
-//! string literals that happen to contain `main.foo` are preserved. A regex
-//! fallback covers input that fails to parse (raw `PRAGMA` etc.).
+//! string literals that happen to contain `main.foo` are preserved. Inputs
+//! that fail to parse are returned unchanged because they cannot be safely
+//! rewritten without quote-aware SQL tokenization.
 
-use regex::Regex;
 use sqlparser::ast::{
     Expr, FromTable, ObjectName, ObjectNamePart, Query, Select, SetExpr, Statement, TableFactor,
     TableObject,
 };
 use sqlparser::dialect::SQLiteDialect;
 use sqlparser::parser::Parser;
-use std::sync::LazyLock;
 
+/// Removes the `main.` schema qualifier from parsed SQL references.
 pub fn strip_main_schema_prefix(sql: &str) -> String {
     let dialect = SQLiteDialect {};
     if let Ok(mut statements) = Parser::parse_sql(&dialect, sql) {
@@ -28,10 +28,7 @@ pub fn strip_main_schema_prefix(sql: &str) -> String {
             .collect::<Vec<_>>()
             .join("; ")
     } else {
-        static RE: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r#"\bmain\.(["'`]?\w)"#).expect("Invalid regex for main. prefix")
-        });
-        RE.replace_all(sql, "$1").to_string()
+        sql.to_string()
     }
 }
 
@@ -162,6 +159,11 @@ fn strip_main_from_table_factor(table_factor: &mut TableFactor) {
 
 fn strip_main_from_expr(expr: &mut Expr) {
     match expr {
+        Expr::Exists {
+            ref mut subquery, ..
+        } => {
+            strip_main_from_query(subquery);
+        }
         Expr::Subquery(ref mut subquery) => {
             strip_main_from_query(subquery);
         }
@@ -249,11 +251,17 @@ mod tests {
     }
 
     #[test]
-    fn strips_prefix_via_regex_fallback_when_sql_unparseable() {
-        // Genuinely unparseable input drives the regex fallback path.
-        let out = strip_main_schema_prefix("this is not sql at all main.foo more garbage");
-        assert!(!out.contains("main.foo"), "regex fallback must fire: {out}");
-        assert!(out.contains("foo"), "the identifier itself must survive: {out}");
+    fn leaves_unparseable_sql_unchanged() {
+        // Genuinely unparseable input cannot be rewritten safely without
+        // risking changes inside literals or comments.
+        let sql = "this is not sql at all main.foo more garbage";
+        assert_eq!(strip_main_schema_prefix(sql), sql);
+    }
+
+    #[test]
+    fn preserves_main_prefix_inside_unparseable_literals_and_comments() {
+        let sql = "not valid 'main.literal' -- main.comment";
+        assert_eq!(strip_main_schema_prefix(sql), sql);
     }
 
     #[test]
@@ -273,5 +281,13 @@ mod tests {
         assert!(!out.contains("main.a"), "Got: {out}");
         assert!(!out.contains("main.b"), "Got: {out}");
         assert!(!out.contains("main.c"), "Got: {out}");
+    }
+
+    #[test]
+    fn strips_main_prefix_from_exists_subquery() {
+        let out = strip_main_schema_prefix(
+            "SELECT 1 WHERE EXISTS (SELECT 1 FROM main.inner WHERE inner.id = 1)",
+        );
+        assert!(!out.contains("main.inner"), "Got: {out}");
     }
 }

@@ -89,13 +89,19 @@ fn readonly_probe_does_not_poison_next_write_tx() {
 #[test]
 fn current_hlc_reset_on_rollback() {
     let mut conn = setup_hlc_connection("hlc-rollback");
+    conn.execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, hlc TEXT);")
+        .unwrap();
     let tx = conn.transaction().expect("begin tx");
+    tx.execute("INSERT INTO t (id, hlc) VALUES (1, current_hlc())", [])
+        .unwrap();
     let a: String = tx
-        .query_row("SELECT current_hlc()", [], |row| row.get(0))
+        .query_row("SELECT hlc FROM t WHERE id = 1", [], |row| row.get(0))
         .unwrap();
     tx.rollback().unwrap();
+    conn.execute("INSERT INTO t (id, hlc) VALUES (2, current_hlc())", [])
+        .unwrap();
     let b: String = conn
-        .query_row("SELECT current_hlc()", [], |row| row.get(0))
+        .query_row("SELECT hlc FROM t WHERE id = 2", [], |row| row.get(0))
         .unwrap();
     assert_ne!(a, b, "current_hlc() must be fresh after a rollback");
 }

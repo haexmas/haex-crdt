@@ -26,14 +26,12 @@ pub fn parse_single_statement(sql: &str) -> Result<Statement, DatabaseError> {
         })
 }
 
-/// Parses one or more SQL statements. Whitespace inside the input is
-/// normalized to single spaces before parsing to keep sqlparser's error
-/// spans human-readable.
+/// Parses one or more SQL statements while preserving the original SQL text,
+/// including whitespace inside string literals.
 pub fn parse_sql_statements(sql: &str) -> Result<Vec<Statement>, DatabaseError> {
     let dialect = SQLiteDialect {};
-    let normalized_sql = sql.split_whitespace().collect::<Vec<&str>>().join(" ");
 
-    Parser::parse_sql(&dialect, &normalized_sql).map_err(|e| DatabaseError::ParseError {
+    Parser::parse_sql(&dialect, sql).map_err(|e| DatabaseError::ParseError {
         reason: format!("Failed to parse SQL: {e}"),
         sql: sql.to_string(),
     })
@@ -81,6 +79,12 @@ mod tests {
         let sql = "SELECT 1; SELECT 2;";
         let stmts = parse_sql_statements(sql).unwrap();
         assert_eq!(stmts.len(), 2);
+    }
+
+    #[test]
+    fn preserves_whitespace_inside_string_literals() {
+        let stmts = parse_sql_statements("SELECT 'a  b'").unwrap();
+        assert_eq!(stmts[0].to_string(), "SELECT 'a  b'");
     }
 
     #[test]

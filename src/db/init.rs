@@ -76,6 +76,14 @@ pub fn ensure_triggers_initialized(
         })
         .ok();
 
+    tx.execute(
+        &format!(
+            "INSERT OR REPLACE INTO {TABLE_CRDT_CONFIGS} (key, type, value) \
+             VALUES (?, 'system', '1')"
+        ),
+        params![CONFIG_KEY_TRIGGERS_ENABLED],
+    )?;
+
     let needs_update = match current_version {
         Some(v) if v >= trigger_version => {
             tx.commit()?;
@@ -86,14 +94,6 @@ pub fn ensure_triggers_initialized(
     };
 
     let crdt_tables = discover_crdt_tables(&tx)?;
-
-    tx.execute(
-        &format!(
-            "INSERT OR REPLACE INTO {TABLE_CRDT_CONFIGS} (key, type, value) \
-             VALUES (?, 'system', '1')"
-        ),
-        params![CONFIG_KEY_TRIGGERS_ENABLED],
-    )?;
 
     for table_name in crdt_tables {
         setup_triggers_for_table(&tx, &table_name, needs_update)?;
@@ -309,6 +309,31 @@ mod tests {
         assert!(!ensure_triggers_initialized(&mut conn, 3).unwrap());
         // Second call at same version: was_already = true, no rewrite.
         assert!(ensure_triggers_initialized(&mut conn, 3).unwrap());
+    }
+
+    #[test]
+    fn same_version_initialization_reseeds_enabled_triggers() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        register_test_udfs(&conn);
+        setup_bookkeeping(&conn);
+        create_synced_table(&conn, "items");
+
+        assert!(!ensure_triggers_initialized(&mut conn, 3).unwrap());
+        conn.execute(
+            &format!("UPDATE {TABLE_CRDT_CONFIGS} SET value = '0' WHERE key = ?"),
+            params![CONFIG_KEY_TRIGGERS_ENABLED],
+        )
+        .unwrap();
+
+        assert!(ensure_triggers_initialized(&mut conn, 3).unwrap());
+        let enabled: String = conn
+            .query_row(
+                &format!("SELECT value FROM {TABLE_CRDT_CONFIGS} WHERE key = ?"),
+                params![CONFIG_KEY_TRIGGERS_ENABLED],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(enabled, "1");
     }
 
     #[test]

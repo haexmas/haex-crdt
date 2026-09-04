@@ -21,6 +21,11 @@ impl ValueConverter {
             JsonValue::Number(n) => {
                 if let Some(i) = n.as_i64() {
                     Ok(SqlValue::Integer(i))
+                } else if let Some(u) = n.as_u64() {
+                    match i64::try_from(u) {
+                        Ok(i) => Ok(SqlValue::Integer(i)),
+                        Err(_) => Ok(SqlValue::Text(n.to_string())),
+                    }
                 } else if let Some(f) = n.as_f64() {
                     Ok(SqlValue::Real(f))
                 } else {
@@ -107,6 +112,13 @@ mod tests {
     fn json_f64_maps_to_sql_real() {
         let v = ValueConverter::json_to_rusqlite_value(&json!(3.5_f64)).unwrap();
         assert!(matches!(v, SqlValue::Real(x) if (x - 3.5).abs() < f64::EPSILON));
+    }
+
+    #[test]
+    fn large_unsigned_integer_is_preserved_as_text() {
+        let number = serde_json::Number::from(u64::MAX);
+        let v = ValueConverter::json_to_rusqlite_value(&JsonValue::Number(number)).unwrap();
+        assert_eq!(v, SqlValue::Text(u64::MAX.to_string()));
     }
 
     #[test]
