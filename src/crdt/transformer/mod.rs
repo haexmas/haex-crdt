@@ -4,9 +4,9 @@ use crate::crdt::columns::{COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN, HLC_TIMESTAMP
 use crate::crdt::insert_transformer::InsertTransformer;
 use crate::db::error::DatabaseError;
 use sqlparser::ast::{
-    AlterTable, Assignment, AssignmentTarget, ColumnDef, ColumnOption, ColumnOptionDef, DataType,
-    Expr, Ident, ObjectName, ObjectNamePart, Query, Select, SetExpr, Statement, TableFactor,
-    TableObject, Value,
+    AlterTable, Assignment, AssignmentTarget, ColumnDef, ColumnOption, ColumnOptionDef,
+    CreateTable, DataType, Expr, Ident, ObjectName, ObjectNamePart, Query, Select, SetExpr,
+    Statement, TableFactor, TableObject, Value,
 };
 use std::borrow::Cow;
 use uhlc::Timestamp;
@@ -202,6 +202,23 @@ impl CrdtTransformer {
         }
     }
 
+    fn add_crdt_columns_to_create_table(
+        &self,
+        create_table: &mut CreateTable,
+    ) -> Result<(), DatabaseError> {
+        if create_table.query.is_some() {
+            return Err(DatabaseError::UnsupportedStatement {
+                sql: create_table.to_string(),
+                reason: "CREATE TABLE ... AS SELECT is not supported for CRDT-synced tables"
+                    .to_string(),
+            });
+        }
+
+        self.columns
+            .add_to_table_definition(&mut create_table.columns);
+        Ok(())
+    }
+
     // =================================================================
     // ÖFFENTLICHE API-METHODEN
     // =================================================================
@@ -224,8 +241,7 @@ impl CrdtTransformer {
             }
             Statement::CreateTable(create_table) => {
                 if self.is_crdt_sync_table(&create_table.name) {
-                    self.columns
-                        .add_to_table_definition(&mut create_table.columns);
+                    self.add_crdt_columns_to_create_table(create_table)?;
                     Ok(Some(
                         self.normalize_table_name(&create_table.name).into_owned(),
                     ))
@@ -302,8 +318,7 @@ impl CrdtTransformer {
         for stmt in &mut statements {
             if let Statement::CreateTable(create_table) = stmt {
                 if self.is_crdt_sync_table(&create_table.name) {
-                    self.columns
-                        .add_to_table_definition(&mut create_table.columns);
+                    self.add_crdt_columns_to_create_table(create_table)?;
                     changed = true;
                 }
             }

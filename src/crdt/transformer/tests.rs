@@ -226,6 +226,38 @@ fn transform_ddl_preserves_following_statements() {
 }
 
 #[test]
+fn test_execute_create_table_as_select_is_rejected_for_sync_tables() {
+    let dialect = SQLiteDialect {};
+    let mut statements =
+        Parser::parse_sql(&dialect, "CREATE TABLE items AS SELECT 1 AS id").unwrap();
+    let transformer = CrdtTransformer::new();
+    let timestamp = HLC::default().new_timestamp();
+
+    let error = transformer
+        .transform_execute_statement(&mut statements[0], &timestamp)
+        .expect_err("sync-table CTAS must be rejected");
+
+    assert!(
+        error.to_string().contains("CREATE TABLE ... AS SELECT"),
+        "Unexpected error: {error}"
+    );
+}
+
+#[test]
+fn test_ddl_create_table_as_select_is_rejected_for_sync_tables() {
+    let transformer = CrdtTransformer::new();
+
+    let error = transformer
+        .transform_ddl_statement("CREATE TABLE items AS SELECT 1 AS id")
+        .expect_err("sync-table CTAS must be rejected");
+
+    assert!(
+        error.to_string().contains("CREATE TABLE ... AS SELECT"),
+        "Unexpected error: {error}"
+    );
+}
+
+#[test]
 fn test_delete_from_sync_table_stays_delete() {
     let result = parse_and_transform_execute("DELETE FROM items WHERE id = 'a'");
     assert!(result.to_uppercase().contains("DELETE"));
