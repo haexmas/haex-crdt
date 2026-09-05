@@ -170,6 +170,27 @@ fn scan_rejects_table_without_primary_key() {
 }
 
 #[test]
+fn scan_rejects_table_without_required_crdt_metadata() {
+    let (conn, _hlc, dev) = make_fixture();
+    conn.execute(
+        "CREATE TABLE t (id TEXT PRIMARY KEY NOT NULL, body TEXT)",
+        [],
+    )
+    .unwrap();
+
+    let err =
+        scan_table_for_local_changes(&conn, "t", None, &dev.to_string(), None, None).unwrap_err();
+    match err {
+        DatabaseError::ExecutionError { reason, table, .. } => {
+            assert_eq!(table.as_deref(), Some("t"));
+            assert!(reason.contains(HLC_TIMESTAMP_COLUMN));
+            assert!(reason.contains(COLUMN_HLCS_COLUMN));
+        }
+        other => panic!("expected a descriptive metadata error, got {other:?}"),
+    }
+}
+
+#[test]
 fn scan_emits_one_change_per_data_column_after_insert() {
     let (conn, hlc, dev) = make_fixture();
     create_crdt_table(&conn, "items", "name TEXT, body TEXT");
@@ -407,7 +428,7 @@ fn sig_passes_through_as_raw_json_when_present() {
     // arbitrary nested shape for a phantom column to prove the crate
     // does not enforce a schema.
     conn.execute(
-        "UPDATE items SET haex_column_sigs = ?1 WHERE id = 'i1'",
+        &format!("UPDATE items SET {COLUMN_SIGS_COLUMN} = ?1 WHERE id = 'i1'"),
         [r#"{"name": "sig-bytes-b64", "phantom": {"space_a": "nested"}}"#],
     )
     .unwrap();

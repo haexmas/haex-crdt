@@ -71,7 +71,8 @@ pub struct LocalColumnChange {
 
 /// Lists tables the trigger installer has marked dirty (see
 /// [`crate::crdt::trigger::setup_triggers_for_table`]). Returns the names
-/// in insertion order — the consumer decides how to drain the queue.
+/// ordered by ascending `last_modified`, with `table_name` ascending as the
+/// tie-breaker.
 pub fn scan_dirty_tables(conn: &Connection) -> Result<Vec<String>, DatabaseError> {
     let mut stmt = conn.prepare(&format!(
         "SELECT table_name FROM {TABLE_CRDT_DIRTY_TABLES} ORDER BY last_modified ASC, table_name ASC"
@@ -137,6 +138,26 @@ pub fn scan_table_for_local_changes(
     for col in &data_columns {
         select_columns.push(&col.name);
     }
+    let has_hlc_timestamp = schema.iter().any(|c| c.name == HLC_TIMESTAMP_COLUMN);
+    let has_column_hlcs = schema.iter().any(|c| c.name == COLUMN_HLCS_COLUMN);
+    if !has_hlc_timestamp || !has_column_hlcs {
+        let missing_columns: Vec<&str> = [
+            (HLC_TIMESTAMP_COLUMN, has_hlc_timestamp),
+            (COLUMN_HLCS_COLUMN, has_column_hlcs),
+        ]
+        .into_iter()
+        .filter_map(|(column, present)| (!present).then_some(column))
+        .collect();
+        return Err(DatabaseError::ExecutionError {
+            sql: format!("PRAGMA table_info(\"{table_name}\")"),
+            reason: format!(
+                "Table '{table_name}' is missing required CRDT metadata column(s): {}",
+                missing_columns.join(", ")
+            ),
+            table: Some(table_name.to_string()),
+        });
+    }
+
     select_columns.push(HLC_TIMESTAMP_COLUMN);
     select_columns.push(COLUMN_HLCS_COLUMN);
     let has_column_sigs = schema.iter().any(|c| c.name == COLUMN_SIGS_COLUMN);
