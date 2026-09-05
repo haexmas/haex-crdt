@@ -49,6 +49,10 @@ pub use crdt::cleanup::{
     cleanup_deleted_rows, get_crdt_stats, with_fk_disabled, CleanupResult, CrdtStats,
     ForeignKeyGuard, RetentionPolicy,
 };
+pub use crdt::scanner::{
+    paginate_changes, scan_dirty_tables, scan_table_for_local_changes, LocalColumnChange,
+    PULL_PAGE_BUDGET,
+};
 
 pub use db::connection_context::ConnectionContext;
 pub use db::core::{

@@ -1,0 +1,503 @@
+//! Tests for the scanner module.
+
+use super::*;
+use crate::crdt::columns::{
+    COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN, HLC_TIMESTAMP_COLUMN, UUID_FUNCTION_NAME,
+};
+use crate::crdt::hlc::{device_uuid_to_hlc_node, HlcService};
+use crate::crdt::trigger::{ensure_crdt_columns_and_triggers, setup_triggers_for_table};
+use crate::db::connection_context::ConnectionContext;
+use crate::db::core::init::{install_tx_hlc_hooks, register_current_hlc_udf};
+use crate::table_names::{TABLE_CRDT_CONFIGS, TABLE_CRDT_DIRTY_TABLES};
+use rusqlite::functions::FunctionFlags;
+use rusqlite::Connection;
+use serde_json::json;
+use std::collections::HashSet;
+use uuid::Uuid;
+
+// -----------------------------------------------------------------------
+// Fixtures
+// -----------------------------------------------------------------------
+
+fn setup_bookkeeping(conn: &Connection) {
+    conn.execute_batch(&format!(
+        "CREATE TABLE {TABLE_CRDT_CONFIGS} (
+             key TEXT PRIMARY KEY NOT NULL,
+             value TEXT,
+             type TEXT
+         );
+         CREATE TABLE {TABLE_CRDT_DIRTY_TABLES} (
+             table_name TEXT PRIMARY KEY NOT NULL,
+             last_modified TEXT
+         );
+         INSERT INTO {TABLE_CRDT_CONFIGS} (key, type, value)
+         VALUES ('triggers_enabled', 'system', '1');
+
+         CREATE TABLE haex_deleted_rows (
+             id TEXT PRIMARY KEY NOT NULL,
+             table_name TEXT NOT NULL,
+             row_pks TEXT NOT NULL,
+             {HLC_TIMESTAMP_COLUMN} TEXT,
+             {COLUMN_HLCS_COLUMN} TEXT NOT NULL DEFAULT '{{}}',
+             {COLUMN_SIGS_COLUMN} TEXT NOT NULL DEFAULT '{{}}'
+         );
+         CREATE TABLE haex_hlc_state (
+             id INTEGER PRIMARY KEY CHECK (id = 1),
+             timestamp TEXT NOT NULL
+         );"
+    ))
+    .expect("bookkeeping");
+}
+
+fn register_udfs(conn: &Connection, hlc: HlcService) {
+    let ctx = ConnectionContext::new();
+    conn.create_scalar_function(
+        UUID_FUNCTION_NAME,
+        0,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
+        |_| Ok(Uuid::new_v4().to_string()),
+    )
+    .expect("gen_uuid");
+    register_current_hlc_udf(conn, hlc, ctx.clone()).expect("current_hlc");
+    install_tx_hlc_hooks(conn, ctx).expect("hooks");
+}
+
+fn create_crdt_table(conn: &Connection, name: &str, extra_cols: &str) {
+    conn.execute(
+        &format!(
+            "CREATE TABLE {name} (
+                 id TEXT PRIMARY KEY NOT NULL{extra_sep}{extra_cols}
+             )",
+            extra_sep = if extra_cols.is_empty() { "" } else { ",\n                 " }
+        ),
+        [],
+    )
+    .unwrap();
+    let tx = conn.unchecked_transaction().unwrap();
+    ensure_crdt_columns_and_triggers(&tx, name).unwrap();
+    tx.commit().unwrap();
+}
+
+fn insert_row_via_transformer(
+    conn: &Connection,
+    hlc_service: &HlcService,
+    sql: &str,
+) -> String {
+    use crate::crdt::transformer::CrdtTransformer;
+    use crate::db::core::strip_main_schema_prefix;
+
+    let ts = hlc_service.new_timestamp().unwrap();
+    hlc_service.update_with_timestamp(&ts).unwrap();
+    let tx = conn.unchecked_transaction().unwrap();
+    HlcService::persist_timestamp(&tx, &ts).unwrap();
+    let mut stmt = crate::db::core::parse_single_statement(sql).unwrap();
+    let transformer = CrdtTransformer::new();
+    transformer.transform_execute_statement(&mut stmt, &ts).unwrap();
+    let rewritten = strip_main_schema_prefix(&stmt.to_string());
+    tx.execute(&rewritten, []).unwrap();
+    tx.commit().unwrap();
+    ts.to_string()
+}
+
+fn make_fixture() -> (Connection, HlcService, Uuid) {
+    let conn = Connection::open_in_memory().unwrap();
+    let device_uuid = Uuid::new_v4();
+    let hlc = HlcService::new_with_uuid(device_uuid);
+    register_udfs(&conn, hlc.clone());
+    setup_bookkeeping(&conn);
+    (conn, hlc, device_uuid)
+}
+
+// -----------------------------------------------------------------------
+// scan_dirty_tables
+// -----------------------------------------------------------------------
+
+#[test]
+fn scan_dirty_tables_returns_empty_when_none_marked() {
+    let (conn, _hlc, _dev) = make_fixture();
+    assert!(scan_dirty_tables(&conn).unwrap().is_empty());
+}
+
+#[test]
+fn scan_dirty_tables_returns_tables_the_trigger_marked() {
+    let (conn, hlc, _dev) = make_fixture();
+    create_crdt_table(&conn, "items", "body TEXT");
+    create_crdt_table(&conn, "notes", "body TEXT");
+
+    insert_row_via_transformer(
+        &conn,
+        &hlc,
+        "INSERT INTO items (id, body) VALUES ('i1', 'a')",
+    );
+    insert_row_via_transformer(
+        &conn,
+        &hlc,
+        "INSERT INTO notes (id, body) VALUES ('n1', 'a')",
+    );
+
+    let dirty = scan_dirty_tables(&conn).unwrap();
+    assert!(dirty.contains(&"items".to_string()));
+    assert!(dirty.contains(&"notes".to_string()));
+}
+
+// -----------------------------------------------------------------------
+// scan_table_for_local_changes — happy paths
+// -----------------------------------------------------------------------
+
+#[test]
+fn scan_returns_empty_for_missing_table() {
+    let (conn, _hlc, dev) = make_fixture();
+    assert!(scan_table_for_local_changes(&conn, "no_such", None, &dev.to_string(), None, None)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn scan_rejects_table_without_primary_key() {
+    let (conn, _hlc, dev) = make_fixture();
+    // No PK, but with an haex_hlc column so it looks CRDT-flavoured.
+    conn.execute(
+        &format!(
+            "CREATE TABLE t (a TEXT, {HLC_TIMESTAMP_COLUMN} TEXT, \
+             {COLUMN_HLCS_COLUMN} TEXT NOT NULL DEFAULT '{{}}')"
+        ),
+        [],
+    )
+    .unwrap();
+    let err =
+        scan_table_for_local_changes(&conn, "t", None, &dev.to_string(), None, None).unwrap_err();
+    assert!(matches!(err, DatabaseError::ExecutionError { .. }));
+}
+
+#[test]
+fn scan_emits_one_change_per_data_column_after_insert() {
+    let (conn, hlc, dev) = make_fixture();
+    create_crdt_table(&conn, "items", "name TEXT, body TEXT");
+    insert_row_via_transformer(
+        &conn,
+        &hlc,
+        "INSERT INTO items (id, name, body) VALUES ('i1', 'a', 'b')",
+    );
+
+    let changes =
+        scan_table_for_local_changes(&conn, "items", None, &dev.to_string(), None, None).unwrap();
+    // Two data columns: name + body.
+    let cols: HashSet<&str> = changes.iter().map(|c| c.column_name.as_str()).collect();
+    assert_eq!(cols.len(), 2);
+    assert!(cols.contains("name"));
+    assert!(cols.contains("body"));
+    // Row key is canonical JSON in schema-declaration order.
+    for c in &changes {
+        assert_eq!(c.row_pks, r#"{"id":"i1"}"#);
+        assert_eq!(c.table_name, "items");
+        assert_eq!(c.device_id, dev.to_string());
+    }
+}
+
+#[test]
+fn scan_excludes_pks_and_crdt_meta_from_emitted_columns() {
+    let (conn, hlc, dev) = make_fixture();
+    create_crdt_table(&conn, "items", "name TEXT");
+    insert_row_via_transformer(&conn, &hlc, "INSERT INTO items (id, name) VALUES ('i1', 'a')");
+
+    let changes =
+        scan_table_for_local_changes(&conn, "items", None, &dev.to_string(), None, None).unwrap();
+    for c in &changes {
+        assert_ne!(c.column_name, "id", "PK must not emit");
+        assert_ne!(c.column_name, HLC_TIMESTAMP_COLUMN);
+        assert_ne!(c.column_name, COLUMN_HLCS_COLUMN);
+        assert_ne!(c.column_name, COLUMN_SIGS_COLUMN);
+    }
+}
+
+// -----------------------------------------------------------------------
+// after_hlc cursor
+// -----------------------------------------------------------------------
+
+#[test]
+fn scan_with_cursor_only_emits_columns_newer_than_it() {
+    let (conn, hlc, dev) = make_fixture();
+    create_crdt_table(&conn, "items", "name TEXT, body TEXT");
+    let t1 = insert_row_via_transformer(
+        &conn,
+        &hlc,
+        "INSERT INTO items (id, name, body) VALUES ('i1', 'a', 'b')",
+    );
+    // Update only the `body` column so its per-column HLC advances past t1.
+    let _t2 = insert_row_via_transformer(
+        &conn,
+        &hlc,
+        "UPDATE items SET body = 'b2' WHERE id = 'i1'",
+    );
+
+    let changes =
+        scan_table_for_local_changes(&conn, "items", Some(&t1), &dev.to_string(), None, None)
+            .unwrap();
+    // Only the body-column change is newer than t1; the name column's HLC
+    // remained at t1 and is filtered out by the strict `>` check.
+    let cols: Vec<&str> = changes.iter().map(|c| c.column_name.as_str()).collect();
+    assert_eq!(cols, vec!["body"]);
+    assert_eq!(changes[0].value, json!("b2"));
+}
+
+// -----------------------------------------------------------------------
+// origin_node_filter (ping-pong prevention)
+// -----------------------------------------------------------------------
+
+#[test]
+fn origin_node_filter_emits_only_this_nodes_writes() {
+    let (conn, hlc, dev) = make_fixture();
+    create_crdt_table(&conn, "items", "name TEXT");
+    insert_row_via_transformer(
+        &conn,
+        &hlc,
+        "INSERT INTO items (id, name) VALUES ('i1', 'ours')",
+    );
+    // A row whose per-column HLC carries a DIFFERENT node id (simulates a
+    // row applied from a remote peer). Insert directly (no transformer) so
+    // we control the HLC node-id encoded in `haex_column_hlcs`. Node IDs
+    // are 32-hex-char (16-byte) uhlc IDs.
+    let foreign_hlc = "42/deadbeefdeadbeefdeadbeefdeadbe";
+    let foreign_column_hlcs = format!("{{\"name\":\"{foreign_hlc}\"}}");
+    conn.execute(
+        &format!(
+            "INSERT INTO items (id, name, {HLC_TIMESTAMP_COLUMN}, {COLUMN_HLCS_COLUMN}) \
+             VALUES ('i2', 'theirs', ?1, ?2)"
+        ),
+        [foreign_hlc, foreign_column_hlcs.as_str()],
+    )
+    .unwrap();
+
+    let our_node = device_uuid_to_hlc_node(&dev.to_string()).expect("dev uuid parses");
+    let changes = scan_table_for_local_changes(
+        &conn,
+        "items",
+        None,
+        &dev.to_string(),
+        Some(our_node),
+        None,
+    )
+    .unwrap();
+
+    // Only i1 (our write) should surface; i2 was authored elsewhere.
+    let names: Vec<&JsonValue> = changes.iter().map(|c| &c.value).collect();
+    assert_eq!(names, vec![&json!("ours")]);
+}
+
+// -----------------------------------------------------------------------
+// row_pks_filter (allow-list)
+// -----------------------------------------------------------------------
+
+#[test]
+fn row_pks_filter_restricts_scan_to_allow_listed_rows() {
+    let (conn, hlc, dev) = make_fixture();
+    create_crdt_table(&conn, "items", "name TEXT");
+    insert_row_via_transformer(
+        &conn,
+        &hlc,
+        "INSERT INTO items (id, name) VALUES ('i1', 'a')",
+    );
+    insert_row_via_transformer(
+        &conn,
+        &hlc,
+        "INSERT INTO items (id, name) VALUES ('i2', 'b')",
+    );
+    insert_row_via_transformer(
+        &conn,
+        &hlc,
+        "INSERT INTO items (id, name) VALUES ('i3', 'c')",
+    );
+
+    let mut wanted = HashSet::new();
+    wanted.insert(r#"{"id":"i1"}"#.to_string());
+    wanted.insert(r#"{"id":"i3"}"#.to_string());
+
+    let changes = scan_table_for_local_changes(
+        &conn,
+        "items",
+        None,
+        &dev.to_string(),
+        None,
+        Some(&wanted),
+    )
+    .unwrap();
+    let pks: HashSet<&str> = changes.iter().map(|c| c.row_pks.as_str()).collect();
+    assert_eq!(pks.len(), 2);
+    assert!(pks.contains(r#"{"id":"i1"}"#));
+    assert!(pks.contains(r#"{"id":"i3"}"#));
+    assert!(!pks.contains(r#"{"id":"i2"}"#));
+}
+
+#[test]
+fn row_pks_filter_composite_pk_matches_schema_declaration_order() {
+    let (conn, hlc, _dev) = make_fixture();
+    // Composite PK declared as (col_b, col_a) — schema order is
+    // deliberately non-alphabetical so the test catches accidental
+    // sorted-key encoding.
+    conn.execute(
+        &format!(
+            "CREATE TABLE composites (
+                 col_b TEXT NOT NULL,
+                 col_a TEXT NOT NULL,
+                 body TEXT,
+                 {HLC_TIMESTAMP_COLUMN} TEXT,
+                 {COLUMN_HLCS_COLUMN} TEXT NOT NULL DEFAULT '{{}}',
+                 {COLUMN_SIGS_COLUMN} TEXT NOT NULL DEFAULT '{{}}',
+                 PRIMARY KEY (col_b, col_a)
+             )"
+        ),
+        [],
+    )
+    .unwrap();
+    {
+        let tx = conn.unchecked_transaction().unwrap();
+        setup_triggers_for_table(&tx, "composites", false).unwrap();
+        tx.commit().unwrap();
+    }
+    insert_row_via_transformer(
+        &conn,
+        &hlc,
+        "INSERT INTO composites (col_b, col_a, body) VALUES ('yy', 'xx', 'hi')",
+    );
+
+    let dev = "test-device";
+    // Alphabetical key encoding would be `{"col_a":"xx","col_b":"yy"}` —
+    // the scanner MUST NOT accept that; only the schema-declaration form
+    // `{"col_b":"yy","col_a":"xx"}` matches.
+    let mut wrong = HashSet::new();
+    wrong.insert(r#"{"col_a":"xx","col_b":"yy"}"#.to_string());
+    let changes =
+        scan_table_for_local_changes(&conn, "composites", None, dev, None, Some(&wrong)).unwrap();
+    assert!(
+        changes.is_empty(),
+        "alphabetical-order key encoding must not match; got: {changes:?}"
+    );
+
+    let mut right = HashSet::new();
+    right.insert(r#"{"col_b":"yy","col_a":"xx"}"#.to_string());
+    let changes =
+        scan_table_for_local_changes(&conn, "composites", None, dev, None, Some(&right)).unwrap();
+    assert!(!changes.is_empty(), "schema-declaration form must match");
+    for c in &changes {
+        assert_eq!(c.row_pks, r#"{"col_b":"yy","col_a":"xx"}"#);
+    }
+}
+
+// -----------------------------------------------------------------------
+// Sig pass-through
+// -----------------------------------------------------------------------
+
+#[test]
+fn sig_is_none_when_column_sigs_are_absent() {
+    let (conn, hlc, dev) = make_fixture();
+    create_crdt_table(&conn, "items", "name TEXT");
+    insert_row_via_transformer(&conn, &hlc, "INSERT INTO items (id, name) VALUES ('i1', 'a')");
+    let changes =
+        scan_table_for_local_changes(&conn, "items", None, &dev.to_string(), None, None).unwrap();
+    assert!(changes.iter().all(|c| c.sig.is_none()));
+}
+
+#[test]
+fn sig_passes_through_as_raw_json_when_present() {
+    let (conn, hlc, dev) = make_fixture();
+    create_crdt_table(&conn, "items", "name TEXT");
+    insert_row_via_transformer(&conn, &hlc, "INSERT INTO items (id, name) VALUES ('i1', 'a')");
+    // A downstream PostWriteHook would normally write here. Simulate by
+    // directly setting a mixed shape: a plain sig for `name`, an
+    // arbitrary nested shape for a phantom column to prove the crate
+    // does not enforce a schema.
+    conn.execute(
+        "UPDATE items SET haex_column_sigs = ?1 WHERE id = 'i1'",
+        [r#"{"name": "sig-bytes-b64", "phantom": {"space_a": "nested"}}"#],
+    )
+    .unwrap();
+    let changes =
+        scan_table_for_local_changes(&conn, "items", None, &dev.to_string(), None, None).unwrap();
+    let for_name = changes.iter().find(|c| c.column_name == "name").unwrap();
+    assert_eq!(for_name.sig, Some(json!("sig-bytes-b64")));
+}
+
+// -----------------------------------------------------------------------
+// paginate_changes
+// -----------------------------------------------------------------------
+
+fn change(hlc: &str, table: &str, col: &str, value: &str) -> LocalColumnChange {
+    LocalColumnChange {
+        table_name: table.to_string(),
+        row_pks: r#"{"id":"r"}"#.to_string(),
+        column_name: col.to_string(),
+        hlc_timestamp: hlc.to_string(),
+        value: json!(value),
+        device_id: "dev".to_string(),
+        sig: None,
+    }
+}
+
+#[test]
+fn paginate_empty_input_returns_empty_and_no_more() {
+    let (page, has_more) = paginate_changes(Vec::new(), 1000);
+    assert!(page.is_empty());
+    assert!(!has_more);
+}
+
+#[test]
+fn paginate_packs_multiple_hlc_groups_when_they_fit() {
+    let changes = vec![
+        change("100/n", "t", "a", "aa"),
+        change("100/n", "t", "b", "bb"),
+        change("200/n", "t", "a", "cc"),
+    ];
+    let (page, has_more) = paginate_changes(changes.clone(), 10_000);
+    assert_eq!(page.len(), 3);
+    assert!(!has_more);
+}
+
+#[test]
+fn paginate_never_splits_a_transaction_hlc_group() {
+    // A tiny budget: two large-ish groups. The first fits (≥1 rule); the
+    // second exceeds the remaining budget and defers as one atomic group.
+    let big_group = vec![
+        change("100/n", "t", "a", &"x".repeat(50)),
+        change("100/n", "t", "b", &"x".repeat(50)),
+    ];
+    let follow_up = vec![change("200/n", "t", "a", &"y".repeat(50))];
+    let mut all = big_group.clone();
+    all.extend(follow_up);
+
+    let (page, has_more) = paginate_changes(all, 200);
+    // The first group's two changes stay together; the follow-up defers.
+    let hlcs: HashSet<&str> = page.iter().map(|c| c.hlc_timestamp.as_str()).collect();
+    assert_eq!(hlcs.len(), 1);
+    assert!(hlcs.contains("100/n"));
+    assert!(has_more);
+}
+
+#[test]
+fn paginate_ge_one_rule_admits_first_group_even_when_over_budget() {
+    // First group alone exceeds the budget: it must still be emitted, and
+    // has_more must be true if later groups exist.
+    let over = vec![
+        change("100/n", "t", "a", &"x".repeat(500)),
+        change("200/n", "t", "a", "b"),
+    ];
+    let (page, has_more) = paginate_changes(over, 50);
+    // Only the first group appears.
+    let hlcs: HashSet<&str> = page.iter().map(|c| c.hlc_timestamp.as_str()).collect();
+    assert!(hlcs.contains("100/n"));
+    assert!(!hlcs.contains("200/n"));
+    assert!(has_more);
+}
+
+#[test]
+fn paginate_orders_groups_ascending_by_hlc() {
+    // Insertion order is deliberately shuffled — the output must be sorted
+    // by HLC ascending.
+    let mixed = vec![
+        change("300/n", "t", "a", "c"),
+        change("100/n", "t", "a", "a"),
+        change("200/n", "t", "a", "b"),
+    ];
+    let (page, _) = paginate_changes(mixed, 10_000);
+    let hlcs: Vec<&str> = page.iter().map(|c| c.hlc_timestamp.as_str()).collect();
+    assert_eq!(hlcs, vec!["100/n", "200/n", "300/n"]);
+}
