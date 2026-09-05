@@ -43,6 +43,23 @@ fn foreign_key_guard_reenables_on_drop_via_block_end() {
 }
 
 #[test]
+fn foreign_key_guard_preserves_initially_disabled_state_and_nesting() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute("PRAGMA foreign_keys = OFF", []).unwrap();
+    assert!(!fk_state(&conn));
+
+    {
+        let _outer = ForeignKeyGuard::disable(&conn).unwrap();
+        {
+            let _inner = ForeignKeyGuard::disable(&conn).unwrap();
+            assert!(!fk_state(&conn));
+        }
+        assert!(!fk_state(&conn));
+    }
+    assert!(!fk_state(&conn));
+}
+
+#[test]
 fn foreign_key_guard_reenables_on_early_return_via_question_mark() {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
@@ -96,6 +113,48 @@ fn with_fk_disabled_reenables_on_panic() {
     }));
     assert!(payload.is_err(), "panic must propagate");
     assert!(fk_state(&conn), "FK must be re-enabled after a panic");
+}
+
+#[test]
+fn with_fk_disabled_preserves_initially_disabled_state_on_ok_err_and_panic() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    conn.execute("PRAGMA foreign_keys = OFF", []).unwrap();
+    assert!(!fk_state(&conn));
+
+    let _: Result<(), rusqlite::Error> = with_fk_disabled(&mut conn, |_| Ok(()));
+    assert!(!fk_state(&conn));
+
+    let err: Result<(), rusqlite::Error> = with_fk_disabled(&mut conn, |c| {
+        c.execute("INVALID SQL", [])?;
+        Ok(())
+    });
+    assert!(err.is_err());
+    assert!(!fk_state(&conn));
+
+    let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _: Result<(), rusqlite::Error> = with_fk_disabled(&mut conn, |_| panic!("simulated"));
+    }));
+    assert!(payload.is_err(), "panic must propagate");
+    assert!(!fk_state(&conn));
+}
+
+#[test]
+fn with_fk_disabled_preserves_outer_disabled_scope_when_nested() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
+
+    let result: Result<(), rusqlite::Error> = with_fk_disabled(&mut conn, |outer| {
+        assert!(!fk_state(outer));
+        with_fk_disabled(outer, |inner| {
+            assert!(!fk_state(inner));
+            Ok::<(), rusqlite::Error>(())
+        })?;
+        assert!(!fk_state(outer));
+        Ok(())
+    });
+
+    result.unwrap();
+    assert!(fk_state(&conn));
 }
 
 #[test]
@@ -169,6 +228,18 @@ fn insert_delete_log_row(conn: &Connection, id: &str, hlc: &str) {
     .unwrap();
 }
 
+/// Inserts a tombstone that cannot yet be covered by an anti-resurrection anchor.
+fn insert_delete_log_row_without_hlc(conn: &Connection, id: &str) {
+    conn.execute(
+        &format!(
+            "INSERT INTO {DELETED_ROWS_TABLE} (id, table_name, row_pks, {HLC_TIMESTAMP_COLUMN}) \
+             VALUES (?1, 'items', '{{\"id\":\"x\"}}', NULL)"
+        ),
+        [id],
+    )
+    .unwrap();
+}
+
 fn set_current_hlc(conn: &Connection, hlc: &str) {
     conn.execute(
         &format!(
@@ -213,6 +284,26 @@ fn retention_all_reports_max_pruned_hlc() {
     let result =
         cleanup_deleted_rows(&mut conn, RetentionPolicy::All, |_, _| Ok(())).unwrap();
     assert_eq!(result.max_pruned_hlc, Some(hlc_at(10)));
+}
+
+#[test]
+fn retention_all_keeps_rows_without_an_anchorable_hlc() {
+    let mut conn = setup_cleanup_db();
+    insert_delete_log_row(&conn, "anchorable", &hlc_at(5));
+    insert_delete_log_row_without_hlc(&conn, "unanchorable");
+
+    let result =
+        cleanup_deleted_rows(&mut conn, RetentionPolicy::All, |_, _| Ok(())).unwrap();
+
+    assert_eq!(result.rows_deleted, 1);
+    assert_eq!(result.max_pruned_hlc, Some(hlc_at(5)));
+    assert_eq!(count_delete_log(&conn), 1);
+    let remaining_id: String = conn
+        .query_row(&format!("SELECT id FROM {DELETED_ROWS_TABLE}"), [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(remaining_id, "unanchorable");
 }
 
 #[test]
@@ -278,6 +369,34 @@ fn retention_time_based_all_entries_fresher_than_cutoff_is_noop() {
     assert_eq!(result.rows_deleted, 0);
     assert_eq!(result.max_pruned_hlc, None);
     assert_eq!(count_delete_log(&conn), 1);
+}
+
+#[test]
+fn retention_time_based_uses_same_cutoff_before_and_after_hook() {
+    let mut conn = setup_cleanup_db();
+    set_current_hlc(&conn, &hlc_at(10 * NS_PER_DAY));
+    insert_delete_log_row(&conn, "old", &hlc_at(5 * NS_PER_DAY));
+    insert_delete_log_row(&conn, "fresh", &hlc_at(8 * NS_PER_DAY));
+
+    let result = cleanup_deleted_rows(
+        &mut conn,
+        RetentionPolicy::TimeBasedDays { days: 3 },
+        |tx, max_hlc| {
+            assert_eq!(max_hlc, Some(hlc_at(5 * NS_PER_DAY).as_str()));
+            set_current_hlc(tx, &hlc_at(20 * NS_PER_DAY));
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert_eq!(result.rows_deleted, 1);
+    assert_eq!(result.max_pruned_hlc, Some(hlc_at(5 * NS_PER_DAY)));
+    let remaining_id: String = conn
+        .query_row(&format!("SELECT id FROM {DELETED_ROWS_TABLE}"), [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(remaining_id, "fresh");
 }
 
 #[test]

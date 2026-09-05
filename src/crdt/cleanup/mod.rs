@@ -28,30 +28,35 @@ use uhlc::Timestamp;
 // -----------------------------------------------------------------------
 
 /// RAII guard that turns off `PRAGMA foreign_keys` for the duration of a
-/// block and turns it back on when the guard goes out of scope.
+/// block and restores its previous state when the guard goes out of scope.
 ///
 /// Use this instead of manual `pragma_update(..., "OFF") ... pragma_update(..., "ON")`
 /// pairs: if anything between the calls returns early via `?` the manual
 /// version leaves FK checks disabled on a shared `Connection`, silently
 /// breaking referential integrity for subsequent queries on the same
 /// connection.
-pub struct ForeignKeyGuard<'a>(&'a Connection);
+pub struct ForeignKeyGuard<'a> {
+    conn: &'a Connection,
+    was_enabled: bool,
+}
 
 impl<'a> ForeignKeyGuard<'a> {
+    /// Disables foreign-key enforcement until the returned guard is dropped.
     pub fn disable(conn: &'a Connection) -> Result<Self, rusqlite::Error> {
+        let was_enabled = foreign_keys_enabled(conn)?;
         conn.execute("PRAGMA foreign_keys = OFF", [])?;
-        Ok(Self(conn))
+        Ok(Self { conn, was_enabled })
     }
 }
 
 impl Drop for ForeignKeyGuard<'_> {
     fn drop(&mut self) {
-        let _ = self.0.execute("PRAGMA foreign_keys = ON", []);
+        let _ = restore_foreign_keys(self.conn, self.was_enabled);
     }
 }
 
-/// Runs `f` with `PRAGMA foreign_keys` turned off, re-enabling
-/// unconditionally when `f` returns — even on `Err` or panic. Use this
+/// Runs `f` with `PRAGMA foreign_keys` turned off, restoring its previous
+/// state when `f` returns — even on `Err` or panic. Use this
 /// instead of manual OFF/ON pairs in code paths that open a transaction:
 /// `Connection::transaction` requires `&mut`, which conflicts with the
 /// RAII guard's shared borrow.
@@ -60,7 +65,7 @@ impl Drop for ForeignKeyGuard<'_> {
 /// (e.g. [`DatabaseError`]) as long as it implements `From<rusqlite::Error>`.
 ///
 /// Panic-safety: `f` runs under `catch_unwind`. If it panics, the FK
-/// pragma is restored and the original payload is re-raised — without
+/// pragma state is restored and the original payload is re-raised — without
 /// this, a panic inside `f` would leave the shared connection with FK
 /// disabled and later non-CRDT queries would silently skip
 /// referential-integrity checks.
@@ -69,10 +74,11 @@ where
     F: FnOnce(&mut Connection) -> Result<R, E>,
     E: From<rusqlite::Error>,
 {
+    let was_enabled = foreign_keys_enabled(conn).map_err(E::from)?;
     conn.execute("PRAGMA foreign_keys = OFF", [])
         .map_err(E::from)?;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(conn)));
-    let _ = conn.execute("PRAGMA foreign_keys = ON", []);
+    let _ = restore_foreign_keys(conn, was_enabled);
     match result {
         Ok(r) => r,
         Err(payload) => std::panic::resume_unwind(payload),
@@ -90,7 +96,8 @@ pub enum RetentionPolicy {
     /// current HLC stored in `haex_crdt_configs` under key `hlc_timestamp`.
     /// If no HLC is recorded yet, the pass is a no-op.
     TimeBasedDays { days: u32 },
-    /// Hard-delete every delete-log entry unconditionally.
+    /// Hard-delete every delete-log entry with an anchorable, non-NULL HLC.
+    /// Entries without an HLC remain until they can be handled safely.
     All,
 }
 
@@ -118,8 +125,8 @@ pub struct CleanupResult {
 /// the caller owns — advancing after the delete instead would leave a
 /// resurrection window on crash-recovery (see haex-vault's ADR 0002 §6.5).
 ///
-/// Foreign-key enforcement is disabled for the duration and unconditionally
-/// re-enabled on exit — `haex_deleted_rows` intentionally has no FK back
+/// Foreign-key enforcement is disabled for the duration and its previous state
+/// is restored on exit — `haex_deleted_rows` intentionally has no FK back
 /// to the source rows, but callers may add their own FK-heavy tables and
 /// the cascade path is safer with FK off.
 ///
@@ -136,17 +143,21 @@ where
     with_fk_disabled(conn, |conn| {
         let tx = conn.transaction()?;
 
-        let max_pruned_hlc = read_max_prunable_hlc(&tx, policy)?;
+        // The hook may update the stored HLC. Fix the cutoff before invoking it
+        // so the reported maximum and the DELETE always cover the same rows.
+        let cutoff = compute_cutoff(&tx, policy)?;
+        let max_pruned_hlc = read_max_prunable_hlc(&tx, policy, cutoff)?;
 
         before_prune(&tx, max_pruned_hlc.as_deref())?;
 
         let rows_deleted = match policy {
             RetentionPolicy::All => {
-                let sql = format!("DELETE FROM \"{DELETED_ROWS_TABLE}\"");
+                let sql =
+                    format!("DELETE FROM \"{DELETED_ROWS_TABLE}\" WHERE haex_hlc IS NOT NULL");
                 tx.execute(&sql, [])?
             }
             RetentionPolicy::TimeBasedDays { .. } => {
-                let Some(cutoff) = compute_cutoff(&tx, policy)? else {
+                let Some(cutoff) = cutoff else {
                     tx.commit()?;
                     return Ok(CleanupResult {
                         rows_deleted: 0,
@@ -242,6 +253,7 @@ pub fn get_crdt_stats(conn: &Connection) -> Result<CrdtStats, DatabaseError> {
 fn read_max_prunable_hlc(
     tx: &Transaction,
     policy: RetentionPolicy,
+    cutoff: Option<i64>,
 ) -> Result<Option<String>, DatabaseError> {
     match policy {
         RetentionPolicy::All => {
@@ -261,7 +273,7 @@ fn read_max_prunable_hlc(
             Ok(hlc)
         }
         RetentionPolicy::TimeBasedDays { .. } => {
-            let Some(cutoff) = compute_cutoff(tx, policy)? else {
+            let Some(cutoff) = cutoff else {
                 return Ok(None);
             };
             let hlc: Option<String> = tx
@@ -319,11 +331,28 @@ fn compute_cutoff(
     Ok(compute_cutoff_hlc_num(current_timestamp.get_time().as_u64(), days))
 }
 
+/// Converts a current HLC time and retention window into SQLite's signed cutoff.
 fn compute_cutoff_hlc_num(current_hlc_num: u64, retention_days: u32) -> Option<i64> {
     let ns_per_day: u64 = 24 * 60 * 60 * 1_000_000_000;
     let retention_ns = u64::from(retention_days).saturating_mul(ns_per_day);
     let cutoff = current_hlc_num.saturating_sub(retention_ns);
     i64::try_from(cutoff).ok()
+}
+
+/// Returns whether SQLite foreign-key enforcement is currently enabled.
+fn foreign_keys_enabled(conn: &Connection) -> Result<bool, rusqlite::Error> {
+    conn.query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
+        .map(|value| value != 0)
+}
+
+/// Restores SQLite foreign-key enforcement to a previously captured state.
+fn restore_foreign_keys(conn: &Connection, enabled: bool) -> Result<(), rusqlite::Error> {
+    let pragma = if enabled {
+        "PRAGMA foreign_keys = ON"
+    } else {
+        "PRAGMA foreign_keys = OFF"
+    };
+    conn.execute(pragma, []).map(|_| ())
 }
 
 #[cfg(test)]
