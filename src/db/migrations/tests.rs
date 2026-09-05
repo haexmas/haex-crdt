@@ -1,4 +1,7 @@
 use std::collections::BTreeMap;
+use std::sync::{Arc, Barrier};
+use std::thread;
+use std::time::Duration;
 
 use rusqlite::Connection;
 
@@ -290,6 +293,54 @@ fn consumer_migrations_apply_in_lexicographic_order() {
         journal_names(&conn, TABLE_APP_MIGRATIONS),
         vec!["0001_a", "0002_b", "0010_z"]
     );
+}
+
+#[test]
+fn concurrent_connections_apply_each_migration_only_once() {
+    let database = tempfile::NamedTempFile::new().unwrap();
+    let path = database.path().to_owned();
+    let start = Arc::new(Barrier::new(2));
+
+    let first_start = Arc::clone(&start);
+    let first_path = path.clone();
+    let first = thread::spawn(move || {
+        let mut conn = Connection::open(first_path).unwrap();
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        first_start.wait();
+        run_migrations(
+            &mut conn,
+            &source_from(&[(
+                "0001_shared",
+                "CREATE TABLE shared_no_sync (id INTEGER PRIMARY KEY);",
+            )]),
+        )
+    });
+
+    let second_start = Arc::clone(&start);
+    let second_path = path.clone();
+    let second = thread::spawn(move || {
+        let mut conn = Connection::open(second_path).unwrap();
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        second_start.wait();
+        run_migrations(
+            &mut conn,
+            &source_from(&[(
+                "0001_shared",
+                "CREATE TABLE shared_no_sync (id INTEGER PRIMARY KEY);",
+            )]),
+        )
+    });
+
+    let first_report = first.join().unwrap().unwrap();
+    let second_report = second.join().unwrap().unwrap();
+    assert_eq!(
+        first_report.consumer_applied + second_report.consumer_applied,
+        1
+    );
+
+    let conn = Connection::open(path).unwrap();
+    assert!(table_exists(&conn, "shared_no_sync"));
+    assert_eq!(journal_names(&conn, TABLE_APP_MIGRATIONS), vec!["0001_shared"]);
 }
 
 // --- transactional isolation of a single migration -------------------------

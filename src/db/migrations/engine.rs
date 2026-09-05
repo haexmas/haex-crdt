@@ -20,7 +20,7 @@
 //!   Crate-owned migrations skip the transformer — their SQL is authored
 //!   here and carries the columns it needs verbatim.
 
-use rusqlite::{params, Connection, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use sha2::{Digest, Sha256};
 
 use crate::crdt::transformer::CrdtTransformer;
@@ -150,12 +150,10 @@ fn reconcile_and_apply(
 
     let mut applied = 0usize;
     for name in source_list {
-        if journaled.iter().any(|(n, _)| n == name.as_str()) {
-            continue;
-        }
         let content = load(name)?;
-        apply_single_migration(conn, journal_table, name, &content, transform_ddl)?;
-        applied += 1;
+        if apply_single_migration(conn, journal_table, name, &content, transform_ddl)? {
+            applied += 1;
+        }
     }
 
     Ok(applied)
@@ -177,9 +175,32 @@ fn apply_single_migration(
     name: &MigrationName,
     content: &str,
     transform_ddl: bool,
-) -> Result<()> {
+) -> Result<bool> {
     let digest = sha256_hex(content.as_bytes());
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+    let existing_digest = tx
+        .query_row(
+            &format!("SELECT sha256_digest FROM {journal_table} WHERE migration_name = ?1"),
+            params![name.as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    match existing_digest {
+        Some(stored_digest) if stored_digest == digest => {
+            tx.commit()?;
+            return Ok(false);
+        }
+        Some(stored_digest) => {
+            return Err(Error::MigrationContentDrift {
+                name: name.as_str().to_string(),
+                expected: stored_digest,
+                found: digest,
+            });
+        }
+        None => {}
+    }
+
     execute_statements(&tx, content, transform_ddl)?;
     tx.execute(
         &format!(
@@ -188,7 +209,7 @@ fn apply_single_migration(
         params![name.as_str(), digest],
     )?;
     tx.commit()?;
-    Ok(())
+    Ok(true)
 }
 
 fn execute_statements(tx: &Transaction<'_>, content: &str, transform_ddl: bool) -> Result<()> {
