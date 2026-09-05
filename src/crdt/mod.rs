@@ -6,5 +6,6 @@ pub mod cleanup;
 pub mod columns;
 pub mod hlc;
 pub mod insert_transformer;
+pub mod scanner;
 pub mod transformer;
 pub mod trigger;
