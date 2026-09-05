@@ -442,8 +442,8 @@ fn sig_passes_through_as_raw_json_when_present() {
 // paginate_changes
 // -----------------------------------------------------------------------
 
-fn change(hlc: &str, table: &str, col: &str, value: &str) -> LocalColumnChange {
-    LocalColumnChange {
+fn change(hlc: &str, table: &str, col: &str, value: &str) -> ColumnChange {
+    ColumnChange {
         table_name: table.to_string(),
         row_pks: r#"{"id":"r"}"#.to_string(),
         column_name: col.to_string(),

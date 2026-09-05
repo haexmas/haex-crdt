@@ -50,8 +50,12 @@ pub use crdt::cleanup::{
     ForeignKeyGuard, RetentionPolicy,
 };
 pub use crdt::scanner::{
-    paginate_changes, scan_dirty_tables, scan_table_for_local_changes, LocalColumnChange,
+    paginate_changes, scan_dirty_tables, scan_table_for_local_changes, ColumnChange,
     PULL_PAGE_BUDGET,
+};
+pub use crdt::apply::{
+    apply_remote_changes, column_sig_preimage, column_sig_preimage_from_parts,
+    delete_shadows_insert, should_propagate_delete, ApplyReport,
 };
 
 pub use db::connection_context::ConnectionContext;

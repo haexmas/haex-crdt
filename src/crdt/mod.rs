@@ -2,6 +2,7 @@
 //! port), scanner (pending port), cleanup (pending port), apply pipeline
 //! (pending port).
 
+pub mod apply;
 pub mod cleanup;
 pub mod columns;
 pub mod hlc;
