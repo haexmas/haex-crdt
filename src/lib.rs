@@ -45,6 +45,10 @@ pub use crdt::trigger::{
     get_table_schema, is_safe_identifier, setup_triggers_for_table, ColumnInfo, CrdtSetupError,
     TriggerSetupResult,
 };
+pub use crdt::cleanup::{
+    cleanup_deleted_rows, get_crdt_stats, with_fk_disabled, CleanupResult, CrdtStats,
+    ForeignKeyGuard, RetentionPolicy,
+};
 
 pub use db::connection_context::ConnectionContext;
 pub use db::core::{
