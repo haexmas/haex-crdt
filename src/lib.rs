@@ -11,10 +11,10 @@
 //!
 //! # Public dependency version contract
 //!
-//! The signer API exposes types from `rusqlite`, `sqlparser`, and `uhlc`.
-//! These crates are re-exported below so consumers can use the exact versions
-//! resolved by `haex-crdt`. Changing those versions may require downstream
-//! consumers to migrate their signer implementations.
+//! The post-write hook API exposes types from `rusqlite`, `sqlparser`, and
+//! `uhlc`. These crates are re-exported below so consumers can use the exact
+//! versions resolved by `haex-crdt`. Changing those versions may require
+//! downstream consumers to migrate their hook implementations.
 
 pub mod crdt;
 pub mod db;
@@ -24,7 +24,7 @@ pub mod migration;
 pub mod signature;
 pub mod table_names;
 
-/// Re-export used by [`PostWriteSigner`] implementations to name transactions.
+/// Re-export used by [`PostWriteHook`] implementations to name transactions.
 pub use rusqlite;
 /// Re-export used by [`WriteContext`] consumers to inspect transformed SQL.
 pub use sqlparser;
@@ -56,7 +56,7 @@ pub use db::core::{
     MAX_CRDT_TRANSACTION_BYTES,
 };
 pub use db::execute_hook::{
-    NoopPostWriteSigner, PostWriteSigner, TouchedColumns, TouchedTable, WriteContext,
+    NoopPostWriteHook, PostWriteHook, TouchedColumns, TouchedTable, WriteContext,
 };
 pub use db::init::{
     discover_crdt_tables, ensure_triggers_for_all_tables, ensure_triggers_initialized,

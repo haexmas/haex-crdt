@@ -1,5 +1,5 @@
 //! Tests for `execute`, `execute_with_crdt`, the size guard, the touched-
-//! column extractor, the meta-column write guard, and the PostWriteSigner
+//! column extractor, the meta-column write guard, and the PostWriteHook
 //! integration.
 
 use super::*;
@@ -7,7 +7,7 @@ use crate::crdt::hlc::HlcService;
 use crate::crdt::trigger::{ensure_crdt_columns_and_triggers, setup_triggers_for_table};
 use crate::db::connection_context::ConnectionContext;
 use crate::db::core::init::{install_tx_hlc_hooks, register_current_hlc_udf};
-use crate::db::execute_hook::{NoopPostWriteSigner, PostWriteSigner, WriteContext};
+use crate::db::execute_hook::{NoopPostWriteHook, PostWriteHook, WriteContext};
 use crate::db::init::ensure_triggers_initialized;
 use crate::db::DbConnection;
 use crate::table_names::{TABLE_CRDT_CONFIGS, TABLE_CRDT_DIRTY_TABLES};
@@ -489,16 +489,16 @@ fn execute_with_crdt_update_touches_only_named_columns() {
 }
 
 // -------------------------------------------------------------------------
-// PostWriteSigner integration
+// PostWriteHook integration
 // -------------------------------------------------------------------------
 
 type SpyCalls = Arc<Mutex<Vec<(String, Vec<String>)>>>;
 
-struct SpySigner {
+struct SpyHook {
     calls: SpyCalls,
 }
 
-impl PostWriteSigner for SpySigner {
+impl PostWriteHook for SpyHook {
     fn on_after_write(
         &self,
         _tx: &Transaction,
@@ -514,25 +514,25 @@ impl PostWriteSigner for SpySigner {
     }
 }
 
-struct FailingSigner;
+struct FailingHook;
 
-impl PostWriteSigner for FailingSigner {
+impl PostWriteHook for FailingHook {
     fn on_after_write(
         &self,
         _tx: &Transaction,
         _ctx: &WriteContext<'_>,
     ) -> Result<(), DatabaseError> {
         Err(DatabaseError::StatementError {
-            reason: "signer said no".to_string(),
+            reason: "hook said no".to_string(),
         })
     }
 }
 
-struct StatementSpySigner {
+struct StatementSpyHook {
     statement: Arc<Mutex<Option<String>>>,
 }
 
-impl PostWriteSigner for StatementSpySigner {
+impl PostWriteHook for StatementSpyHook {
     fn on_after_write(
         &self,
         _tx: &Transaction,
@@ -543,13 +543,13 @@ impl PostWriteSigner for StatementSpySigner {
     }
 }
 
-/// A signer that writes to the DB from inside its callback, proving that the
+/// A hook that writes to the DB from inside its callback, proving that the
 /// callback receives a live transaction it can operate on.
-struct RowWritingSigner {
+struct RowWritingHook {
     row_id: String,
 }
 
-impl PostWriteSigner for RowWritingSigner {
+impl PostWriteHook for RowWritingHook {
     fn on_after_write(
         &self,
         tx: &Transaction,
@@ -557,16 +557,16 @@ impl PostWriteSigner for RowWritingSigner {
     ) -> Result<(), DatabaseError> {
         tx.execute(
             "UPDATE items SET haex_column_sigs = json_set(haex_column_sigs, '$.body', ?1) WHERE id = ?2",
-            ["signer-sig-for-body", self.row_id.as_str()],
+            ["hook-sig-for-body", self.row_id.as_str()],
         )?;
         Ok(())
     }
 }
 
 #[test]
-fn no_signers_registered_is_a_valid_call() {
+fn no_hooks_registered_is_a_valid_call() {
     let fx = setup_fixture();
-    // Baseline: `execute_with_crdt` used with an empty signer slice must not
+    // Baseline: `execute_with_crdt` used with an empty hook slice must not
     // panic and must still write the row.
     execute_with_crdt(
         "INSERT INTO items (id, name, body) VALUES ('i1', 'a', 'b')".to_string(),
@@ -579,23 +579,23 @@ fn no_signers_registered_is_a_valid_call() {
 }
 
 #[test]
-fn noop_signer_is_invoked_and_returns_ok() {
+fn noop_hook_is_invoked_and_returns_ok() {
     let fx = setup_fixture();
     execute_with_crdt(
         "INSERT INTO items (id, name, body) VALUES ('i1', 'a', 'b')".to_string(),
         vec![],
         &fx.connection,
         &fx.hlc_service,
-        &[Arc::new(NoopPostWriteSigner)],
+        &[Arc::new(NoopPostWriteHook)],
     )
-    .expect("noop signer must not reject the write");
+    .expect("noop hook must not reject the write");
 }
 
 #[test]
-fn spy_signer_receives_touched_table_and_columns() {
+fn spy_hook_receives_touched_table_and_columns() {
     let fx = setup_fixture();
     let calls = Arc::new(Mutex::new(Vec::<(String, Vec<String>)>::new()));
-    let spy: Arc<dyn PostWriteSigner> = Arc::new(SpySigner {
+    let spy: Arc<dyn PostWriteHook> = Arc::new(SpyHook {
         calls: calls.clone(),
     });
 
@@ -615,10 +615,10 @@ fn spy_signer_receives_touched_table_and_columns() {
 }
 
 #[test]
-fn signer_receives_transformed_statement() {
+fn hook_receives_transformed_statement() {
     let fx = setup_fixture();
     let observed = Arc::new(Mutex::new(None));
-    let signer: Arc<dyn PostWriteSigner> = Arc::new(StatementSpySigner {
+    let hook: Arc<dyn PostWriteHook> = Arc::new(StatementSpyHook {
         statement: observed.clone(),
     });
 
@@ -627,7 +627,7 @@ fn signer_receives_transformed_statement() {
         vec![],
         &fx.connection,
         &fx.hlc_service,
-        &[signer],
+        &[hook],
     )
     .unwrap();
 
@@ -635,12 +635,12 @@ fn signer_receives_transformed_statement() {
     let statement = observed.lock().unwrap().clone().unwrap();
     assert!(
         statement.to_ascii_lowercase().contains("haex_hlc"),
-        "signer must receive the transformer output: {statement}"
+        "hook must receive the transformer output: {statement}"
     );
 }
 
 #[test]
-fn signers_run_in_registration_order() {
+fn hooks_run_in_registration_order() {
     let fx = setup_fixture();
     let calls = Arc::new(Mutex::new(Vec::<String>::new()));
 
@@ -648,7 +648,7 @@ fn signers_run_in_registration_order() {
         label: String,
         log: Arc<Mutex<Vec<String>>>,
     }
-    impl PostWriteSigner for OrderMarker {
+    impl PostWriteHook for OrderMarker {
         fn on_after_write(
             &self,
             _tx: &Transaction,
@@ -659,11 +659,11 @@ fn signers_run_in_registration_order() {
         }
     }
 
-    let first: Arc<dyn PostWriteSigner> = Arc::new(OrderMarker {
+    let first: Arc<dyn PostWriteHook> = Arc::new(OrderMarker {
         label: "first".into(),
         log: calls.clone(),
     });
-    let second: Arc<dyn PostWriteSigner> = Arc::new(OrderMarker {
+    let second: Arc<dyn PostWriteHook> = Arc::new(OrderMarker {
         label: "second".into(),
         log: calls.clone(),
     });
@@ -680,18 +680,18 @@ fn signers_run_in_registration_order() {
 }
 
 #[test]
-fn signer_error_aborts_transaction_and_rolls_back_write() {
+fn hook_error_aborts_transaction_and_rolls_back_write() {
     let fx = setup_fixture();
     let err = execute_with_crdt(
         "INSERT INTO items (id, name, body) VALUES ('i1', 'a', 'b')".to_string(),
         vec![],
         &fx.connection,
         &fx.hlc_service,
-        &[Arc::new(FailingSigner)],
+        &[Arc::new(FailingHook)],
     )
     .unwrap_err();
     match err {
-        DatabaseError::StatementError { reason } => assert_eq!(reason, "signer said no"),
+        DatabaseError::StatementError { reason } => assert_eq!(reason, "hook said no"),
         other => panic!("unexpected error: {other:?}"),
     }
 
@@ -706,7 +706,7 @@ fn signer_error_aborts_transaction_and_rolls_back_write() {
 }
 
 #[test]
-fn signer_can_write_to_the_transaction_it_receives() {
+fn hook_can_write_to_the_transaction_it_receives() {
     let fx = setup_fixture();
     // Ensure triggers config is present so execute_with_crdt's transformer/triggers see it.
     with_connection(&fx.connection, |conn| {
@@ -715,7 +715,7 @@ fn signer_can_write_to_the_transaction_it_receives() {
     })
     .unwrap();
 
-    let signer: Arc<dyn PostWriteSigner> = Arc::new(RowWritingSigner {
+    let hook: Arc<dyn PostWriteHook> = Arc::new(RowWritingHook {
         row_id: "i1".to_string(),
     });
     execute_with_crdt(
@@ -723,7 +723,7 @@ fn signer_can_write_to_the_transaction_it_receives() {
         vec![],
         &fx.connection,
         &fx.hlc_service,
-        &[signer],
+        &[hook],
     )
     .unwrap();
 
@@ -736,20 +736,20 @@ fn signer_can_write_to_the_transaction_it_receives() {
             )
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&sigs_json).unwrap();
-        assert_eq!(parsed["body"], json!("signer-sig-for-body"));
+        assert_eq!(parsed["body"], json!("hook-sig-for-body"));
         Ok(())
     })
     .unwrap();
 }
 
 #[test]
-fn later_signer_is_skipped_when_earlier_signer_errors() {
+fn later_hook_is_skipped_when_earlier_hook_errors() {
     let fx = setup_fixture();
     let downstream = Arc::new(Mutex::new(false));
     struct MarkCalled {
         flag: Arc<Mutex<bool>>,
     }
-    impl PostWriteSigner for MarkCalled {
+    impl PostWriteHook for MarkCalled {
         fn on_after_write(
             &self,
             _tx: &Transaction,
@@ -766,7 +766,7 @@ fn later_signer_is_skipped_when_earlier_signer_errors() {
         &fx.connection,
         &fx.hlc_service,
         &[
-            Arc::new(FailingSigner),
+            Arc::new(FailingHook),
             Arc::new(MarkCalled {
                 flag: downstream.clone(),
             }),
@@ -774,7 +774,7 @@ fn later_signer_is_skipped_when_earlier_signer_errors() {
     );
     assert!(
         !*downstream.lock().unwrap(),
-        "downstream signer must not have run"
+        "downstream hook must not have run"
     );
 }
 

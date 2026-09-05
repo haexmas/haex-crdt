@@ -1,29 +1,43 @@
 //! Post-write hook the executor invokes inside the SQL transaction, before
-//! commit. Consumers register one or more [`PostWriteSigner`] implementations
+//! commit. Consumers register one or more [`PostWriteHook`] implementations
 //! on [`crate::execute_with_crdt`]; each is called after the CRDT
 //! transformer has written the row (and the after-insert / after-update
 //! triggers have populated `haex_column_hlcs` and the dirty-tables entry),
 //! but before `tx.commit()` runs. Any implementation returning `Err` rolls
 //! the whole transaction back — the write plus the dirty-tables entry plus
-//! the tombstone-log row all disappear atomically.
+//! every earlier hook's derived rows disappear atomically.
 //!
-//! # Why this exists
+//! # What consumers use this for
 //!
-//! The CRDT layer maintains three metadata columns per row —
-//! `haex_hlc`, `haex_column_hlcs`, `haex_column_sigs`. The first two are
-//! written by the transformer + triggers here in the crate; the third holds
-//! per-column signatures whose computation depends on the consumer's
-//! identity system (UCAN / DID / MLS in `haex-vault`, plain device pubkeys
-//! in `holzi` if it ever grows one, nothing at all under
-//! [`crate::signature::NoopSignatureProvider`]).
+//! The hook is a generic seam, not a signing-specific API. Whatever a
+//! consumer wants to run atomically with the write goes here. Examples:
 //!
-//! The crate cannot compute those signatures — but they MUST be written
-//! inside the same transaction as the row, otherwise a crash between "row
-//! committed" and "signature computed" leaves a signed table with an
-//! unsigned row. The `PostWriteSigner` hook is that atomic seam: the
-//! executor hands the trait a live `&Transaction` plus the [`WriteContext`]
-//! describing what just changed, and the trait's implementation writes any
-//! derived rows / columns it needs into that same transaction.
+//! - **Per-column signing** (haex-vault's F1/F2/B.3 passes over
+//!   `haex_column_sigs`, using UCAN / DID identities the crate does not
+//!   know about).
+//! - **Audit logging** — append an audit row to a consumer-owned journal
+//!   in the same transaction, so audit and data commit or roll back
+//!   together.
+//! - **Denormalized-view maintenance** — update a materialized summary
+//!   row that has to stay consistent with the base table.
+//! - **Cross-table integrity checks** — inspect the affected rows and
+//!   reject with `Err(…)` if a policy is violated, forcing the write to
+//!   roll back.
+//! - **Custom metadata columns** — populate consumer-defined "last
+//!   modified by" / "revision" columns using the write's HLC.
+//!
+//! What ties these together: they all need to observe the write and
+//! optionally add related writes / abort, and they all need atomicity
+//! with the write itself. The crate cannot know what any given consumer
+//! needs there — the hook is where the crate hands off.
+//!
+//! # Why not a pre-write hook (yet)
+//!
+//! A `PostWriteHook` already has veto power via `Err`, and the
+//! transaction rolls back cleanly. The only pre-write use case a
+//! post-write hook can't cover is rejecting an expensive write before
+//! it runs. No current consumer needs that; a `PreWriteHook` will land
+//! when a real need appears.
 
 use crate::db::error::DatabaseError;
 use rusqlite::Transaction;
@@ -58,9 +72,9 @@ pub enum TouchedColumns {
     /// lowercase.
     Explicit(Vec<String>),
     /// `INSERT INTO t VALUES (…)` with no column list. The write covers
-    /// every column of the table positionally, so a signer must fall back
-    /// to the table's schema instead of treating "no names" as "nothing
-    /// written" — otherwise the row lands unsigned.
+    /// every column of the table positionally, so hooks that want to know
+    /// what changed must fall back to the table's schema instead of
+    /// treating "no names" as "nothing written".
     AllColumns,
 }
 
@@ -81,11 +95,11 @@ impl TouchedColumns {
     }
 }
 
-/// Everything a [`PostWriteSigner`] needs to decide what to sign for a
+/// Everything a [`PostWriteHook`] needs to decide what to do for a
 /// single `execute_with_crdt` invocation.
 ///
 /// `touched` is `None` for statements the crate does not treat as a
-/// column write (SELECT, DELETE, DDL). Signers that only care about
+/// column write (SELECT, DELETE, DDL). Hooks that only care about
 /// INSERT/UPDATE should early-return in that case.
 #[derive(Debug)]
 pub struct WriteContext<'a> {
@@ -94,7 +108,7 @@ pub struct WriteContext<'a> {
     pub statement: &'a Statement,
 
     /// `(target_table, columns)` for INSERT/UPDATE; `None` for statements
-    /// the signer does not need to inspect.
+    /// the hook does not need to inspect.
     pub touched: Option<(TouchedTable, TouchedColumns)>,
 
     /// Transaction-scoped HLC used to stamp this write. Same value the
@@ -105,25 +119,25 @@ pub struct WriteContext<'a> {
 
 /// Post-write hook. Called with the live `&Transaction` after the main
 /// write has landed but before commit. See the module docs for the
-/// atomicity contract.
+/// atomicity contract and the range of use cases.
 ///
-/// Multiple signers registered with `execute_with_crdt` run in registration
-/// order. The first `Err` aborts the transaction — later signers are
+/// Multiple hooks registered with `execute_with_crdt` run in registration
+/// order. The first `Err` aborts the transaction — later hooks are
 /// skipped.
-pub trait PostWriteSigner: Send + Sync {
-    /// Applies post-write policy or derived writes in the active transaction.
-    /// Returning an error aborts the transaction and skips later signers.
+pub trait PostWriteHook: Send + Sync {
+    /// Applies post-write logic in the active transaction. Returning an
+    /// error aborts the transaction and skips later hooks.
     fn on_after_write(&self, tx: &Transaction, ctx: &WriteContext<'_>)
         -> Result<(), DatabaseError>;
 }
 
 /// Executor-side default: does nothing, accepts any batch. Consumers who
-/// don't need per-column signing (e.g. `NoopSignatureProvider` users)
-/// simply pass no signers at all — this type is a convenience for tests
-/// that want to assert "yes, the hook did fire but did nothing".
-pub struct NoopPostWriteSigner;
+/// don't need any post-write behavior simply pass no hooks at all — this
+/// type is a convenience for tests that want to assert "yes, the hook did
+/// fire but did nothing".
+pub struct NoopPostWriteHook;
 
-impl PostWriteSigner for NoopPostWriteSigner {
+impl PostWriteHook for NoopPostWriteHook {
     fn on_after_write(
         &self,
         _tx: &Transaction,
@@ -159,9 +173,9 @@ mod tests {
     }
 
     #[test]
-    fn post_write_signer_is_object_safe_via_dyn_dispatch() {
-        // Executor stores signers as Arc<dyn PostWriteSigner>; make sure the
+    fn post_write_hook_is_object_safe_via_dyn_dispatch() {
+        // Executor stores hooks as Arc<dyn PostWriteHook>; make sure the
         // trait actually is object-safe.
-        let _: Arc<dyn PostWriteSigner> = Arc::new(NoopPostWriteSigner);
+        let _: Arc<dyn PostWriteHook> = Arc::new(NoopPostWriteHook);
     }
 }

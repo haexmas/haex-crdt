@@ -9,9 +9,9 @@
 //! - [`execute_with_crdt`] runs a statement through
 //!   [`crate::crdt::transformer::CrdtTransformer`] with the transaction-
 //!   scoped HLC, executes it, and invokes every registered
-//!   [`crate::db::execute_hook::PostWriteSigner`] inside the same
+//!   [`crate::db::execute_hook::PostWriteHook`] inside the same
 //!   transaction before commit. The invariant: either the write + the
-//!   dirty-tables entry + the delete-event log row + every signer's derived
+//!   dirty-tables entry + the delete-event log row + every hook's derived
 //!   rows commit together, or nothing does.
 
 use crate::crdt::columns::{
@@ -25,7 +25,7 @@ use crate::db::core::parsing::{parse_single_statement, statement_has_returning};
 use crate::db::core::prefix::strip_main_schema_prefix;
 use crate::db::core::value::{convert_value_ref_to_json, ValueConverter};
 use crate::db::error::DatabaseError;
-use crate::db::execute_hook::{PostWriteSigner, TouchedColumns, TouchedTable, WriteContext};
+use crate::db::execute_hook::{PostWriteHook, TouchedColumns, TouchedTable, WriteContext};
 use crate::db::DbConnection;
 use crate::table_names::TABLE_CRDT_CONFIGS;
 use rusqlite::types::Value as RusqliteValue;
@@ -58,15 +58,15 @@ pub fn write_payload_too_large(params: &[JsonValue], limit: usize) -> Option<usi
 }
 
 /// Executes a statement through the CRDT transformer and invokes every
-/// registered [`PostWriteSigner`] inside the same transaction.
+/// registered [`PostWriteHook`] inside the same transaction.
 ///
-/// - `signers` are called in registration order after the main write, before
-///   `tx.commit()`. The first `Err` aborts the transaction; later signers
+/// - `hooks` are called in registration order after the main write, before
+///   `tx.commit()`. The first `Err` aborts the transaction; later hooks
 ///   are skipped.
 /// - CRDT meta-column writes (`haex_hlc`, `haex_column_hlcs`,
 ///   `haex_column_sigs`) are hard-rejected: the transformer would silently
 ///   clobber `haex_hlc`, and a caller-supplied `haex_column_hlcs` would
-///   feed a forged HLC into any signer's preimage.
+///   feed a forged HLC into any downstream preimage a signing hook builds.
 /// - Batches whose serialized params exceed [`MAX_CRDT_TRANSACTION_BYTES`]
 ///   are rejected before any write happens.
 pub fn execute_with_crdt(
@@ -74,7 +74,7 @@ pub fn execute_with_crdt(
     params: Vec<JsonValue>,
     connection: &DbConnection,
     hlc_service: &HlcService,
-    signers: &[Arc<dyn PostWriteSigner>],
+    hooks: &[Arc<dyn PostWriteHook>],
 ) -> Result<Vec<Vec<JsonValue>>, DatabaseError> {
     if let Some(bytes) = write_payload_too_large(&params, MAX_CRDT_TRANSACTION_BYTES) {
         return Err(DatabaseError::TransactionTooLarge {
@@ -89,9 +89,9 @@ pub fn execute_with_crdt(
 
     // Reject caller-supplied writes to CRDT meta columns. The transformer
     // would otherwise clobber `haex_hlc` silently, and a caller-supplied
-    // `haex_column_hlcs` would feed a forged HLC into the sig-preimage of
-    // any signer running after this write — an attacker could then mint a
-    // valid signature over an arbitrary HLC. Hard rejection is the only
+    // `haex_column_hlcs` would feed a forged HLC into any sig-preimage a
+    // signing hook builds after this write — an attacker could then mint
+    // a valid signature over an arbitrary HLC. Hard rejection is the only
     // safe choice.
     if let Some(bad) = touched
         .as_ref()
@@ -113,14 +113,14 @@ pub fn execute_with_crdt(
             (vec![], ts, transformed)
         };
 
-        if !signers.is_empty() {
+        if !hooks.is_empty() {
             let ctx = WriteContext {
                 statement: &transformed_statement,
                 touched,
                 hlc: &tx_hlc,
             };
-            for signer in signers {
-                signer.on_after_write(&tx, &ctx)?;
+            for hook in hooks {
+                hook.on_after_write(&tx, &ctx)?;
             }
         }
 
@@ -254,7 +254,7 @@ fn tx_scoped_hlc(tx: &Transaction, hlc_service: &HlcService) -> Result<Timestamp
 
 /// Runs a non-RETURNING write through the CRDT transformer + main-prefix
 /// stripping and executes it against `tx`. Returns the tx-scoped HLC and
-/// transformed statement so the caller can hand both to [`PostWriteSigner`]s.
+/// transformed statement so the caller can hand both to [`PostWriteHook`]s.
 fn execute_internal(
     tx: &Transaction,
     hlc_service: &HlcService,
@@ -283,7 +283,7 @@ fn execute_internal(
 }
 
 /// RETURNING variant of [`execute_internal`]. Returns the HLC, transformed
-/// statement, and rows so the caller can supply signer context and results.
+/// statement, and rows so the caller can supply hook context and results.
 fn query_internal(
     tx: &Transaction,
     hlc_service: &HlcService,
@@ -340,7 +340,7 @@ fn query_internal(
 }
 
 /// Extracts `(target_table, touched_columns)` for statements that carry
-/// column writes; returns `None` for statements the signer does not handle
+/// column writes; returns `None` for statements the hook does not handle
 /// (SELECT / DELETE / DDL). Table names and column names are case-folded to
 /// lowercase — SQL identifiers are case-insensitive and downstream `==`
 /// comparisons are safer when the values arrive canonicalised.
