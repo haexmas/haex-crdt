@@ -27,7 +27,7 @@ Not provided (intentionally):
 
 ## rusqlite version contract
 
-`Database::with_connection(&rusqlite::Connection)` is exposed behind the `raw-connection` feature (default off). When enabled, all consumers of `haex-crdt` in one dependency tree must resolve to the same `rusqlite` version this crate pins; otherwise `Connection`'s `ToSql`/`FromSql` types belong to different crate instances and cannot be passed through the callback. See plan §6.
+`db.with_connection(|connection| { ... })` is exposed behind the `raw-connection` feature (default off). When enabled, all consumers of `haex-crdt` in one dependency tree must resolve to the same `rusqlite` version this crate pins; otherwise `Connection`'s `ToSql`/`FromSql` types belong to different crate instances and cannot be passed through the callback. See plan §6.
 
 ## Usage scope
 

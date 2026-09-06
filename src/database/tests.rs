@@ -168,6 +168,12 @@ fn concurrent_first_opens_with_different_device_ids_reject_the_loser() {
 
     let first_result = first.join().unwrap();
     let second_result = second.join().unwrap();
+    let retry_config = fx.config.clone();
+    let retry_other_config = {
+        let mut config = fx.config.clone();
+        config.device_id = Arc::new(StaticDeviceId(other_device));
+        config
+    };
 
     // The invariant we care about: two racing opens with different device
     // ids must NEVER both succeed. The winner's device id must match one
@@ -191,9 +197,23 @@ fn concurrent_first_opens_with_different_device_ids_reject_the_loser() {
             assert!(id == other_device);
             assert_mismatch_names_supplier(&err, fx.device);
         }
-        (Err(_), Err(_)) => {
-            // Both losing to a WAL-pragma race is legal — the DB file exists
-            // but no `Database` was mounted. A subsequent open will succeed.
+        (Err(first_err), Err(second_err)) => {
+            // Both opens can lose to a transient WAL-pragma race, but the
+            // database must still be recoverable immediately afterwards. If
+            // the other supplier won the arbitration, retrying the first
+            // supplier reports DeviceIdMismatch and the second supplier is
+            // the usable one.
+            let retry = Database::open(retry_config).or_else(|err| {
+                if matches!(err, crate::Error::DeviceIdMismatch { .. }) {
+                    Database::open(retry_other_config)
+                } else {
+                    Err(err)
+                }
+            });
+            assert!(
+                retry.is_ok(),
+                "both concurrent opens failed and no supplier could reopen the database: first={first_err:?}, second={second_err:?}"
+            );
         }
     }
 }
