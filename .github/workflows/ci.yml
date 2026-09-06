@@ -7,9 +7,9 @@
 # - `cargo test --features raw-connection --test end_to_end` — plan §8
 #   acceptance test
 #
-# Rust toolchain is pinned to stable via `dtolnay/rust-toolchain`; the
-# `rustfmt`/`clippy` components are installed explicitly so the pinned
-# version's shipping copies are used (no surprise updates).
+# Rust toolchain is pinned to `RUST_VERSION` via a full commit SHA of
+# `dtolnay/rust-toolchain`; the `rustfmt`/`clippy` components are installed
+# explicitly so the pinned version's shipping copies are used.
 
 name: CI
 
@@ -19,8 +19,12 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
+  RUST_VERSION: 1.96.0
   # Deterministic + small caches. Debug info would double the target/ size
   # for no CI-side value.
   CARGO_INCREMENTAL: 0
@@ -33,8 +37,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
           components: rustfmt
       - run: cargo fmt --all -- --check
 
@@ -51,8 +58,11 @@ jobs:
             flags: "--features raw-connection"
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
@@ -74,7 +84,11 @@ jobs:
             run_e2e: true
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: test-${{ matrix.features }}

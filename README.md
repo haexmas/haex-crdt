@@ -70,7 +70,7 @@ Dual-licensed under either of
 - MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
 - Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <https://www.apache.org/licenses/LICENSE-2.0>)
 
-at your option. This matches the Rust-ecosystem norm and imposes no obligations on consumers beyond keeping the notice files with any redistribution. `haex-vault` did not have a `LICENSE` file at extraction time (plan §9 called this a to-be-settled item); this crate settles it here.
+at your option. Redistributors must comply with the applicable license terms, including retaining applicable copyright, patent, trademark, and attribution notices and adding prominent notices to modified files as required by Apache-2.0. `haex-vault` did not have a `LICENSE` file at extraction time (plan §9 called this a to-be-settled item); this crate settles it here.
 
 ### Contributions
 
