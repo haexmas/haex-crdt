@@ -4,7 +4,8 @@
 //! insists on WAL journaling which `:memory:` cannot provide.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
+use std::thread;
 
 use serde_json::json;
 use tempfile::TempDir;
@@ -15,8 +16,9 @@ use crate::crdt::cleanup::RetentionPolicy;
 use crate::crdt::hlc::device_uuid_to_hlc_node;
 use crate::crdt::scanner::ColumnChange;
 use crate::device_id::StaticDeviceId;
+use crate::error::Result;
 use crate::migration::{MigrationName, StaticMigrationSource};
-use crate::signature::NoopSignatureProvider;
+use crate::signature::{AuthorId, NoopSignatureProvider, SignatureProvider};
 
 fn source(entries: &[(&str, &str)]) -> Arc<StaticMigrationSource> {
     let mut m = BTreeMap::new();
@@ -30,6 +32,26 @@ struct Fixture {
     _tmp: TempDir,
     config: StoreConfig,
     device: Uuid,
+}
+
+struct EchoSignatureProvider;
+
+impl SignatureProvider for EchoSignatureProvider {
+    fn sign_column(&self, preimage: &[u8]) -> Result<Vec<u8>> {
+        Ok(preimage.to_vec())
+    }
+
+    fn verify_column(&self, _preimage: &[u8], _sig: &serde_json::Value) -> Result<()> {
+        Ok(())
+    }
+
+    fn author_id(&self) -> AuthorId {
+        AuthorId::anonymous()
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 impl Fixture {
@@ -46,7 +68,11 @@ impl Fixture {
             migration_source,
             trigger_version: DEFAULT_TRIGGER_VERSION,
         };
-        Fixture { _tmp: tmp, config, device }
+        Fixture {
+            _tmp: tmp,
+            config,
+            device,
+        }
     }
 
     fn new() -> Self {
@@ -68,7 +94,10 @@ fn reopen_with_same_device_id_succeeds() {
     let fx = Fixture::new();
     Store::open(fx.config.clone()).unwrap();
     // A second open on the same path with the same provider must succeed.
-    let cfg = StoreConfig { create_if_missing: false, ..fx.config.clone() };
+    let cfg = StoreConfig {
+        create_if_missing: false,
+        ..fx.config.clone()
+    };
     let store = Store::open(cfg).unwrap();
     assert_eq!(store.device_id(), fx.device);
 }
@@ -93,6 +122,82 @@ fn reopen_with_different_device_id_returns_device_id_mismatch() {
         }
         other => panic!("wrong variant: {other:?}"),
     }
+}
+
+#[test]
+fn concurrent_first_opens_with_same_device_id_converge() {
+    let fx = Fixture::new();
+    let start = Arc::new(Barrier::new(2));
+    let first_config = fx.config.clone();
+    let second_config = fx.config.clone();
+
+    let first_start = Arc::clone(&start);
+    let first = thread::spawn(move || {
+        first_start.wait();
+        Store::open(first_config).map(|store| store.device_id())
+    });
+    let second_start = Arc::clone(&start);
+    let second = thread::spawn(move || {
+        second_start.wait();
+        Store::open(second_config).map(|store| store.device_id())
+    });
+
+    assert_eq!(first.join().unwrap().unwrap(), fx.device);
+    assert_eq!(second.join().unwrap().unwrap(), fx.device);
+}
+
+#[test]
+fn concurrent_first_opens_with_different_device_ids_reject_the_loser() {
+    let fx = Fixture::new();
+    let other_device = Uuid::new_v4();
+    let first_config = fx.config.clone();
+    let mut other_config = fx.config.clone();
+    other_config.device_id = Arc::new(StaticDeviceId(other_device));
+    let start = Arc::new(Barrier::new(2));
+
+    let first_start = Arc::clone(&start);
+    let first = thread::spawn(move || {
+        first_start.wait();
+        Store::open(first_config).map(|store| store.device_id())
+    });
+    let second_start = Arc::clone(&start);
+    let second = thread::spawn(move || {
+        second_start.wait();
+        Store::open(other_config).map(|store| store.device_id())
+    });
+
+    let first_result = first.join().unwrap();
+    let second_result = second.join().unwrap();
+    let successful_device = match (first_result, second_result) {
+        (Ok(first_id), Err(crate::Error::DeviceIdMismatch { supplied, .. })) => {
+            assert_eq!(supplied, other_device);
+            first_id
+        }
+        (Err(crate::Error::DeviceIdMismatch { supplied, .. }), Ok(second_id)) => {
+            assert_eq!(supplied, fx.device);
+            second_id
+        }
+        (first, second) => {
+            panic!("expected one successful open and one mismatch: {first:?}, {second:?}")
+        }
+    };
+    assert!(successful_device == fx.device || successful_device == other_device);
+}
+
+#[cfg(unix)]
+#[test]
+fn open_rejects_non_utf8_database_paths() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let fx = Fixture::new();
+    let mut config = fx.config;
+    config.path = std::path::PathBuf::from(std::ffi::OsString::from_vec(vec![b'd', b'b', 0xFF]));
+
+    let error = match Store::open(config) {
+        Err(error) => error,
+        Ok(_) => panic!("non-UTF-8 database path must be rejected"),
+    };
+    assert!(error.to_string().contains("valid UTF-8"));
 }
 
 #[test]
@@ -172,6 +277,39 @@ fn install_crdt_backfills_pre_existing_rows_and_marks_dirty() {
 }
 
 #[test]
+fn install_crdt_backfill_signs_each_row_value_and_primary_key() {
+    let fx = Fixture::with_source(source(&[(
+        "0001_seed_legacy",
+        "CREATE TABLE legacy_items_no_sync (id TEXT PRIMARY KEY NOT NULL, body TEXT);\n\
+         --> statement-breakpoint\n\
+         INSERT INTO legacy_items_no_sync (id, body) VALUES ('r1', 'legacy-a');\n\
+         --> statement-breakpoint\n\
+         INSERT INTO legacy_items_no_sync (id, body) VALUES ('r2', 'legacy-b');",
+    )]));
+    let mut config = fx.config;
+    config.signature_provider = Arc::new(EchoSignatureProvider);
+    let store = Store::open(config).unwrap();
+    store
+        .install_crdt("legacy_items_no_sync", InstallCrdtOptions::default())
+        .unwrap();
+
+    let changes = store
+        .scan_table_for_local_changes("legacy_items_no_sync", None, None, None)
+        .unwrap();
+    assert_eq!(changes.len(), 2);
+    for change in changes {
+        let expected = crate::crdt::apply::column_sig_preimage_from_parts(
+            "legacy_items_no_sync",
+            &change.row_pks,
+            "body",
+            &change.hlc_timestamp,
+            &change.value,
+        );
+        assert_eq!(change.sig, Some(json!(hex(&expected))));
+    }
+}
+
+#[test]
 fn install_crdt_refuses_to_reinstall_by_default() {
     let fx = Fixture::with_source(source(&[(
         "0001_items_plain",
@@ -206,7 +344,9 @@ fn install_crdt_allow_reinstall_only_refreshes_triggers() {
     store
         .install_crdt(
             "t_no_sync",
-            InstallCrdtOptions { allow_reinstall: true },
+            InstallCrdtOptions {
+                allow_reinstall: true,
+            },
         )
         .expect("reinstall path must succeed on already-managed table");
 }
@@ -301,4 +441,3 @@ fn store_cleanup_delegate_reports_zero_pruned_on_empty_log() {
         .unwrap();
     assert_eq!(report.rows_deleted, 0);
 }
-

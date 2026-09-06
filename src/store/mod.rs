@@ -29,15 +29,13 @@ pub use config::{InstallCrdtOptions, SqlCipherKey, StoreConfig, DEFAULT_TRIGGER_
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use crate::crdt::apply::{apply_remote_changes, ApplyReport};
 use crate::crdt::cleanup::{cleanup_deleted_rows, CleanupResult, RetentionPolicy};
 use crate::crdt::hlc::HlcService;
-use crate::crdt::scanner::{
-    scan_dirty_tables, scan_table_for_local_changes, ColumnChange,
-};
+use crate::crdt::scanner::{scan_dirty_tables, scan_table_for_local_changes, ColumnChange};
 use crate::db::connection_context::ConnectionContext;
 use crate::db::core::open_and_init_db;
 use crate::db::error::DatabaseError;
@@ -77,11 +75,16 @@ impl Store {
     /// Open (or create) the SQLCipher store described by `config`. See the
     /// module docs for the full open lifecycle.
     pub fn open(config: StoreConfig) -> Result<Self> {
-        let path_str = config.path.to_string_lossy().into_owned();
+        let path_str = config
+            .path
+            .to_str()
+            .ok_or_else(|| DatabaseError::ValidationError {
+                reason: "database path must be valid UTF-8".to_string(),
+            })?;
         let hlc = HlcService::new();
         let ctx = ConnectionContext::new();
         let mut conn = open_and_init_db(
-            &path_str,
+            path_str,
             config.key.as_str(),
             config.create_if_missing,
             hlc.clone(),
@@ -134,9 +137,7 @@ impl Store {
     /// so callers only need it after they mutate the connection out-of-band
     /// (e.g. a test that resets state) or when driving a redundant retry.
     pub fn apply_migrations(&self) -> Result<MigrationReport> {
-        self.with_locked_conn(|conn| {
-            run_migrations(conn, self.inner.migration_source.as_ref())
-        })
+        self.with_locked_conn(|conn| run_migrations(conn, self.inner.migration_source.as_ref()))
     }
 
     /// Install CRDT metadata + triggers on `table_name`, backfilling any
@@ -249,33 +250,36 @@ impl Store {
 /// [`CONFIG_KEY_DEVICE_ID`] in the `haex_crdt_configs` table (already
 /// materialised by the crate bootstrap migration).
 fn reconcile_device_id(conn: &Connection, supplied: Uuid) -> Result<()> {
-    let existing: Option<String> = conn
+    // The insert is the arbitration point for concurrent first opens. The
+    // config key is unique, so exactly one value can win; every opener then
+    // compares against the value that actually persisted rather than against
+    // its own earlier observation of an empty table.
+    conn.execute(
+        &format!(
+            "INSERT OR IGNORE INTO {TABLE_CRDT_CONFIGS} (key, type, value) \
+             VALUES (?1, 'system', ?2)"
+        ),
+        params![CONFIG_KEY_DEVICE_ID, supplied.to_string()],
+    )
+    .map_err(DatabaseError::from)?;
+
+    let recorded: String = conn
         .query_row(
             &format!("SELECT value FROM {TABLE_CRDT_CONFIGS} WHERE key = ?1"),
             params![CONFIG_KEY_DEVICE_ID],
             |r| r.get(0),
         )
-        .ok();
+        .optional()
+        .map_err(DatabaseError::from)?
+        .ok_or_else(|| DatabaseError::ValidationError {
+            reason: "device_id config row disappeared after initialization".to_string(),
+        })?;
 
-    match existing {
-        Some(recorded) => {
-            let expected = Uuid::parse_str(&recorded).map_err(|e| DatabaseError::ValidationError {
-                reason: format!("stored device_id is not a UUID: {e}"),
-            })?;
-            if expected != supplied {
-                return Err(Error::DeviceIdMismatch { expected, supplied });
-            }
-        }
-        None => {
-            conn.execute(
-                &format!(
-                    "INSERT INTO {TABLE_CRDT_CONFIGS} (key, type, value) \
-                     VALUES (?1, 'system', ?2)"
-                ),
-                params![CONFIG_KEY_DEVICE_ID, supplied.to_string()],
-            )
-            .map_err(DatabaseError::from)?;
-        }
+    let expected = Uuid::parse_str(&recorded).map_err(|e| DatabaseError::ValidationError {
+        reason: format!("stored device_id is not a UUID: {e}"),
+    })?;
+    if expected != supplied {
+        return Err(Error::DeviceIdMismatch { expected, supplied });
     }
     Ok(())
 }

@@ -21,6 +21,7 @@ use crate::crdt::hlc::HlcService;
 use crate::crdt::trigger::{
     ensure_crdt_columns_and_triggers, get_table_schema, is_safe_identifier,
 };
+use crate::db::core::convert_value_ref_to_json;
 use crate::db::error::DatabaseError;
 use crate::error::{Error, Result};
 use crate::signature::SignatureProvider;
@@ -97,7 +98,8 @@ fn backfill_existing_rows(
     let data_columns: Vec<String> = schema
         .iter()
         .filter(|c| {
-            c.name != HLC_TIMESTAMP_COLUMN
+            !c.is_pk
+                && c.name != HLC_TIMESTAMP_COLUMN
                 && c.name != COLUMN_HLCS_COLUMN
                 && c.name != COLUMN_SIGS_COLUMN
         })
@@ -116,14 +118,51 @@ fn backfill_existing_rows(
         .into());
     }
 
-    let row_count: i64 = tx
-        .query_row(
-            &format!("SELECT COUNT(*) FROM \"{table_name}\""),
-            [],
-            |r| r.get(0),
-        )
-        .map_err(DatabaseError::from)?;
-    if row_count == 0 {
+    // Read the legacy values before updating metadata. PK JSON is serialized
+    // in schema order, matching the scanner's wire format, while the owned
+    // SQL PK values are retained for an exact row update (including BLOBs).
+    let selected_columns: Vec<String> = pk_columns
+        .iter()
+        .chain(data_columns.iter())
+        .cloned()
+        .collect();
+    let select_sql = format!(
+        "SELECT {} FROM \"{table_name}\"",
+        selected_columns
+            .iter()
+            .map(|column| format!("\"{column}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let mut stmt = tx.prepare(&select_sql).map_err(DatabaseError::from)?;
+    let mut rows = stmt.query([]).map_err(DatabaseError::from)?;
+    let mut legacy_rows = Vec::new();
+    while let Some(row) = rows.next().map_err(DatabaseError::from)? {
+        let mut pk_json_values = Vec::with_capacity(pk_columns.len());
+        let mut pk_sql_values = Vec::with_capacity(pk_columns.len());
+        for index in 0..pk_columns.len() {
+            pk_json_values.push(convert_value_ref_to_json(row.get_ref(index)?).map_err(|e| {
+                DatabaseError::SerializationError {
+                    reason: e.to_string(),
+                }
+            })?);
+            pk_sql_values.push(row.get(index)?);
+        }
+        let mut data_values = Vec::with_capacity(data_columns.len());
+        for index in pk_columns.len()..selected_columns.len() {
+            data_values.push(convert_value_ref_to_json(row.get_ref(index)?).map_err(|e| {
+                DatabaseError::SerializationError {
+                    reason: e.to_string(),
+                }
+            })?);
+        }
+        let row_pks = serialize_row_pks(&pk_columns, &pk_json_values)?;
+        legacy_rows.push((row_pks, pk_sql_values, data_values));
+    }
+    drop(rows);
+    drop(stmt);
+
+    if legacy_rows.is_empty() {
         return Ok(0);
     }
 
@@ -132,31 +171,57 @@ fn backfill_existing_rows(
     // share one causal instant").
     let hlc_ts = hlc
         .new_timestamp_and_persist(tx)
-        .map_err(|e| DatabaseError::HlcError { reason: e.to_string() })?;
+        .map_err(|e| DatabaseError::HlcError {
+            reason: e.to_string(),
+        })?;
     let hlc_str = hlc_ts.to_string();
 
-    // Serialize the two metadata JSON blobs once — they are identical for
-    // every backfilled row of this table.
+    // Serialize the HLC metadata once — it is identical for every
+    // backfilled row — but sign each row's actual values separately.
     let column_hlcs_json = build_column_hlcs_json(&data_columns, &hlc_str);
-    let column_sigs_json =
-        build_column_sigs_json(table_name, &pk_columns, &data_columns, &hlc_str, provider)?;
-
-    let update_sql = format!(
-        "UPDATE \"{table_name}\" \
-         SET {HLC_TIMESTAMP_COLUMN} = ?1, \
-             {COLUMN_HLCS_COLUMN} = ?2, \
-             {COLUMN_SIGS_COLUMN} = ?3 \
-         WHERE {HLC_TIMESTAMP_COLUMN} IS NULL"
-    );
-    let touched = tx
-        .execute(
-            &update_sql,
-            params![&hlc_str, &column_hlcs_json, &column_sigs_json],
-        )
-        .map_err(DatabaseError::from)?;
+    let mut touched = 0;
+    for (row_pks, pk_sql_values, data_values) in legacy_rows {
+        let column_sigs_json = build_column_sigs_json(
+            table_name,
+            &row_pks,
+            &data_columns,
+            &data_values,
+            &hlc_str,
+            provider,
+        )?;
+        let where_clause = pk_columns
+            .iter()
+            .map(|column| format!("\"{}\" = ?", column))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let update_sql = format!(
+            "UPDATE \"{table_name}\" SET {HLC_TIMESTAMP_COLUMN} = ?, \
+             {COLUMN_HLCS_COLUMN} = ?, {COLUMN_SIGS_COLUMN} = ? WHERE {where_clause}"
+        );
+        let mut values = vec![
+            rusqlite::types::Value::Text(hlc_str.clone()),
+            rusqlite::types::Value::Text(column_hlcs_json.clone()),
+            rusqlite::types::Value::Text(column_sigs_json),
+        ];
+        values.extend(pk_sql_values);
+        let params: Vec<&dyn rusqlite::ToSql> = values
+            .iter()
+            .skip(3)
+            .map(|value| value as &dyn rusqlite::ToSql)
+            .collect();
+        let mut all_params: Vec<&dyn rusqlite::ToSql> = values[..3]
+            .iter()
+            .map(|value| value as &dyn rusqlite::ToSql)
+            .collect();
+        all_params.extend(params);
+        touched += tx
+            .execute(&update_sql, &*all_params)
+            .map_err(DatabaseError::from)?;
+    }
     Ok(touched)
 }
 
+/// Build the shared per-column HLC map for a backfill batch.
 fn build_column_hlcs_json(data_columns: &[String], hlc_str: &str) -> String {
     let mut map = serde_json::Map::with_capacity(data_columns.len());
     for col in data_columns {
@@ -165,16 +230,40 @@ fn build_column_hlcs_json(data_columns: &[String], hlc_str: &str) -> String {
     serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string())
 }
 
-/// The sig JSON for backfilled rows is built from the provider's raw
-/// `sign_column` bytes wrapped as `{ "bytes": "<hex>" }` — a minimal opaque
-/// shape the crate owns for its own generated preimages. Consumers whose
-/// wire format differs are expected to install CRDT before writing legacy
-/// data; the backfill path is for the "just added a peer" case where no
-/// prior sig existed to relay.
+/// Serialize primary-key values in schema-declaration order, matching the
+/// canonical row identity emitted by the outbound scanner.
+fn serialize_row_pks(pk_columns: &[String], values: &[JsonValue]) -> Result<String> {
+    let mut json = String::from("{");
+    for (index, (column, value)) in pk_columns.iter().zip(values).enumerate() {
+        if index > 0 {
+            json.push(',');
+        }
+        json.push_str(&serde_json::to_string(column).map_err(|e| {
+            DatabaseError::SerializationError {
+                reason: format!("serialize primary-key column '{column}': {e}"),
+            }
+        })?);
+        json.push(':');
+        json.push_str(&serde_json::to_string(value).map_err(|e| {
+            DatabaseError::SerializationError {
+                reason: format!("serialize primary-key value for '{column}': {e}"),
+            }
+        })?);
+    }
+    json.push('}');
+    Ok(json)
+}
+
+/// The sig JSON for backfilled rows stores the provider's raw `sign_column`
+/// bytes as a hex string — a minimal opaque shape the crate owns for its own
+/// generated preimages. Consumers whose wire format differs are expected to
+/// install CRDT before writing legacy data; the backfill path is for the
+/// "just added a peer" case where no prior sig existed to relay.
 fn build_column_sigs_json(
     table_name: &str,
-    pk_columns: &[String],
+    row_pks: &str,
     data_columns: &[String],
+    data_values: &[JsonValue],
     hlc_str: &str,
     provider: &dyn SignatureProvider,
 ) -> Result<String> {
@@ -184,18 +273,8 @@ fn build_column_sigs_json(
     // Under NoopSignatureProvider, sign_column returns an empty vec; drop the
     // entry rather than emit an empty payload masquerading as a signature.
     let mut map = serde_json::Map::new();
-    for col in data_columns {
-        // Preimage for backfill uses the same layout as apply — but with
-        // `row_pks` deliberately left empty: the sig is a table+column+hlc
-        // commitment, not row-bound. A real provider that requires row
-        // binding should install CRDT before it has legacy rows.
-        let _preimage = column_sig_preimage_from_parts(
-            table_name,
-            &placeholder_row_pks_json(pk_columns),
-            col,
-            hlc_str,
-            &JsonValue::Null,
-        );
+    for (col, value) in data_columns.iter().zip(data_values) {
+        let _preimage = column_sig_preimage_from_parts(table_name, row_pks, col, hlc_str, value);
         let bytes = provider.sign_column(&_preimage)?;
         if bytes.is_empty() {
             continue;
@@ -205,14 +284,7 @@ fn build_column_sigs_json(
     Ok(serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string()))
 }
 
-fn placeholder_row_pks_json(pk_columns: &[String]) -> String {
-    let mut map = serde_json::Map::new();
-    for c in pk_columns {
-        map.insert(c.clone(), JsonValue::Null);
-    }
-    serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string())
-}
-
+/// Encode provider output as the opaque JSON string stored by the scanner.
 fn hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -222,6 +294,7 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
+/// Mark a table for the next outbound scan after a successful backfill.
 fn mark_dirty(tx: &Transaction<'_>, table_name: &str) -> Result<()> {
     tx.execute(
         &format!(
