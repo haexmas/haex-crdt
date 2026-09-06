@@ -37,9 +37,7 @@ use super::report::ApplyReport;
 pub fn should_propagate_delete(delete_log_hlc: &str, target_row_hlc: Option<&str>) -> bool {
     match target_row_hlc {
         None => true,
-        Some(target) => {
-            compare_hlc_strings(target, delete_log_hlc) != std::cmp::Ordering::Greater
-        }
+        Some(target) => compare_hlc_strings(target, delete_log_hlc) != std::cmp::Ordering::Greater,
     }
 }
 
@@ -109,9 +107,9 @@ pub fn insert_suppressed_by_deletes(
     insert_hlc: &str,
     candidates: &[(serde_json::Map<String, JsonValue>, String)],
 ) -> bool {
-    candidates
-        .iter()
-        .any(|(del_pks, del_hlc)| del_pks == insert_pks && delete_shadows_insert(del_hlc, insert_hlc))
+    candidates.iter().any(|(del_pks, del_hlc)| {
+        del_pks == insert_pks && delete_shadows_insert(del_hlc, insert_hlc)
+    })
 }
 
 /// Apply pending delete-log entries to their target tables.
@@ -121,44 +119,45 @@ pub fn insert_suppressed_by_deletes(
 /// The caller **MUST** have set `triggers_enabled = '0'` first, so the DELETE
 /// does not re-append to the delete-log.
 ///
-/// Per-row failures are tolerated: a single malformed delete-log entry
-/// must not abort the whole batch (would wedge the sync cursor
-/// permanently). Errors surface as skipped counters on the returned
-/// `ApplyReport` delta so callers can log them.
+/// Malformed delete-log entries are skipped. A target-table read or DELETE
+/// error is returned so the caller's transaction rolls back and the entry can
+/// be retried on the next apply.
 pub fn propagate_deleted_rows_to_target_tables(
     tx: &Transaction<'_>,
     delete_log_ids: &HashSet<String>,
     report: &mut ApplyReport,
 ) -> Result<(), DatabaseError> {
     for id in delete_log_ids {
-        let entry = tx
-            .query_row(
-                &format!(
-                    "SELECT table_name, row_pks, haex_hlc FROM \"{DELETED_ROWS_TABLE}\" WHERE id = ?1"
-                ),
-                params![id],
-                |row| {
-                    let table_name: String = row.get(0)?;
-                    let row_pks: String = row.get(1)?;
-                    let delete_hlc: String = row.get(2)?;
-                    Ok((table_name, row_pks, delete_hlc))
-                },
-            );
+        let entry = tx.query_row(
+            &format!(
+                "SELECT table_name, row_pks, haex_hlc FROM \"{DELETED_ROWS_TABLE}\" WHERE id = ?1"
+            ),
+            params![id],
+            |row| {
+                let table_name: String = row.get(0)?;
+                let row_pks: String = row.get(1)?;
+                let delete_hlc: Option<String> = row.get(2)?;
+                Ok((table_name, row_pks, delete_hlc))
+            },
+        );
         let (target_table, row_pks_json, delete_hlc) = match entry {
             Ok(r) => r,
             Err(rusqlite::Error::QueryReturnedNoRows) => continue,
             Err(e) => return Err(DatabaseError::from(e)),
+        };
+        let Some(delete_hlc) = delete_hlc else {
+            continue;
         };
 
         if !is_safe_identifier(&target_table) {
             continue;
         }
 
-        let row_pks: serde_json::Map<String, JsonValue> =
-            match serde_json::from_str(&row_pks_json) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
+        let row_pks: serde_json::Map<String, JsonValue> = match serde_json::from_str(&row_pks_json)
+        {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
 
         // Defense-in-depth: refuse to propagate unless row_pks names exactly
         // the target table's PK columns. A composite PK with only some keys
@@ -182,33 +181,32 @@ pub fn propagate_deleted_rows_to_target_tables(
             Some(parts) => parts,
             None => continue,
         };
-        let sql_params: Vec<rusqlite::types::Value> = values
+        let sql_params: Vec<rusqlite::types::Value> =
+            values.iter().map(json_to_sql_value).collect();
+        let param_refs: Vec<&dyn rusqlite::ToSql> = sql_params
             .iter()
-            .map(json_to_sql_value)
+            .map(|v| v as &dyn rusqlite::ToSql)
             .collect();
-        let param_refs: Vec<&dyn rusqlite::ToSql> =
-            sql_params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
 
         // Resurrection check: if the target row was inserted or updated
         // after this delete-log entry, keep it.
         let select_hlc_sql =
             format!("SELECT haex_hlc FROM \"{target_table}\" WHERE {where_clause}");
-        let target_row_hlc: Option<String> = match tx
-            .query_row(&select_hlc_sql, param_refs.as_slice(), |row| row.get(0))
-        {
-            Ok(hlc) => Some(hlc),
-            Err(rusqlite::Error::QueryReturnedNoRows) => None,
-            Err(e) => return Err(DatabaseError::from(e)),
-        };
+        let target_row_hlc: Option<String> =
+            match tx.query_row(&select_hlc_sql, param_refs.as_slice(), |row| {
+                row.get::<_, Option<String>>(0)
+            }) {
+                Ok(hlc) => hlc,
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(e) => return Err(DatabaseError::from(e)),
+            };
         if !should_propagate_delete(&delete_hlc, target_row_hlc.as_deref()) {
             report.skipped_delete_target_newer += 1;
             continue;
         }
 
         let delete_sql = format!("DELETE FROM \"{target_table}\" WHERE {where_clause}");
-        // A single failed DELETE (constraint, table gone) must not abort
-        // the whole batch — swallow the error so the pull cursor advances.
-        let _ = tx.execute(&delete_sql, param_refs.as_slice());
+        tx.execute(&delete_sql, param_refs.as_slice())?;
     }
     Ok(())
 }

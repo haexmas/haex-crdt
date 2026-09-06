@@ -5,6 +5,7 @@ use serde_json::json;
 
 use super::{change, create_crdt_table, make_fixture};
 use crate::crdt::apply::apply_remote_changes;
+use crate::crdt::scanner::ColumnChange;
 use crate::signature::NoopSignatureProvider;
 
 const HLC1: &str = "0000000000000001/abcdef0000000000000000000000";
@@ -25,7 +26,9 @@ fn insert_creates_a_new_row_with_incoming_hlc() {
         .unwrap();
     assert_eq!(body, "hello");
     let row_hlc: String = conn
-        .query_row("SELECT haex_hlc FROM items WHERE id = 'r1'", [], |r| r.get(0))
+        .query_row("SELECT haex_hlc FROM items WHERE id = 'r1'", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(row_hlc, HLC2);
 }
@@ -200,7 +203,138 @@ fn incoming_write_does_not_regress_row_hlc_when_older_than_stored() {
 
     // Row HLC must equal max(HLC3, HLC1) = HLC3.
     let row_hlc: String = conn
-        .query_row("SELECT haex_hlc FROM items WHERE id = 'r1'", [], |r| r.get(0))
+        .query_row("SELECT haex_hlc FROM items WHERE id = 'r1'", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(row_hlc, HLC3);
+}
+
+#[test]
+fn newer_duplicate_column_change_replaces_older_staged_value() {
+    let (mut conn, hlc, _dev) = make_fixture();
+    create_crdt_table(&conn, "items", "body TEXT");
+
+    let report = apply_remote_changes(
+        &mut conn,
+        vec![
+            change("items", "r1", "body", HLC2, json!("old")),
+            change("items", "r1", "body", HLC3, json!("new")),
+        ],
+        &hlc,
+        &NoopSignatureProvider,
+    )
+    .unwrap();
+
+    assert_eq!(report.applied, 1);
+    let (body, column_hlcs): (String, String) = conn
+        .query_row(
+            "SELECT body, haex_column_hlcs FROM items WHERE id = 'r1'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(body, "new");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&column_hlcs)
+            .unwrap()
+            .get("body")
+            .and_then(serde_json::Value::as_str),
+        Some(HLC3)
+    );
+}
+
+#[test]
+fn nullable_column_hlcs_are_treated_as_empty_on_update() {
+    let (mut conn, hlc, _dev) = make_fixture();
+    conn.execute(
+        "CREATE TABLE items (
+            id TEXT PRIMARY KEY NOT NULL,
+            body TEXT,
+            haex_hlc TEXT,
+            haex_column_hlcs TEXT,
+            haex_column_sigs TEXT NOT NULL DEFAULT '{}'
+        )",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO items (id, body, haex_hlc, haex_column_hlcs) VALUES (?1, ?2, ?3, NULL)",
+        rusqlite::params!["r1", "old", HLC1],
+    )
+    .unwrap();
+
+    let report = apply_remote_changes(
+        &mut conn,
+        vec![change("items", "r1", "body", HLC2, json!("new"))],
+        &hlc,
+        &NoopSignatureProvider,
+    )
+    .unwrap();
+
+    assert_eq!(report.applied, 1);
+    let body: String = conn
+        .query_row("SELECT body FROM items WHERE id = 'r1'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(body, "new");
+}
+
+#[test]
+fn composite_primary_keys_are_validated_and_bound_by_name() {
+    let (mut conn, hlc, _dev) = make_fixture();
+    conn.execute(
+        "CREATE TABLE items (
+            left_key TEXT NOT NULL,
+            right_key INTEGER NOT NULL,
+            body TEXT,
+            haex_hlc TEXT,
+            haex_column_hlcs TEXT NOT NULL DEFAULT '{}',
+            haex_column_sigs TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (left_key, right_key)
+        )",
+        [],
+    )
+    .unwrap();
+
+    let valid = ColumnChange {
+        table_name: "items".to_string(),
+        row_pks: r#"{"right_key":7,"left_key":"left"}"#.to_string(),
+        column_name: "body".to_string(),
+        hlc_timestamp: HLC2.to_string(),
+        value: json!("bound correctly"),
+        device_id: String::new(),
+        sig: None,
+    };
+    let report =
+        apply_remote_changes(&mut conn, vec![valid], &hlc, &NoopSignatureProvider).unwrap();
+    assert_eq!(report.applied, 1);
+
+    let body: String = conn
+        .query_row(
+            "SELECT body FROM items WHERE left_key = 'left' AND right_key = 7",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(body, "bound correctly");
+
+    let incomplete = ColumnChange {
+        row_pks: r#"{"left_key":"left"}"#.to_string(),
+        hlc_timestamp: HLC3.to_string(),
+        value: json!("must be ignored"),
+        ..change("items", "unused", "body", HLC3, json!("unused"))
+    };
+    let extra = ColumnChange {
+        row_pks: r#"{"left_key":"left","right_key":7,"extra":"x"}"#.to_string(),
+        ..incomplete.clone()
+    };
+    let report = apply_remote_changes(
+        &mut conn,
+        vec![incomplete, extra],
+        &hlc,
+        &NoopSignatureProvider,
+    )
+    .unwrap();
+    assert_eq!(report.applied, 0);
+    assert_eq!(report.skipped_unknown_table, 2);
 }

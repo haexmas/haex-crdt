@@ -61,7 +61,10 @@ pub fn apply_remote_changes(
     for change in &changes {
         if !is_safe_identifier(&change.table_name) {
             return Err(DatabaseError::ValidationError {
-                reason: format!("Invalid table name '{}' in remote change", change.table_name),
+                reason: format!(
+                    "Invalid table name '{}' in remote change",
+                    change.table_name
+                ),
             }
             .into());
         }
@@ -94,8 +97,7 @@ pub fn apply_remote_changes(
         let shadow = load_delete_shadow_map(&tx)?;
         let inbound_delete_ids = collect_inbound_delete_log_ids(&ordered);
 
-        for ((_table, row_pks_str), row_changes) in
-            group_row_changes_in_hlc_order(ordered.clone())
+        for ((_table, row_pks_str), row_changes) in group_row_changes_in_hlc_order(ordered.clone())
         {
             apply_row(&tx, &row_pks_str, row_changes, &shadow, &mut report)?;
         }
@@ -109,7 +111,9 @@ pub fn apply_remote_changes(
     if let Some(hlc) = max_hlc {
         hlc_service
             .advance_past_remote(&hlc)
-            .map_err(|e| DatabaseError::HlcError { reason: e.to_string() })?;
+            .map_err(|e| DatabaseError::HlcError {
+                reason: e.to_string(),
+            })?;
     }
 
     Ok(report)
@@ -136,8 +140,7 @@ fn collect_inbound_delete_log_ids(changes: &[ColumnChange]) -> HashSet<String> {
         if change.table_name != DELETED_ROWS_TABLE {
             continue;
         }
-        if let Ok(map) =
-            serde_json::from_str::<serde_json::Map<String, JsonValue>>(&change.row_pks)
+        if let Ok(map) = serde_json::from_str::<serde_json::Map<String, JsonValue>>(&change.row_pks)
         {
             if let Some(JsonValue::String(id)) = map.get("id") {
                 ids.insert(id.clone());
@@ -182,6 +185,21 @@ fn apply_row(
         }
     };
 
+    // A partial or extra PK map must never reach the SQL builders. A partial
+    // map would broaden the WHERE clause; an extra key would target a column
+    // that is not part of the row identity. Treat malformed remote identity
+    // data as an unknown row and account for every skipped change.
+    let expected_pks: HashSet<&str> = schema
+        .iter()
+        .filter(|c| c.is_pk)
+        .map(|c| c.name.as_str())
+        .collect();
+    let provided_pks: HashSet<&str> = row_pks.keys().map(|k| k.as_str()).collect();
+    if expected_pks.is_empty() || expected_pks != provided_pks {
+        report.skipped_unknown_table += row_changes.len();
+        return Ok(());
+    }
+
     let (where_clause, pk_values) = match build_pk_where_from_map(&row_pks) {
         Some(parts) => parts,
         None => {
@@ -192,7 +210,8 @@ fn apply_row(
 
     let existing = fetch_existing_hlcs(tx, &table_name, &where_clause, &pk_values)?;
     let row_exists = existing.is_some();
-    let (current_row_hlc, mut column_hlcs) = existing.unwrap_or_else(|| (String::new(), serde_json::Map::new()));
+    let (current_row_hlc, mut column_hlcs) =
+        existing.unwrap_or_else(|| (String::new(), serde_json::Map::new()));
 
     let existing_columns: HashSet<&str> = schema.iter().map(|c| c.name.as_str()).collect();
     let has_sigs_column = existing_columns.contains(COLUMN_SIGS_COLUMN);
@@ -220,12 +239,19 @@ fn apply_row(
         if hlc_is_newer(&change.hlc_timestamp, &max_hlc_for_row) {
             max_hlc_for_row = change.hlc_timestamp.clone();
         }
-        staged.push((
+        let entry = (
             change.column_name.clone(),
             sql_value,
             change.hlc_timestamp.clone(),
             change.sig.clone(),
-        ));
+        );
+        match staged
+            .iter_mut()
+            .find(|(column, _, _, _)| *column == change.column_name)
+        {
+            Some(slot) => *slot = entry,
+            None => staged.push(entry),
+        }
     }
 
     if staged.is_empty() {
@@ -293,17 +319,22 @@ fn fetch_existing_hlcs(
         "SELECT {COLUMN_HLCS_COLUMN}, {HLC_TIMESTAMP_COLUMN} FROM \"{table_name}\" WHERE {where_clause}"
     );
     let sql_params = ValueConverter::convert_params(pk_values)?;
-    let param_refs: Vec<&dyn rusqlite::ToSql> =
-        sql_params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+    let param_refs: Vec<&dyn rusqlite::ToSql> = sql_params
+        .iter()
+        .map(|v| v as &dyn rusqlite::ToSql)
+        .collect();
     let mut stmt = tx.prepare(&sql)?;
     match stmt.query_row(&*param_refs, |row| {
-        let hlcs: String = row.get(0)?;
+        let hlcs: Option<String> = row.get(0)?;
         let row_hlc: Option<String> = row.get(1)?;
-        Ok((hlcs, row_hlc.unwrap_or_default()))
+        Ok((hlcs, row_hlc))
     }) {
         Ok((hlcs_str, row_hlc)) => Ok(Some((
-            row_hlc,
-            serde_json::from_str(&hlcs_str).unwrap_or_default(),
+            row_hlc.unwrap_or_default(),
+            hlcs_str
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default(),
         ))),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(DatabaseError::from(e)),
@@ -342,7 +373,13 @@ fn write_update(
     params.push(SqlValue::Text(column_hlcs_json.to_string()));
     params.push(SqlValue::Text(max_hlc_for_row.to_string()));
     if has_sigs_column {
-        params.push(SqlValue::Text(merge_sigs_json(tx, table_name, where_clause, pk_values, staged)?));
+        params.push(SqlValue::Text(merge_sigs_json(
+            tx,
+            table_name,
+            where_clause,
+            pk_values,
+            staged,
+        )?));
     }
     for v in ValueConverter::convert_params(pk_values)? {
         params.push(v);
@@ -368,14 +405,13 @@ fn write_insert(
     let mut columns: Vec<String> = Vec::new();
     let mut values: Vec<SqlValue> = Vec::new();
 
-    let pk_json_values: Vec<JsonValue> = schema
+    let pk_columns: Vec<&ColumnInfo> = schema.iter().filter(|c| c.is_pk).collect();
+    let pk_json_values: Vec<JsonValue> = pk_columns
         .iter()
-        .filter(|c| c.is_pk)
-        .filter_map(|c| row_pks.get(&c.name).cloned())
+        .map(|c| row_pks[&c.name].clone())
         .collect();
-    for (c, v) in schema
+    for (c, v) in pk_columns
         .iter()
-        .filter(|c| c.is_pk)
         .zip(ValueConverter::convert_params(&pk_json_values)?)
     {
         columns.push(c.name.clone());
@@ -409,9 +445,7 @@ fn write_insert(
 
 /// Serialise the `haex_column_sigs` JSON map for a fresh INSERT — only the
 /// staged columns that carry a `sig` land in the map.
-fn build_sigs_json_for_insert(
-    staged: &[(String, SqlValue, String, Option<JsonValue>)],
-) -> String {
+fn build_sigs_json_for_insert(staged: &[(String, SqlValue, String, Option<JsonValue>)]) -> String {
     let mut map = serde_json::Map::new();
     for (col, _, _, sig) in staged {
         if let Some(s) = sig {
@@ -432,12 +466,12 @@ fn merge_sigs_json(
     pk_values: &[JsonValue],
     staged: &[(String, SqlValue, String, Option<JsonValue>)],
 ) -> std::result::Result<String, DatabaseError> {
-    let sql = format!(
-        "SELECT {COLUMN_SIGS_COLUMN} FROM \"{table_name}\" WHERE {where_clause}"
-    );
+    let sql = format!("SELECT {COLUMN_SIGS_COLUMN} FROM \"{table_name}\" WHERE {where_clause}");
     let sql_params = ValueConverter::convert_params(pk_values)?;
-    let param_refs: Vec<&dyn rusqlite::ToSql> =
-        sql_params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+    let param_refs: Vec<&dyn rusqlite::ToSql> = sql_params
+        .iter()
+        .map(|v| v as &dyn rusqlite::ToSql)
+        .collect();
     let mut stmt = tx.prepare(&sql)?;
     let existing: String = stmt
         .query_row(&*param_refs, |r| r.get::<_, String>(0))

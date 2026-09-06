@@ -76,7 +76,9 @@ fn delete_log_entry_fans_out_to_target_row() {
 
     // Target row must be gone; delete-log entry stays.
     let items: i64 = conn
-        .query_row("SELECT COUNT(*) FROM items WHERE id = 'r1'", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM items WHERE id = 'r1'", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(items, 0, "delete-log propagation must remove target row");
 
@@ -117,7 +119,9 @@ fn delete_log_does_not_propagate_when_target_row_is_strictly_newer() {
     assert_eq!(report.skipped_delete_target_newer, 1);
 
     let items: i64 = conn
-        .query_row("SELECT COUNT(*) FROM items WHERE id = 'r1'", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM items WHERE id = 'r1'", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(items, 1, "newer row must survive an older delete");
 }
@@ -151,7 +155,9 @@ fn insert_shadowed_by_prior_delete_is_suppressed_and_counted() {
     assert_eq!(report.skipped_shadowed_by_delete, 1);
 
     let items: i64 = conn
-        .query_row("SELECT COUNT(*) FROM items WHERE id = 'r1'", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM items WHERE id = 'r1'", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(items, 0, "shadowed insert must not land");
 }
@@ -185,4 +191,84 @@ fn insert_strictly_newer_than_all_deletes_wins_and_lands() {
         .query_row("SELECT body FROM items WHERE id = 'r1'", [], |r| r.get(0))
         .unwrap();
     assert_eq!(body, "legit-repost");
+}
+
+#[test]
+fn null_delete_hlc_is_skipped_without_aborting_apply() {
+    let (mut conn, hlc, _dev) = make_fixture();
+    create_crdt_table(&conn, "items", "body TEXT");
+    insert_target(&mut conn, &hlc);
+    conn.execute(
+        &format!(
+            "INSERT INTO {DELETED_ROWS_TABLE}
+             (id, table_name, row_pks, haex_hlc, haex_column_hlcs)
+             VALUES ('del-null', 'items', '{{\"id\":\"r1\"}}', NULL, '{{}}')"
+        ),
+        [],
+    )
+    .unwrap();
+
+    // The unknown column leaves the pre-existing delete-log row untouched,
+    // while collect_inbound_delete_log_ids still exercises propagation.
+    let report = apply_remote_changes(
+        &mut conn,
+        vec![delete_log_change(
+            "del-null",
+            HLC2,
+            "unknown_column",
+            json!("ignored"),
+        )],
+        &hlc,
+        &NoopSignatureProvider,
+    )
+    .unwrap();
+    assert_eq!(report.skipped_unknown_column, 1);
+
+    let items: i64 = conn
+        .query_row("SELECT COUNT(*) FROM items WHERE id = 'r1'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(items, 1);
+}
+
+#[test]
+fn target_delete_error_rolls_back_the_delete_log_apply() {
+    let (mut conn, hlc, _dev) = make_fixture();
+    create_crdt_table(&conn, "items", "body TEXT");
+    insert_target(&mut conn, &hlc);
+    conn.execute_batch(
+        "CREATE TRIGGER reject_item_delete
+         BEFORE DELETE ON items
+         BEGIN
+             SELECT RAISE(ABORT, 'delete rejected');
+         END;",
+    )
+    .unwrap();
+
+    assert!(apply_remote_changes(
+        &mut conn,
+        delete_log_batch("del-rollback", "items", "r1", HLC2),
+        &hlc,
+        &NoopSignatureProvider,
+    )
+    .is_err());
+
+    let items: i64 = conn
+        .query_row("SELECT COUNT(*) FROM items WHERE id = 'r1'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let deletes: i64 = conn
+        .query_row(
+            &format!("SELECT COUNT(*) FROM {DELETED_ROWS_TABLE} WHERE id = 'del-rollback'"),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        items, 1,
+        "failed propagation must not remove the target row"
+    );
+    assert_eq!(deletes, 0, "failed propagation must roll back the log row");
 }
