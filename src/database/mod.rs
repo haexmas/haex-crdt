@@ -14,15 +14,15 @@
 //! [`Database::clone`] — the internal `Arc` makes clones cheap, and every
 //! clone routes through the same lock.
 //!
-//! Opening the same DB file from **two different processes** is not formally
-//! supported yet. SQLite's file-level locks + WAL journaling keep individual
-//! operations from corrupting each other, and [`Database::open`] uses
-//! `busy_timeout` + `INSERT OR IGNORE` to survive a first-open race between
-//! two processes; but there is no advisory lock preventing two processes
-//! from mounting the same vault. A fs2-based file lock (matching
-//! haex-vault's `vault_lock.rs`) is planned in `src/db/lock.rs` and will
-//! wire into [`Database::open`] as its earliest step. Until then, treat
-//! cross-process access as best-effort.
+//! Opening the same DB file from **two processes** is rejected. As the very
+//! first step of [`Database::open`], the fs2-backed [`crate::DatabaseLock`]
+//! acquires an exclusive advisory lock on `<path>.lock`. A second process
+//! (or a second in-process `Database::open` while a live handle still holds
+//! the lock) fails immediately with
+//! [`crate::db::error::DatabaseError::VaultAlreadyOpenElsewhere`]. Different
+//! DB files remain independently openable — the lock only serializes on the
+//! same canonicalized path, and the OS releases it automatically on process
+//! exit so a crashed process cannot strand a database.
 //!
 //! # Open lifecycle
 //!
@@ -58,6 +58,7 @@ use crate::db::connection_context::ConnectionContext;
 use crate::db::core::open_and_init_db;
 use crate::db::error::DatabaseError;
 use crate::db::init::ensure_triggers_initialized;
+use crate::db::lock::{DatabaseLock, DatabaseLockError};
 use crate::db::migrations::{run_migrations, MigrationReport};
 use crate::error::{Error, Result};
 use crate::signature::{RemoteChanges, SignatureProvider};
@@ -73,16 +74,22 @@ pub const CONFIG_KEY_DEVICE_ID: &str = "device_id";
 /// or long-lived tasks always sees the same locked write path.
 #[derive(Clone)]
 pub struct Database {
-    inner: Arc<DatabaseInnerb>,
+    inner: Arc<DatabaseInner>,
 }
 
-struct DatabaseInnerb {
+struct DatabaseInner {
     conn: Mutex<Connection>,
     hlc: HlcService,
     signature_provider: Arc<dyn SignatureProvider>,
     #[allow(dead_code)] // kept for future re-check / diagnostics
     migration_source: Arc<dyn MigrationSource>,
     device_uuid: Uuid,
+    /// Advisory file lock guarding the DB from cross-process concurrent
+    /// mounts. Held for the lifetime of every clone of this `Database`;
+    /// dropping the last clone releases the OS-level lock via `Drop`.
+    /// See [`crate::db::lock`].
+    #[allow(dead_code)] // held for its Drop side effect
+    lock: DatabaseLock,
 }
 
 // Trait re-import to keep the `Arc<dyn ...>` field readable above without a
@@ -99,6 +106,13 @@ impl Database {
             .ok_or_else(|| DatabaseError::ValidationError {
                 reason: "database path must be valid UTF-8".to_string(),
             })?;
+
+        // Acquire the advisory file lock BEFORE opening SQLite so a
+        // second process racing us gets a clean `VaultAlreadyOpenElsewhere`
+        // instead of colliding on the WAL pragma or the device-id
+        // arbitration write.
+        let lock = DatabaseLock::try_acquire(&config.path).map_err(map_lock_error)?;
+
         let hlc = HlcService::new();
         let ctx = ConnectionContext::new();
         let mut conn = open_and_init_db(
@@ -127,12 +141,13 @@ impl Database {
         ensure_triggers_initialized(&mut conn, config.trigger_version)?;
 
         Ok(Database {
-            inner: Arc::new(DatabaseInnerb {
+            inner: Arc::new(DatabaseInner {
                 conn: Mutex::new(conn),
                 hlc,
                 signature_provider: config.signature_provider,
                 migration_source: config.migration_source,
                 device_uuid: supplied_uuid,
+                lock,
             }),
         })
     }
@@ -300,6 +315,28 @@ fn reconcile_device_id(conn: &Connection, supplied: Uuid) -> Result<()> {
         return Err(Error::DeviceIdMismatch { expected, supplied });
     }
     Ok(())
+}
+
+/// Map a [`DatabaseLockError`] into the crate's top-level [`Error`], routing
+/// genuine contention into the distinct
+/// [`DatabaseError::VaultAlreadyOpenElsewhere`] variant so UI callers can
+/// render a "database already open elsewhere" message rather than a raw
+/// filesystem error.
+fn map_lock_error(err: DatabaseLockError) -> Error {
+    match err {
+        DatabaseLockError::AlreadyHeld { path, source } => {
+            DatabaseError::VaultAlreadyOpenElsewhere {
+                path,
+                reason: source.to_string(),
+            }
+            .into()
+        }
+        DatabaseLockError::Io { path, source } => DatabaseError::IoError {
+            path,
+            reason: source.to_string(),
+        }
+        .into(),
+    }
 }
 
 #[cfg(test)]
