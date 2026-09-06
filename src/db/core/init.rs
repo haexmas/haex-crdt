@@ -16,6 +16,7 @@ use crate::db::connection_context::ConnectionContext;
 use crate::db::error::DatabaseError;
 use rusqlite::functions::FunctionFlags;
 use rusqlite::{Connection, OpenFlags};
+use std::time::Duration;
 use uuid::Uuid;
 
 /// Opens (or creates) the SQLCipher database at `path`, applies the encryption
@@ -40,6 +41,14 @@ pub fn open_and_init_db(
         Connection::open_with_flags(path, flags).map_err(|e| DatabaseError::ConnectionFailed {
             path: path.to_string(),
             reason: e.to_string(),
+        })?;
+
+    // Store opens may legitimately race during first initialization. Let
+    // SQLite wait for the other opener's short migration/config transaction
+    // instead of surfacing a transient SQLITE_BUSY error to the caller.
+    conn.busy_timeout(Duration::from_secs(5))
+        .map_err(|e| DatabaseError::ConnectionError {
+            reason: format!("failed to configure database busy timeout: {e}"),
         })?;
 
     conn.pragma_update(None, "key", key)
