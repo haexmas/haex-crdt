@@ -68,7 +68,11 @@ fn create_crdt_table(conn: &Connection, name: &str, extra_cols: &str) {
             "CREATE TABLE {name} (
                  id TEXT PRIMARY KEY NOT NULL{extra_sep}{extra_cols}
              )",
-            extra_sep = if extra_cols.is_empty() { "" } else { ",\n                 " }
+            extra_sep = if extra_cols.is_empty() {
+                ""
+            } else {
+                ",\n                 "
+            }
         ),
         [],
     )
@@ -78,11 +82,7 @@ fn create_crdt_table(conn: &Connection, name: &str, extra_cols: &str) {
     tx.commit().unwrap();
 }
 
-fn insert_row_via_transformer(
-    conn: &Connection,
-    hlc_service: &HlcService,
-    sql: &str,
-) -> String {
+fn insert_row_via_transformer(conn: &Connection, hlc_service: &HlcService, sql: &str) -> String {
     use crate::crdt::transformer::CrdtTransformer;
     use crate::db::core::strip_main_schema_prefix;
 
@@ -92,7 +92,9 @@ fn insert_row_via_transformer(
     HlcService::persist_timestamp(&tx, &ts).unwrap();
     let mut stmt = crate::db::core::parse_single_statement(sql).unwrap();
     let transformer = CrdtTransformer::new();
-    transformer.transform_execute_statement(&mut stmt, &ts).unwrap();
+    transformer
+        .transform_execute_statement(&mut stmt, &ts)
+        .unwrap();
     let rewritten = strip_main_schema_prefix(&stmt.to_string());
     tx.execute(&rewritten, []).unwrap();
     tx.commit().unwrap();
@@ -147,9 +149,11 @@ fn scan_dirty_tables_returns_tables_the_trigger_marked() {
 #[test]
 fn scan_returns_empty_for_missing_table() {
     let (conn, _hlc, dev) = make_fixture();
-    assert!(scan_table_for_local_changes(&conn, "no_such", None, &dev.to_string(), None, None)
-        .unwrap()
-        .is_empty());
+    assert!(
+        scan_table_for_local_changes(&conn, "no_such", None, &dev.to_string(), None, None)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -219,7 +223,11 @@ fn scan_emits_one_change_per_data_column_after_insert() {
 fn scan_excludes_pks_and_crdt_meta_from_emitted_columns() {
     let (conn, hlc, dev) = make_fixture();
     create_crdt_table(&conn, "items", "name TEXT");
-    insert_row_via_transformer(&conn, &hlc, "INSERT INTO items (id, name) VALUES ('i1', 'a')");
+    insert_row_via_transformer(
+        &conn,
+        &hlc,
+        "INSERT INTO items (id, name) VALUES ('i1', 'a')",
+    );
 
     let changes =
         scan_table_for_local_changes(&conn, "items", None, &dev.to_string(), None, None).unwrap();
@@ -245,11 +253,8 @@ fn scan_with_cursor_only_emits_columns_newer_than_it() {
         "INSERT INTO items (id, name, body) VALUES ('i1', 'a', 'b')",
     );
     // Update only the `body` column so its per-column HLC advances past t1.
-    let _t2 = insert_row_via_transformer(
-        &conn,
-        &hlc,
-        "UPDATE items SET body = 'b2' WHERE id = 'i1'",
-    );
+    let _t2 =
+        insert_row_via_transformer(&conn, &hlc, "UPDATE items SET body = 'b2' WHERE id = 'i1'");
 
     let changes =
         scan_table_for_local_changes(&conn, "items", Some(&t1), &dev.to_string(), None, None)
@@ -290,15 +295,9 @@ fn origin_node_filter_emits_only_this_nodes_writes() {
     .unwrap();
 
     let our_node = device_uuid_to_hlc_node(&dev.to_string()).expect("dev uuid parses");
-    let changes = scan_table_for_local_changes(
-        &conn,
-        "items",
-        None,
-        &dev.to_string(),
-        Some(our_node),
-        None,
-    )
-    .unwrap();
+    let changes =
+        scan_table_for_local_changes(&conn, "items", None, &dev.to_string(), Some(our_node), None)
+            .unwrap();
 
     // Only i1 (our write) should surface; i2 was authored elsewhere.
     let names: Vec<&JsonValue> = changes.iter().map(|c| &c.value).collect();
@@ -333,15 +332,9 @@ fn row_pks_filter_restricts_scan_to_allow_listed_rows() {
     wanted.insert(r#"{"id":"i1"}"#.to_string());
     wanted.insert(r#"{"id":"i3"}"#.to_string());
 
-    let changes = scan_table_for_local_changes(
-        &conn,
-        "items",
-        None,
-        &dev.to_string(),
-        None,
-        Some(&wanted),
-    )
-    .unwrap();
+    let changes =
+        scan_table_for_local_changes(&conn, "items", None, &dev.to_string(), None, Some(&wanted))
+            .unwrap();
     let pks: HashSet<&str> = changes.iter().map(|c| c.row_pks.as_str()).collect();
     assert_eq!(pks.len(), 2);
     assert!(pks.contains(r#"{"id":"i1"}"#));
@@ -412,7 +405,11 @@ fn row_pks_filter_composite_pk_matches_schema_declaration_order() {
 fn sig_is_none_when_column_sigs_are_absent() {
     let (conn, hlc, dev) = make_fixture();
     create_crdt_table(&conn, "items", "name TEXT");
-    insert_row_via_transformer(&conn, &hlc, "INSERT INTO items (id, name) VALUES ('i1', 'a')");
+    insert_row_via_transformer(
+        &conn,
+        &hlc,
+        "INSERT INTO items (id, name) VALUES ('i1', 'a')",
+    );
     let changes =
         scan_table_for_local_changes(&conn, "items", None, &dev.to_string(), None, None).unwrap();
     assert!(changes.iter().all(|c| c.sig.is_none()));
@@ -422,7 +419,11 @@ fn sig_is_none_when_column_sigs_are_absent() {
 fn sig_passes_through_as_raw_json_when_present() {
     let (conn, hlc, dev) = make_fixture();
     create_crdt_table(&conn, "items", "name TEXT");
-    insert_row_via_transformer(&conn, &hlc, "INSERT INTO items (id, name) VALUES ('i1', 'a')");
+    insert_row_via_transformer(
+        &conn,
+        &hlc,
+        "INSERT INTO items (id, name) VALUES ('i1', 'a')",
+    );
     // A downstream PostWriteHook would normally write here. Simulate by
     // directly setting a mixed shape: a plain sig for `name`, an
     // arbitrary nested shape for a phantom column to prove the crate

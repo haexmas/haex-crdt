@@ -17,12 +17,12 @@
 //! downstream consumers to migrate their hook implementations.
 
 pub mod crdt;
+pub mod database;
 pub mod db;
 pub mod device_id;
 pub mod error;
 pub mod migration;
 pub mod signature;
-pub mod database;
 pub mod table_names;
 
 /// Re-export used by [`PostWriteHook`] implementations to name transactions.
@@ -37,26 +37,26 @@ pub use error::{Error, MigrationJournal, Result};
 pub use migration::{MigrationName, MigrationSource, StaticMigrationSource};
 pub use signature::{AuthorId, NoopSignatureProvider, RemoteChanges, SignatureProvider};
 
-pub use crdt::hlc::{
-    compare_hlc_strings, device_uuid_to_hlc_node, hlc_is_from_node, hlc_is_newer, hlc_max, hlc_min,
-    hlc_node_id_suffix, parse_hlc_node_hex, HlcError, HlcService,
-};
-pub use crdt::trigger::{
-    drop_triggers_for_table, ensure_crdt_columns, ensure_crdt_columns_and_triggers,
-    get_table_schema, is_safe_identifier, setup_triggers_for_table, ColumnInfo, CrdtSetupError,
-    TriggerSetupResult,
+pub use crdt::apply::{
+    apply_remote_changes, column_sig_preimage, column_sig_preimage_from_parts,
+    delete_shadows_insert, should_propagate_delete, ApplyReport,
 };
 pub use crdt::cleanup::{
     cleanup_deleted_rows, get_crdt_stats, with_fk_disabled, CleanupResult, CrdtStats,
     ForeignKeyGuard, RetentionPolicy,
 };
+pub use crdt::hlc::{
+    compare_hlc_strings, device_uuid_to_hlc_node, hlc_is_from_node, hlc_is_newer, hlc_max, hlc_min,
+    hlc_node_id_suffix, parse_hlc_node_hex, HlcError, HlcService,
+};
 pub use crdt::scanner::{
     paginate_changes, scan_dirty_tables, scan_table_for_local_changes, ColumnChange,
     PULL_PAGE_BUDGET,
 };
-pub use crdt::apply::{
-    apply_remote_changes, column_sig_preimage, column_sig_preimage_from_parts,
-    delete_shadows_insert, should_propagate_delete, ApplyReport,
+pub use crdt::trigger::{
+    drop_triggers_for_table, ensure_crdt_columns, ensure_crdt_columns_and_triggers,
+    get_table_schema, is_safe_identifier, setup_triggers_for_table, ColumnInfo, CrdtSetupError,
+    TriggerSetupResult,
 };
 
 pub use db::connection_context::ConnectionContext;

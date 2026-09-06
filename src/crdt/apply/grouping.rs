@@ -29,9 +29,7 @@ use crate::crdt::trigger::is_safe_identifier;
 /// returns them sorted ascending by HLC. All writes issued inside the same
 /// sender-side transaction share a timestamp, so `hlc_timestamp` is the
 /// semantic grouping key.
-pub fn group_by_transaction_hlc(
-    changes: Vec<ColumnChange>,
-) -> Vec<(String, Vec<ColumnChange>)> {
+pub fn group_by_transaction_hlc(changes: Vec<ColumnChange>) -> Vec<(String, Vec<ColumnChange>)> {
     let mut groups: HashMap<String, Vec<ColumnChange>> = HashMap::new();
     for change in changes {
         groups
@@ -213,7 +211,10 @@ mod tests {
     // ---------- build_pk_where_from_map --------------------------------
 
     fn pk_map(pairs: &[(&str, JsonValue)]) -> serde_json::Map<String, JsonValue> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
     }
 
     #[test]
@@ -243,10 +244,7 @@ mod tests {
     fn where_returns_none_when_any_column_is_unsafe() {
         // All-or-nothing: a partial WHERE from remaining columns would
         // over-match. `evil; DROP TABLE` alone in the map would still fail.
-        let map = pk_map(&[
-            ("id", json!("x")),
-            ("evil; DROP TABLE", json!("y")),
-        ]);
+        let map = pk_map(&[("id", json!("x")), ("evil; DROP TABLE", json!("y"))]);
         assert!(build_pk_where_from_map(&map).is_none());
     }
 

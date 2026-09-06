@@ -1,0 +1,99 @@
+# CI for haex-crdt.
+#
+# Runs on every push to main and on every PR. Fails on:
+# - `cargo fmt --check` — style drift
+# - `cargo clippy -- -D warnings` (both feature configs) — lint drift
+# - `cargo test --lib` (both feature configs) — library regressions
+# - `cargo test --features raw-connection --test end_to_end` — plan §8
+#   acceptance test
+#
+# Rust toolchain is pinned to `RUST_VERSION` via a full commit SHA of
+# `dtolnay/rust-toolchain`; the `rustfmt`/`clippy` components are installed
+# explicitly so the pinned version's shipping copies are used.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: 1.96.0
+  # Deterministic + small caches. Debug info would double the target/ size
+  # for no CI-side value.
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - features: "default"
+            flags: ""
+          - features: "raw-connection"
+            flags: "--features raw-connection"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.features }}
+      - run: cargo clippy --lib --tests ${{ matrix.flags }} -- -D warnings
+
+  test:
+    name: Test (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - features: "default"
+            flags: ""
+            run_e2e: false
+          - features: "raw-connection"
+            flags: "--features raw-connection"
+            run_e2e: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test-${{ matrix.features }}
+      - name: cargo test --lib
+        run: cargo test --lib ${{ matrix.flags }}
+      - name: cargo test --test end_to_end (plan §8 acceptance)
+        if: matrix.run_e2e
+        run: cargo test --features raw-connection --test end_to_end

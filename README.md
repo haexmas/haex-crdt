@@ -2,7 +2,7 @@
 
 SQLite + SQLCipher storage with column-level LWW CRDT sync (uhlc-based Hybrid Logical Clocks). Extracted from `haex-vault` so both `haex-vault` and `holzi` can consume it as a Rust crate dependency.
 
-**Status**: pre-alpha. Trait foundation, HLC service, SQL transformers, trigger installer, scanner, cleanup, migration engine, apply pipeline, public `Database` facade, cross-process file locking, and the plan §8 end-to-end acceptance test all land. LICENSE, CI, and the `v0.1.0` tag remain — see [Roadmap](#roadmap).
+**Status**: `v0.1.0`. Trait foundation, HLC service, SQL transformers, trigger installer, scanner, cleanup, migration engine, apply pipeline, public `Database` facade, cross-process file locking, and the plan §8 end-to-end acceptance test all land. Dual-licensed **MIT OR Apache-2.0**. Consume via `haex-crdt = { git = "https://github.com/haexmas/haex-crdt", tag = "v0.1.0" }`.
 
 **Ownership**: source lived in `haex-vault`. This repository is the extraction target. Both `haex-vault` and `holzi` will depend on tagged releases here.
 
@@ -51,7 +51,7 @@ Extracted from [plan §5](../holzi/docs/plans/2026-09-04-haex-crdt-extraction-pl
 - [x] **Batch F** — public `Database` facade (`src/database/`) tying `DeviceIdProvider`, `SignatureProvider`, `MigrationSource` and the SQLCipher key together, with `install_crdt` backfill contract per plan §6.
 - [x] **Batch F.5** — port haex-vault's `vault_lock.rs` to `src/db/lock.rs`; wired into `Database::open` as the first step so cross-process (and in-process concurrent) opens fail fast with `VaultAlreadyOpenElsewhere`.
 - [x] **Batch G** — plan §8 end-to-end acceptance test in `tests/end_to_end.rs`: two `Database`s on two SQLCipher files, backfill on A, plain install on B, local write → scan → apply → readback with device-id contract enforced. Gated behind `raw-connection` since the local write goes through `with_connection`. The true "consumable from a tagged git commit" check lands with the `v0.1.0` tag in Batch H.
-- [ ] **Batch H** — LICENSE decision (plan §9 defers this), CI, first `v0.1.0` tag.
+- [x] **Batch H** — dual-licensed MIT OR Apache-2.0, CI on GitHub Actions (fmt + clippy + tests on base and `raw-connection` feature configs, plus the plan §8 acceptance test), `v0.1.0` tag on the merge commit.
 
 ## Sequence deviation from plan §7
 
@@ -65,4 +65,13 @@ This repository skipped Steps 1 and 2 by explicit operator direction. Tradeoff: 
 
 ## License
 
-TBD — see [plan §9](../holzi/docs/plans/2026-09-04-haex-crdt-extraction-plan.md). `haex-vault` has no `LICENSE` file at the time of extraction; a license is settled before the first tagged release.
+Dual-licensed under either of
+
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <https://www.apache.org/licenses/LICENSE-2.0>)
+
+at your option. Redistributors must comply with the applicable license terms, including retaining applicable copyright, patent, trademark, and attribution notices and adding prominent notices to modified files as required by Apache-2.0. `haex-vault` did not have a `LICENSE` file at extraction time (plan §9 called this a to-be-settled item); this crate settles it here.
+
+### Contributions
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual-licensed as above, without any additional terms or conditions.

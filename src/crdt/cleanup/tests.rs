@@ -108,8 +108,7 @@ fn with_fk_disabled_reenables_on_panic() {
     conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
 
     let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _: Result<(), rusqlite::Error> =
-            with_fk_disabled(&mut conn, |_| panic!("simulated"));
+        let _: Result<(), rusqlite::Error> = with_fk_disabled(&mut conn, |_| panic!("simulated"));
     }));
     assert!(payload.is_err(), "panic must propagate");
     assert!(fk_state(&conn), "FK must be re-enabled after a panic");
@@ -268,8 +267,7 @@ fn retention_all_deletes_every_delete_log_row() {
     insert_delete_log_row(&conn, "c", &hlc_at(3));
     assert_eq!(count_delete_log(&conn), 3);
 
-    let result =
-        cleanup_deleted_rows(&mut conn, RetentionPolicy::All, |_, _| Ok(())).unwrap();
+    let result = cleanup_deleted_rows(&mut conn, RetentionPolicy::All, |_, _| Ok(())).unwrap();
     assert_eq!(result.rows_deleted, 3);
     assert_eq!(count_delete_log(&conn), 0);
 }
@@ -281,8 +279,7 @@ fn retention_all_reports_max_pruned_hlc() {
     insert_delete_log_row(&conn, "b", &hlc_at(10));
     insert_delete_log_row(&conn, "c", &hlc_at(3));
 
-    let result =
-        cleanup_deleted_rows(&mut conn, RetentionPolicy::All, |_, _| Ok(())).unwrap();
+    let result = cleanup_deleted_rows(&mut conn, RetentionPolicy::All, |_, _| Ok(())).unwrap();
     assert_eq!(result.max_pruned_hlc, Some(hlc_at(10)));
 }
 
@@ -292,8 +289,7 @@ fn retention_all_keeps_rows_without_an_anchorable_hlc() {
     insert_delete_log_row(&conn, "anchorable", &hlc_at(5));
     insert_delete_log_row_without_hlc(&conn, "unanchorable");
 
-    let result =
-        cleanup_deleted_rows(&mut conn, RetentionPolicy::All, |_, _| Ok(())).unwrap();
+    let result = cleanup_deleted_rows(&mut conn, RetentionPolicy::All, |_, _| Ok(())).unwrap();
 
     assert_eq!(result.rows_deleted, 1);
     assert_eq!(result.max_pruned_hlc, Some(hlc_at(5)));
@@ -309,8 +305,7 @@ fn retention_all_keeps_rows_without_an_anchorable_hlc() {
 #[test]
 fn retention_all_on_empty_log_is_a_noop_with_none_max() {
     let mut conn = setup_cleanup_db();
-    let result =
-        cleanup_deleted_rows(&mut conn, RetentionPolicy::All, |_, _| Ok(())).unwrap();
+    let result = cleanup_deleted_rows(&mut conn, RetentionPolicy::All, |_, _| Ok(())).unwrap();
     assert_eq!(result.rows_deleted, 0);
     assert_eq!(result.max_pruned_hlc, None);
 }
@@ -438,7 +433,10 @@ fn before_prune_hook_receives_max_pruned_hlc_before_delete() {
     })
     .unwrap();
 
-    assert_eq!(observed.lock().unwrap().as_deref(), Some(hlc_at(10).as_str()));
+    assert_eq!(
+        observed.lock().unwrap().as_deref(),
+        Some(hlc_at(10).as_str())
+    );
     assert_eq!(
         *observed_count_at_hook.lock().unwrap(),
         2,
@@ -486,7 +484,9 @@ fn before_prune_hook_can_write_to_transaction_and_commits_atomically() {
     .unwrap();
 
     let stored: String = conn
-        .query_row("SELECT max_hlc FROM my_anchor WHERE id = 1", [], |r| r.get(0))
+        .query_row("SELECT max_hlc FROM my_anchor WHERE id = 1", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(stored, hlc_at(42));
     assert_eq!(count_delete_log(&conn), 0);
@@ -527,23 +527,17 @@ fn stats_counts_live_rows_across_crdt_tables_only() {
     .unwrap();
 
     conn.execute(
-        &format!(
-            "INSERT INTO items (id, body, {HLC_TIMESTAMP_COLUMN}) VALUES ('i1', 'a', '1/n')"
-        ),
+        &format!("INSERT INTO items (id, body, {HLC_TIMESTAMP_COLUMN}) VALUES ('i1', 'a', '1/n')"),
         [],
     )
     .unwrap();
     conn.execute(
-        &format!(
-            "INSERT INTO items (id, body, {HLC_TIMESTAMP_COLUMN}) VALUES ('i2', 'b', '1/n')"
-        ),
+        &format!("INSERT INTO items (id, body, {HLC_TIMESTAMP_COLUMN}) VALUES ('i2', 'b', '1/n')"),
         [],
     )
     .unwrap();
     conn.execute(
-        &format!(
-            "INSERT INTO notes (id, body, {HLC_TIMESTAMP_COLUMN}) VALUES ('n1', 'x', '1/n')"
-        ),
+        &format!("INSERT INTO notes (id, body, {HLC_TIMESTAMP_COLUMN}) VALUES ('n1', 'x', '1/n')"),
         [],
     )
     .unwrap();
@@ -562,7 +556,10 @@ fn stats_reports_delete_log_row_count() {
 
     let stats = get_crdt_stats(&conn).unwrap();
     assert_eq!(stats.delete_log_row_count, 2);
-    assert_eq!(stats.crdt_table_count, 0, "delete-log table itself excluded");
+    assert_eq!(
+        stats.crdt_table_count, 0,
+        "delete-log table itself excluded"
+    );
 }
 
 #[test]

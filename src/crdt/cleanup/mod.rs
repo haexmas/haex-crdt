@@ -300,10 +300,7 @@ fn read_max_prunable_hlc(
 /// been recorded yet or when the cutoff would overflow `i64` (SQLite
 /// stores integers signed 64-bit; an `as i64` cast on `u64 > i64::MAX`
 /// would wrap negative and silently skew the comparison).
-fn compute_cutoff(
-    tx: &Transaction,
-    policy: RetentionPolicy,
-) -> Result<Option<i64>, DatabaseError> {
+fn compute_cutoff(tx: &Transaction, policy: RetentionPolicy) -> Result<Option<i64>, DatabaseError> {
     let days = match policy {
         RetentionPolicy::TimeBasedDays { days } => days,
         RetentionPolicy::All => return Ok(None),
@@ -311,9 +308,7 @@ fn compute_cutoff(
 
     let current_hlc_str: Option<String> = tx
         .query_row(
-            &format!(
-                "SELECT value FROM {TABLE_CRDT_CONFIGS} WHERE key = ?1 AND type = 'hlc'"
-            ),
+            &format!("SELECT value FROM {TABLE_CRDT_CONFIGS} WHERE key = ?1 AND type = 'hlc'"),
             ["hlc_timestamp"],
             |row| row.get(0),
         )
@@ -322,13 +317,15 @@ fn compute_cutoff(
         return Ok(None);
     };
 
-    let current_timestamp = Timestamp::from_str(&current_hlc_str).map_err(|e| {
-        DatabaseError::HlcError {
+    let current_timestamp =
+        Timestamp::from_str(&current_hlc_str).map_err(|e| DatabaseError::HlcError {
             reason: format!("cleanup: invalid HLC in config '{current_hlc_str}': {e:?}"),
-        }
-    })?;
+        })?;
 
-    Ok(compute_cutoff_hlc_num(current_timestamp.get_time().as_u64(), days))
+    Ok(compute_cutoff_hlc_num(
+        current_timestamp.get_time().as_u64(),
+        days,
+    ))
 }
 
 /// Converts a current HLC time and retention window into SQLite's signed cutoff.

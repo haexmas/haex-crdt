@@ -36,7 +36,9 @@ mod tests {
         let db = DbConnection::new(Connection::open_in_memory().unwrap());
         let out = with_connection(&db, |c| {
             c.execute("CREATE TABLE t (id INTEGER)", []).unwrap();
-            let one: i64 = c.query_row("SELECT COUNT(*) FROM t", [], |r| r.get(0)).unwrap();
+            let one: i64 = c
+                .query_row("SELECT COUNT(*) FROM t", [], |r| r.get(0))
+                .unwrap();
             Ok(one)
         })
         .unwrap();

@@ -42,7 +42,7 @@
 pub mod config;
 mod install;
 
-pub use config::{InstallCrdtOptions, SqlCipherKey, DatabaseConfig, DEFAULT_TRIGGER_VERSION};
+pub use config::{DatabaseConfig, InstallCrdtOptions, SqlCipherKey, DEFAULT_TRIGGER_VERSION};
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};

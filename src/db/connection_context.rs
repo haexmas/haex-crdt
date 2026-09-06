@@ -145,7 +145,9 @@ mod tests {
 
         ctx_a.mark_write_pending();
         let first = ctx_a.current_or_new_tx_hlc(&hlc).expect("first hlc");
-        let second = ctx_b.current_or_new_tx_hlc(&hlc).expect("second hlc via clone");
+        let second = ctx_b
+            .current_or_new_tx_hlc(&hlc)
+            .expect("second hlc via clone");
         assert_eq!(first, second, "cloned context must share the pinned slot");
 
         ctx_b.reset_tx_slot();

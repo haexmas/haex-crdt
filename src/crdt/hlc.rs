@@ -111,10 +111,7 @@ impl HlcService {
         })
     }
 
-    fn build_hlc(
-        conn: &Connection,
-        device_id: &dyn DeviceIdProvider,
-    ) -> Result<HLC, HlcError> {
+    fn build_hlc(conn: &Connection, device_id: &dyn DeviceIdProvider) -> Result<HLC, HlcError> {
         let uuid = device_id
             .device_id()
             .map_err(|e| HlcError::DeviceIdProvider(e.to_string()))?;

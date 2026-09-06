@@ -223,9 +223,7 @@ mod tests {
 
     #[test]
     fn strips_from_insert_target_and_source_subquery() {
-        let out = strip_main_schema_prefix(
-            "INSERT INTO main.dst (id) SELECT id FROM main.src",
-        );
+        let out = strip_main_schema_prefix("INSERT INTO main.dst (id) SELECT id FROM main.src");
         assert!(!out.contains("main.dst"), "Got: {out}");
         assert!(!out.contains("main.src"), "Got: {out}");
     }
@@ -240,8 +238,7 @@ mod tests {
 
     #[test]
     fn strips_from_create_table_and_create_index_and_drop() {
-        assert!(!strip_main_schema_prefix("CREATE TABLE main.t (id INTEGER)")
-            .contains("main.t"));
+        assert!(!strip_main_schema_prefix("CREATE TABLE main.t (id INTEGER)").contains("main.t"));
         // For CREATE INDEX the walker only strips from the target table
         // (matches haex-vault); the index-name qualifier is intentionally
         // left alone because SQLite accepts a qualified index name.

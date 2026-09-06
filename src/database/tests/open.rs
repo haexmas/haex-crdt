@@ -191,8 +191,7 @@ fn open_rejects_non_utf8_database_paths() {
 
     let fx = Fixture::new();
     let mut config = fx.config;
-    config.path =
-        std::path::PathBuf::from(std::ffi::OsString::from_vec(vec![b'd', b'b', 0xFF]));
+    config.path = std::path::PathBuf::from(std::ffi::OsString::from_vec(vec![b'd', b'b', 0xFF]));
 
     let error = match Database::open(config) {
         Err(error) => error,
