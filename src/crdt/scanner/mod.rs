@@ -17,11 +17,11 @@
 //!   filters (the two filters that are content-agnostic).
 //! - [`paginate_changes`] — pack changes into transaction-HLC groups that
 //!   fit a byte budget without splitting a group across pages.
-//! - [`LocalColumnChange`] — the change record.
+//! - [`ColumnChange`] — the change record.
 //!
 //! # `sig` is opaque
 //!
-//! `LocalColumnChange::sig` is `Option<JsonValue>`: the raw JSON entry
+//! `ColumnChange::sig` is `Option<JsonValue>`: the raw JSON entry
 //! from `haex_column_sigs[column_name]` if present, else `None`. The
 //! crate does not decode a shape here — consumers with a signature
 //! provider decode into their own type. This is what makes the scanner
@@ -50,7 +50,7 @@ pub const PULL_PAGE_BUDGET: usize = MAX_CRDT_TRANSACTION_BYTES;
 /// consumer-defined sync layer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct LocalColumnChange {
+pub struct ColumnChange {
     pub table_name: String,
     /// JSON string of PK values in schema-declaration order, e.g.
     /// `{"id":"abc-123"}`. See [`scan_table_for_local_changes`] for the
@@ -83,7 +83,7 @@ pub fn scan_dirty_tables(conn: &Connection) -> Result<Vec<String>, DatabaseError
 }
 
 /// Reads per-column changes since `after_hlc` from `table_name`, returning
-/// one [`LocalColumnChange`] per (row, changed column) pair.
+/// one [`ColumnChange`] per (row, changed column) pair.
 ///
 /// # Filters
 ///
@@ -115,7 +115,7 @@ pub fn scan_table_for_local_changes(
     device_id: &str,
     origin_node_filter: Option<u128>,
     row_pks_filter: Option<&HashSet<String>>,
-) -> Result<Vec<LocalColumnChange>, DatabaseError> {
+) -> Result<Vec<ColumnChange>, DatabaseError> {
     let schema = get_table_schema(conn, table_name)?;
     if schema.is_empty() {
         return Ok(Vec::new());
@@ -197,7 +197,7 @@ pub fn scan_table_for_local_changes(
         params.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
     let mut rows = stmt.query(param_refs.as_slice())?;
 
-    let mut changes: Vec<LocalColumnChange> = Vec::new();
+    let mut changes: Vec<ColumnChange> = Vec::new();
     while let Some(row) = rows.next()? {
         emit_row_changes(
             row,
@@ -232,24 +232,24 @@ pub fn scan_table_for_local_changes(
 /// [`MAX_CRDT_TRANSACTION_BYTES`] because `execute_with_crdt` rejects
 /// oversized writes at commit time.
 pub fn paginate_changes(
-    changes: Vec<LocalColumnChange>,
+    changes: Vec<ColumnChange>,
     page_budget: usize,
-) -> (Vec<LocalColumnChange>, bool) {
+) -> (Vec<ColumnChange>, bool) {
     if changes.is_empty() {
         return (Vec::new(), false);
     }
 
-    let mut groups: HashMap<String, Vec<LocalColumnChange>> = HashMap::new();
+    let mut groups: HashMap<String, Vec<ColumnChange>> = HashMap::new();
     for change in changes {
         groups
             .entry(change.hlc_timestamp.clone())
             .or_default()
             .push(change);
     }
-    let mut ordered: Vec<(String, Vec<LocalColumnChange>)> = groups.into_iter().collect();
+    let mut ordered: Vec<(String, Vec<ColumnChange>)> = groups.into_iter().collect();
     ordered.sort_by(|a, b| crate::crdt::hlc::compare_hlc_strings(&a.0, &b.0));
 
-    let mut page: Vec<LocalColumnChange> = Vec::new();
+    let mut page: Vec<ColumnChange> = Vec::new();
     let mut running: usize = 0;
     let mut has_more = false;
 
@@ -309,7 +309,7 @@ fn emit_row_changes(
     device_id: &str,
     origin_node_filter: Option<u128>,
     row_pks_filter: Option<&HashSet<String>>,
-    out: &mut Vec<LocalColumnChange>,
+    out: &mut Vec<ColumnChange>,
 ) -> Result<(), DatabaseError> {
     let mut row_map: HashMap<&str, JsonValue> = HashMap::new();
     for (i, col_name) in select_columns.iter().enumerate() {
@@ -402,7 +402,7 @@ fn emit_row_changes(
                 .unwrap_or(JsonValue::Null);
             let sig = column_sigs_map.get(&col.name).cloned();
 
-            out.push(LocalColumnChange {
+            out.push(ColumnChange {
                 table_name: table_name.to_string(),
                 row_pks: pk_json.clone(),
                 column_name: col.name.clone(),

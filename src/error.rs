@@ -82,3 +82,11 @@ pub enum Error {
     #[error("{0}")]
     Message(String),
 }
+
+impl From<crate::db::error::DatabaseError> for Error {
+    fn from(err: crate::db::error::DatabaseError) -> Self {
+        // The db layer already renders a rich Display; keep the string here
+        // so callers see the same message the db layer would surface.
+        Error::Message(err.to_string())
+    }
+}
