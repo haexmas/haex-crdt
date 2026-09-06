@@ -1,6 +1,6 @@
-//! Store configuration types (see plan §6).
+//! Database configuration types (see plan §6).
 //!
-//! [`StoreConfig`] is the single input to [`super::Store::open`]. It ties
+//! [`DatabaseConfig`] is the single input to [`super::Database::open`]. It ties
 //! together the four consumer-owned traits — `DeviceIdProvider`,
 //! `SignatureProvider`, `MigrationSource`, and (implicitly, via
 //! `SqlCipherKey`) the encryption key — and the crate-owned parameters that
@@ -13,7 +13,7 @@ use crate::device_id::DeviceIdProvider;
 use crate::migration::MigrationSource;
 use crate::signature::SignatureProvider;
 
-/// The default trigger-schema version [`super::Store::open`] passes to
+/// The default trigger-schema version [`super::Database::open`] passes to
 /// `ensure_triggers_initialized` when the config leaves it unset. Bump the
 /// crate-side default in lockstep with any trigger-shape change so open
 /// upgrades the DB in place.
@@ -24,7 +24,7 @@ pub const DEFAULT_TRIGGER_VERSION: i32 = 1;
 /// passphrase (`"correct horse battery staple"`) or a raw-hex spelling
 /// (`"x'ABCD...F0'"`) that SQLCipher recognises directly.
 ///
-/// The wrapper exists so the surrounding type shape (`StoreConfig`) makes it
+/// The wrapper exists so the surrounding type shape (`DatabaseConfig`) makes it
 /// syntactically obvious what the value is, and so a future protocol shift
 /// (`kdf_iter=N`, PBKDF2 salt injection) can land without breaking the outer
 /// public signature.
@@ -43,13 +43,13 @@ impl SqlCipherKey {
     }
 }
 
-/// Configuration passed to [`super::Store::open`].
+/// Configuration passed to [`super::Database::open`].
 ///
 /// `Clone` because open takes it by value but downstream owners (tests, a
 /// wrapper store, a re-open loop) frequently want to build one config and
 /// hand copies around.
 #[derive(Clone)]
-pub struct StoreConfig {
+pub struct DatabaseConfig {
     /// Absolute filesystem path to the SQLCipher database. `":memory:"` is
     /// accepted for tests and produces an ephemeral connection with the
     /// encryption pragma still applied (no-op on the wire, still exercises
@@ -78,7 +78,7 @@ pub struct StoreConfig {
     pub trigger_version: i32,
 }
 
-/// Options controlling [`super::Store::install_crdt`]. Defaults to a fresh
+/// Options controlling [`super::Database::install_crdt`]. Defaults to a fresh
 /// install that refuses to overwrite an already-CRDT-managed table.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InstallCrdtOptions {
@@ -99,8 +99,8 @@ mod tests {
     use std::collections::BTreeMap;
     use uuid::Uuid;
 
-    fn dummy_config() -> StoreConfig {
-        StoreConfig {
+    fn dummy_config() -> DatabaseConfig {
+        DatabaseConfig {
             path: PathBuf::from(":memory:"),
             key: SqlCipherKey::new("test"),
             create_if_missing: true,

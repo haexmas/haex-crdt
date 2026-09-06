@@ -1,14 +1,32 @@
-//! Public `Store` facade (plan §6).
+//! Public `Database` facade (plan §6).
 //!
-//! [`Store`] ties together the crate's four consumer-owned traits
+//! [`Database`] ties together the crate's four consumer-owned traits
 //! (`DeviceIdProvider`, `SignatureProvider`, `MigrationSource`, plus the
 //! SQLCipher key) and exposes the CRDT operations as method calls. Consumers
 //! do not need to touch the internal helpers unless they explicitly opt into
 //! `with_connection` (see the crate `raw-connection` feature).
 //!
+//! # Usage scope
+//!
+//! One [`Database`] handle owns exactly one [`rusqlite::Connection`] behind
+//! an internal `Mutex`. The intended shape is **one `Database` per DB file
+//! per process**, shared across threads and async tasks via
+//! [`Database::clone`] — the internal `Arc` makes clones cheap, and every
+//! clone routes through the same lock.
+//!
+//! Opening the same DB file from **two different processes** is not formally
+//! supported yet. SQLite's file-level locks + WAL journaling keep individual
+//! operations from corrupting each other, and [`Database::open`] uses
+//! `busy_timeout` + `INSERT OR IGNORE` to survive a first-open race between
+//! two processes; but there is no advisory lock preventing two processes
+//! from mounting the same vault. A fs2-based file lock (matching
+//! haex-vault's `vault_lock.rs`) is planned in `src/db/lock.rs` and will
+//! wire into [`Database::open`] as its earliest step. Until then, treat
+//! cross-process access as best-effort.
+//!
 //! # Open lifecycle
 //!
-//! [`Store::open`] runs, in order:
+//! [`Database::open`] runs, in order:
 //! 1. Open the SQLCipher connection (`create_if_missing` decides whether a
 //!    missing file is created or errors).
 //! 2. Apply crate-owned CRDT bookkeeping migrations, then consumer
@@ -24,7 +42,7 @@
 pub mod config;
 mod install;
 
-pub use config::{InstallCrdtOptions, SqlCipherKey, StoreConfig, DEFAULT_TRIGGER_VERSION};
+pub use config::{InstallCrdtOptions, SqlCipherKey, DatabaseConfig, DEFAULT_TRIGGER_VERSION};
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -50,15 +68,15 @@ use crate::table_names::TABLE_CRDT_CONFIGS;
 /// bookkeeping via `with_connection` can find the row.
 pub const CONFIG_KEY_DEVICE_ID: &str = "device_id";
 
-/// The public facade — one `Store` per opened SQLCipher database. Cloning
-/// shares the underlying connection, so a `Store` handed to multiple threads
+/// The public facade — one `Database` per opened SQLCipher database. Cloning
+/// shares the underlying connection, so a `Database` handed to multiple threads
 /// or long-lived tasks always sees the same locked write path.
 #[derive(Clone)]
-pub struct Store {
-    inner: Arc<StoreInner>,
+pub struct Database {
+    inner: Arc<DatabaseInnerb>,
 }
 
-struct StoreInner {
+struct DatabaseInnerb {
     conn: Mutex<Connection>,
     hlc: HlcService,
     signature_provider: Arc<dyn SignatureProvider>,
@@ -71,10 +89,10 @@ struct StoreInner {
 // full path.
 use crate::migration::MigrationSource;
 
-impl Store {
+impl Database {
     /// Open (or create) the SQLCipher store described by `config`. See the
     /// module docs for the full open lifecycle.
-    pub fn open(config: StoreConfig) -> Result<Self> {
+    pub fn open(config: DatabaseConfig) -> Result<Self> {
         let path_str = config
             .path
             .to_str()
@@ -108,8 +126,8 @@ impl Store {
 
         ensure_triggers_initialized(&mut conn, config.trigger_version)?;
 
-        Ok(Store {
-            inner: Arc::new(StoreInner {
+        Ok(Database {
+            inner: Arc::new(DatabaseInnerb {
                 conn: Mutex::new(conn),
                 hlc,
                 signature_provider: config.signature_provider,
@@ -133,7 +151,7 @@ impl Store {
         self.inner.device_uuid
     }
 
-    /// Re-run the migration engine. `Store::open` already calls this once,
+    /// Re-run the migration engine. `Database::open` already calls this once,
     /// so callers only need it after they mutate the connection out-of-band
     /// (e.g. a test that resets state) or when driving a redundant retry.
     pub fn apply_migrations(&self) -> Result<MigrationReport> {
@@ -222,7 +240,7 @@ impl Store {
             .conn
             .lock()
             .map_err(|_| DatabaseError::MutexPoisoned {
-                reason: "Store connection mutex poisoned".to_string(),
+                reason: "Database connection mutex poisoned".to_string(),
             })?;
         f(&guard)
     }
@@ -238,7 +256,7 @@ impl Store {
             .conn
             .lock()
             .map_err(|_| DatabaseError::MutexPoisoned {
-                reason: "Store connection mutex poisoned".to_string(),
+                reason: "Database connection mutex poisoned".to_string(),
             })?;
         f(&mut guard)
     }
