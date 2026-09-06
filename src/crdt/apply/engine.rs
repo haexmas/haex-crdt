@@ -456,9 +456,9 @@ fn build_sigs_json_for_insert(staged: &[(String, SqlValue, String, Option<JsonVa
 }
 
 /// Merge staged sigs into the row's existing `haex_column_sigs` JSON for an
-/// UPDATE. Columns whose new value carries `sig: None` leave the previous
-/// map entry untouched — a sig-carrying peer that sends the same LWW loser
-/// again should not wipe a prior verified sig.
+/// UPDATE. A signed value replaces the column's previous signature; an
+/// unsigned value removes it because the old signature no longer describes
+/// the current column value.
 fn merge_sigs_json(
     tx: &Transaction<'_>,
     table_name: &str,
@@ -479,8 +479,13 @@ fn merge_sigs_json(
     let mut map: serde_json::Map<String, JsonValue> =
         serde_json::from_str(&existing).unwrap_or_default();
     for (col, _, _, sig) in staged {
-        if let Some(s) = sig {
-            map.insert(col.clone(), s.clone());
+        match sig {
+            Some(s) => {
+                map.insert(col.clone(), s.clone());
+            }
+            None => {
+                map.remove(col);
+            }
         }
     }
     Ok(serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string()))

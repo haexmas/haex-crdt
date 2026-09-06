@@ -272,3 +272,30 @@ fn target_delete_error_rolls_back_the_delete_log_apply() {
     );
     assert_eq!(deletes, 0, "failed propagation must roll back the log row");
 }
+
+#[test]
+fn delete_target_without_crdt_metadata_is_skipped() {
+    let (mut conn, hlc, _dev) = make_fixture();
+    conn.execute(
+        "CREATE TABLE plain_items (id TEXT PRIMARY KEY NOT NULL, body TEXT)",
+        [],
+    )
+    .unwrap();
+
+    apply_remote_changes(
+        &mut conn,
+        delete_log_batch("del-plain", "plain_items", "r1", HLC2),
+        &hlc,
+        &NoopSignatureProvider,
+    )
+    .unwrap();
+
+    let deletes: i64 = conn
+        .query_row(
+            &format!("SELECT COUNT(*) FROM {DELETED_ROWS_TABLE} WHERE id = 'del-plain'"),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(deletes, 1, "malformed target must not abort the batch");
+}

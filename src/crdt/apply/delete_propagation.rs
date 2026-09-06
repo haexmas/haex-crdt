@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use rusqlite::{params, Transaction};
 use serde_json::Value as JsonValue;
 
-use crate::crdt::columns::DELETED_ROWS_TABLE;
+use crate::crdt::columns::{COLUMN_HLCS_COLUMN, DELETED_ROWS_TABLE, HLC_TIMESTAMP_COLUMN};
 use crate::crdt::hlc::compare_hlc_strings;
 use crate::crdt::trigger::{get_table_schema, is_safe_identifier};
 use crate::db::error::DatabaseError;
@@ -167,6 +167,11 @@ pub fn propagate_deleted_rows_to_target_tables(
             Ok(s) => s,
             Err(_) => continue,
         };
+        if !schema.iter().any(|c| c.name == HLC_TIMESTAMP_COLUMN)
+            || !schema.iter().any(|c| c.name == COLUMN_HLCS_COLUMN)
+        {
+            continue;
+        }
         let expected_pks: HashSet<&str> = schema
             .iter()
             .filter(|c| c.is_pk)

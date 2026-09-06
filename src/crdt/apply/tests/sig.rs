@@ -19,7 +19,10 @@ const HLC1: &str = "0000000000000001/abcdef0000000000000000000000";
 const HLC2: &str = "0000000000000002/abcdef0000000000000000000000";
 
 fn signed(change: ColumnChange, sig: JsonValue) -> ColumnChange {
-    ColumnChange { sig: Some(sig), ..change }
+    ColumnChange {
+        sig: Some(sig),
+        ..change
+    }
 }
 
 // ---------- rejecting-at-N provider ----------------------------------------
@@ -84,7 +87,10 @@ fn on_before_apply_rejection_aborts_the_batch_before_any_write() {
     create_crdt_table(&conn, "items", "body TEXT");
 
     let fired = Arc::new(AtomicBool::new(false));
-    let provider = HookProvider { hook_fired: fired.clone(), reject: true };
+    let provider = HookProvider {
+        hook_fired: fired.clone(),
+        reject: true,
+    };
     let err = apply_remote_changes(
         &mut conn,
         vec![change("items", "r1", "body", HLC1, json!("v"))],
@@ -108,7 +114,10 @@ fn preflight_rejection_reports_offender_index_and_leaves_db_untouched() {
     create_crdt_table(&conn, "items", "body TEXT");
 
     let calls = Arc::new(AtomicUsize::new(0));
-    let provider = RejectAt { fail_at: 1, calls: calls.clone() };
+    let provider = RejectAt {
+        fail_at: 1,
+        calls: calls.clone(),
+    };
     let batch = vec![
         signed(
             change("items", "r1", "body", HLC1, json!("a")),
@@ -121,7 +130,9 @@ fn preflight_rejection_reports_offender_index_and_leaves_db_untouched() {
     ];
     let err = apply_remote_changes(&mut conn, batch, &hlc, &provider).unwrap_err();
     match err {
-        Error::SignatureVerificationFailed { first_failed_change } => {
+        Error::SignatureVerificationFailed {
+            first_failed_change,
+        } => {
             assert_eq!(first_failed_change, 1);
         }
         other => panic!("wrong variant: {other:?}"),
@@ -144,7 +155,9 @@ fn noop_provider_rejects_batch_carrying_non_null_signatures() {
     let err = apply_remote_changes(&mut conn, batch, &hlc, &NoopSignatureProvider).unwrap_err();
     assert!(matches!(
         err,
-        Error::SignatureVerificationFailed { first_failed_change: 0 }
+        Error::SignatureVerificationFailed {
+            first_failed_change: 0
+        }
     ));
 }
 
@@ -184,6 +197,30 @@ fn accepted_sig_lands_in_haex_column_sigs_json_map() {
         .unwrap();
     let sigs: serde_json::Map<String, JsonValue> = serde_json::from_str(&sigs_json).unwrap();
     assert_eq!(sigs.get("body"), Some(&sig));
+
+    // An unsigned newer value must not retain a signature for the old value.
+    apply_remote_changes(
+        &mut conn,
+        vec![change(
+            "items",
+            "r1",
+            "body",
+            HLC2,
+            json!("unsigned-new-value"),
+        )],
+        &hlc,
+        &NoopSignatureProvider,
+    )
+    .unwrap();
+    let sigs_json: String = conn
+        .query_row(
+            "SELECT haex_column_sigs FROM items WHERE id = 'r1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let sigs: serde_json::Map<String, JsonValue> = serde_json::from_str(&sigs_json).unwrap();
+    assert!(!sigs.contains_key("body"));
 }
 
 #[test]
