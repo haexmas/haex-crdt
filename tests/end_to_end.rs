@@ -54,6 +54,7 @@ fn migration_source() -> Arc<StaticMigrationSource> {
     Arc::new(StaticMigrationSource(m))
 }
 
+/// Builds the database configuration shared by both acceptance-test stores.
 fn config(
     path: PathBuf,
     device_id: Arc<dyn DeviceIdProvider>,
@@ -70,6 +71,7 @@ fn config(
     }
 }
 
+/// Runs a scalar count query through the public raw-connection hook.
 fn count(db: &Database, sql: &'static str) -> i64 {
     db.with_connection(|conn| {
         conn.query_row(sql, [], |r| r.get::<_, i64>(0))
@@ -78,11 +80,13 @@ fn count(db: &Database, sql: &'static str) -> i64 {
     .expect("count query")
 }
 
+/// Converts a raw SQLite error into the crate's public error type.
 fn map_err(e: haex_crdt::rusqlite::Error) -> haex_crdt::Error {
     haex_crdt::Error::Message(e.to_string())
 }
 
 #[test]
+/// Verifies the complete two-device migration, backfill, sync, and identity flow.
 fn two_devices_sync_backfilled_and_fresh_writes_end_to_end() {
     // ---------- setup ------------------------------------------------------
 
@@ -214,7 +218,10 @@ fn two_devices_sync_backfilled_and_fresh_writes_end_to_end() {
         .find(|c| c.row_pks.contains("fresh-1"))
         .expect("scan must include the fresh row");
     assert_eq!(fresh_change.column_name, "body");
-    assert_eq!(fresh_change.value, serde_json::json!("fresh body from device_a"));
+    assert_eq!(
+        fresh_change.value,
+        serde_json::json!("fresh body from device_a")
+    );
     let node_a = device_uuid_to_hlc_node(&device_a.to_string()).expect("device_a → hlc node");
     assert!(
         hlc_is_from_node(&fresh_change.hlc_timestamp, node_a),
@@ -250,6 +257,7 @@ fn two_devices_sync_backfilled_and_fresh_writes_end_to_end() {
         hlc_is_from_node(&hlc_on_b, node_a),
         "readback HLC on device_b must still be tagged with device_a's node; got {hlc_on_b}",
     );
+    assert_eq!(hlc_on_b, fresh_change.hlc_timestamp);
 
     // Legacy row from the backfill also landed.
     let legacy_on_b: String = db_b
