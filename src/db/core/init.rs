@@ -43,7 +43,7 @@ pub fn open_and_init_db(
             reason: e.to_string(),
         })?;
 
-    // Store opens may legitimately race during first initialization. Let
+    // Database opens may legitimately race during first initialization. Let
     // SQLite wait for the other opener's short migration/config transaction
     // instead of surfacing a transient SQLITE_BUSY error to the caller.
     conn.busy_timeout(Duration::from_secs(5))

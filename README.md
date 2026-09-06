@@ -2,7 +2,7 @@
 
 SQLite + SQLCipher storage with column-level LWW CRDT sync (uhlc-based Hybrid Logical Clocks). Extracted from `haex-vault` so both `haex-vault` and `holzi` can consume it as a Rust crate dependency.
 
-**Status**: pre-alpha. First slice landed: trait foundation, HLC service, SQL transformers. Trigger installer, scanner, cleanup, migration engine, apply pipeline, and public `Store` facade are pending — see [Roadmap](#roadmap).
+**Status**: pre-alpha. Trait foundation, HLC service, SQL transformers, trigger installer, scanner, cleanup, migration engine, apply pipeline, and public `Database` facade all land. Cross-process file locking + a standalone-git-tag acceptance test are pending before the first tagged release — see [Roadmap](#roadmap).
 
 **Ownership**: source lived in `haex-vault`. This repository is the extraction target. Both `haex-vault` and `holzi` will depend on tagged releases here.
 
@@ -27,7 +27,13 @@ Not provided (intentionally):
 
 ## rusqlite version contract
 
-`Store::with_connection(&rusqlite::Connection)` will be exposed behind the `raw-connection` feature (default off). When enabled, all consumers of `haex-crdt` in one dependency tree must resolve to the same `rusqlite` version this crate pins; otherwise `Connection`'s `ToSql`/`FromSql` types belong to different crate instances and cannot be passed through the callback. See plan §6.
+`Database::with_connection(&rusqlite::Connection)` is exposed behind the `raw-connection` feature (default off). When enabled, all consumers of `haex-crdt` in one dependency tree must resolve to the same `rusqlite` version this crate pins; otherwise `Connection`'s `ToSql`/`FromSql` types belong to different crate instances and cannot be passed through the callback. See plan §6.
+
+## Usage scope
+
+A `Database` handle owns one `rusqlite::Connection` behind an internal `Mutex`. The intended shape is **one `Database` per DB file per process**, shared across threads / async tasks via `Database.clone()` — the internal `Arc` makes clones cheap and every clone routes through the same lock.
+
+Opening the same DB file from **two different processes** is not formally supported yet: the SQLite file-level locks plus WAL journaling keep the two connections from corrupting each other for individual operations, and the open path uses `busy_timeout` + `INSERT OR IGNORE` to survive concurrent first-open races, but there is no advisory lock preventing two processes from mounting the same vault at all. A fs2-based file lock (matching haex-vault's `vault_lock.rs`) lands before `v0.1.0` in `src/db/lock.rs`.
 
 ## Trust contract for `NoopSignatureProvider`
 
@@ -38,11 +44,12 @@ Not provided (intentionally):
 Extracted from [plan §5](../holzi/docs/plans/2026-09-04-haex-crdt-extraction-plan.md). Each slice ends with `cargo test` green.
 
 - [x] **Batch A** — trait foundation, HLC service, transformers, error types (this slice).
-- [ ] **Batch B** — port `trigger.rs`, `scanner.rs`, `cleanup.rs` from haex-vault. Route `column_sig` call sites through `SignatureProvider`.
-- [ ] **Batch C** — port `database/{connection_context, row, stats, constants, paths, listing, maintenance, import_delete, core/*, vault_lock}`. Drop Tauri command shims.
-- [ ] **Batch D** — port migrations engine. Swap `tauri::path::BaseDirectory` lookup for `MigrationSource`. Split into two journals (`haex_crdt_migrations` for crate-owned, `haex_app_migrations` for consumer-owned).
-- [ ] **Batch E** — port `crdt/commands/apply/*`. Strip `#[tauri::command]` shims. Route `registry_row_sig` policy through `SignatureProvider::on_before_apply`. Implement all-or-nothing apply transaction per plan §4.2.
-- [ ] **Batch F** — build public `Store` facade in `src/store.rs` per plan §6.
+- [x] **Batch B** — trigger installer, scanner, cleanup ported and trimmed to the CRDT-generic surface.
+- [x] **Batch C** — `database/*` core (read shell, write path with `PostWriteHook`, trigger bootstrap) ported.
+- [x] **Batch D** — migrations engine with two journals (`haex_crdt_migrations` crate-owned, `haex_app_migrations` consumer-owned) and SHA-256 drift detection.
+- [x] **Batch E** — apply pipeline with all-or-nothing signature preflight per plan §4.2.
+- [x] **Batch F** — public `Database` facade (`src/database/`) tying `DeviceIdProvider`, `SignatureProvider`, `MigrationSource` and the SQLCipher key together, with `install_crdt` backfill contract per plan §6.
+- [ ] **Batch F.5** — port haex-vault's `vault_lock.rs` to `src/db/lock.rs`; wire it into `Database::open` so cross-process opens fail fast with a distinct error variant.
 - [ ] **Batch G** — port relevant integration tests from haex-vault. Add the standalone-git-tag acceptance test (plan §8) as a `tests/` binary.
 - [ ] **Batch H** — LICENSE decision (plan §9 defers this), CI, first `v0.1.0` tag.
 

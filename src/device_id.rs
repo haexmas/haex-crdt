@@ -13,9 +13,9 @@ use crate::error::Result;
 ///   Consumers that don't yet have a persisted device UUID are responsible
 ///   for minting and persisting one **before** handing a provider to
 ///   `haex-crdt`.
-/// - `Store::open` records the `device_id` observed on first successful
+/// - `Database::open` records the `device_id` observed on first successful
 ///   open in `haex_hlc_state`. On subsequent opens, if the supplied
-///   provider returns a different `Uuid`, `Store::open` returns
+///   provider returns a different `Uuid`, `Database::open` returns
 ///   `Error::DeviceIdMismatch` rather than silently rewriting HLC state.
 pub trait DeviceIdProvider: Send + Sync {
     fn device_id(&self) -> Result<Uuid>;
@@ -59,7 +59,7 @@ mod tests {
     #[test]
     fn device_id_provider_is_object_safe_via_dyn_dispatch() {
         // Ensures the trait can be stored behind Arc<dyn ...> as
-        // `StoreConfig::device_id` requires (plan §6).
+        // `DatabaseConfig::device_id` requires (plan §6).
         let uuid = Uuid::new_v4();
         let provider: Arc<dyn DeviceIdProvider> = Arc::new(StaticDeviceId(uuid));
         assert_eq!(provider.device_id().unwrap(), uuid);

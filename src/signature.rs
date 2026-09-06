@@ -163,7 +163,7 @@ mod tests {
     #[test]
     fn signature_provider_is_object_safe_via_dyn_dispatch() {
         // Ensures the trait can be stored behind Arc<dyn ...> as
-        // `StoreConfig::signature_provider` requires (plan §6).
+        // `DatabaseConfig::signature_provider` requires (plan §6).
         let provider: std::sync::Arc<dyn SignatureProvider> =
             std::sync::Arc::new(NoopSignatureProvider);
         assert_eq!(provider.author_id(), AuthorId::anonymous());

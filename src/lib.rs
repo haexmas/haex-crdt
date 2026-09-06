@@ -22,7 +22,7 @@ pub mod device_id;
 pub mod error;
 pub mod migration;
 pub mod signature;
-pub mod store;
+pub mod database;
 pub mod table_names;
 
 /// Re-export used by [`PostWriteHook`] implementations to name transactions.
@@ -82,7 +82,7 @@ pub use table_names::{
     TABLE_APP_MIGRATIONS, TABLE_CRDT_CONFIGS, TABLE_CRDT_DIRTY_TABLES, TABLE_CRDT_MIGRATIONS,
 };
 
-pub use store::{
-    InstallCrdtOptions, SqlCipherKey, Store, StoreConfig, CONFIG_KEY_DEVICE_ID,
+pub use database::{
+    Database, DatabaseConfig, InstallCrdtOptions, SqlCipherKey, CONFIG_KEY_DEVICE_ID,
     DEFAULT_TRIGGER_VERSION,
 };
