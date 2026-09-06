@@ -13,6 +13,7 @@ pub mod core;
 pub mod error;
 pub mod execute_hook;
 pub mod init;
+pub mod lock;
 pub mod migrations;
 pub mod row;
 

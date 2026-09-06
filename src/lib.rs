@@ -75,6 +75,7 @@ pub use db::init::{
     discover_crdt_tables, ensure_triggers_for_all_tables, ensure_triggers_initialized,
     CONFIG_KEY_TRIGGERS_ENABLED, CONFIG_KEY_TRIGGER_VERSION,
 };
+pub use db::lock::{DatabaseLock, DatabaseLockError};
 pub use db::migrations::{run_migrations, MigrationReport, CRATE_MIGRATIONS};
 pub use db::row::{get_bool, get_string};
 pub use db::DbConnection;
