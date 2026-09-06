@@ -117,6 +117,14 @@ impl DatabaseLock {
 /// for `Database::open` with `create_if_missing = true`, which acquires the
 /// lock BEFORE any SQLite file is written.
 fn normalize_database_path(database_path: &Path) -> Result<PathBuf, DatabaseLockError> {
+    normalize_database_path_inner(database_path, &mut Vec::new())
+}
+
+/// Resolve a database path while tracking dangling symlink aliases.
+fn normalize_database_path_inner(
+    database_path: &Path,
+    visited: &mut Vec<PathBuf>,
+) -> Result<PathBuf, DatabaseLockError> {
     if let Ok(canonical) = std::fs::canonicalize(database_path) {
         return Ok(canonical);
     }
@@ -136,7 +144,10 @@ fn normalize_database_path(database_path: &Path) -> Result<PathBuf, DatabaseLock
         .file_name()
         .ok_or_else(|| DatabaseLockError::Io {
             path: database_path.display().to_string(),
-            source: io::Error::new(io::ErrorKind::InvalidInput, "database path has no file name"),
+            source: io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "database path has no file name",
+            ),
         })?;
 
     // Empty parent (".") canonicalizes via the current working dir, which is
@@ -153,7 +164,29 @@ fn normalize_database_path(database_path: &Path) -> Result<PathBuf, DatabaseLock
             source,
         })?;
 
-    Ok(parent_canonical.join(file_name))
+    let normalized = parent_canonical.join(file_name);
+    if visited.iter().any(|path| path == &normalized) {
+        return Err(DatabaseLockError::Io {
+            path: database_path.display().to_string(),
+            source: io::Error::new(io::ErrorKind::InvalidInput, "symbolic link loop"),
+        });
+    }
+    visited.push(normalized.clone());
+
+    // `canonicalize` fails for a final symlink whose target does not exist.
+    // Resolve that target before falling back to the ordinary nonexistent-file
+    // path, otherwise `alias.db` and its eventual `real.db` target get separate
+    // lock files during concurrent first opens.
+    if let Ok(target) = std::fs::read_link(database_path) {
+        let target = if target.is_absolute() {
+            target
+        } else {
+            parent_canonical.join(target)
+        };
+        return normalize_database_path_inner(&target, visited);
+    }
+
+    Ok(normalized)
 }
 
 /// Classify an error returned by `try_lock_exclusive`. Only genuine lock
@@ -231,6 +264,8 @@ fn lock_path_for(database_path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Barrier};
+
     use super::*;
 
     #[test]
@@ -341,5 +376,42 @@ mod tests {
         );
 
         drop(first);
+    }
+
+    /// A dangling final symlink and its absent target must contend on one lock.
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_alias_contends_before_target_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("real.db");
+        let alias = dir.path().join("alias.db");
+        std::os::unix::fs::symlink(&real, &alias).expect("symlink");
+        assert!(
+            !real.exists(),
+            "the target must be absent before both opens"
+        );
+
+        let start = Arc::new(Barrier::new(2));
+        let alias_start = Arc::clone(&start);
+        let alias_thread = std::thread::spawn(move || {
+            alias_start.wait();
+            DatabaseLock::try_acquire(&alias)
+        });
+        let real_start = Arc::clone(&start);
+        let real_thread = std::thread::spawn(move || {
+            real_start.wait();
+            DatabaseLock::try_acquire(&real)
+        });
+
+        let alias_result = alias_thread.join().expect("alias thread");
+        let real_result = real_thread.join().expect("real thread");
+
+        match (&alias_result, &real_result) {
+            (Ok(_), Err(DatabaseLockError::AlreadyHeld { .. }))
+            | (Err(DatabaseLockError::AlreadyHeld { .. }), Ok(_)) => {}
+            (alias_result, real_result) => panic!(
+                "dangling symlink and target must share one lock; got {alias_result:?} + {real_result:?}"
+            ),
+        }
     }
 }

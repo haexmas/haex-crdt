@@ -70,25 +70,23 @@ fn concurrent_first_opens_serialize_via_vault_lock() {
     let first_start = Arc::clone(&start);
     let first = thread::spawn(move || {
         first_start.wait();
-        Database::open(first_config).map(|db| db.device_id())
+        Database::open(first_config)
     });
     let second_start = Arc::clone(&start);
     let second = thread::spawn(move || {
         second_start.wait();
-        Database::open(second_config).map(|db| db.device_id())
+        Database::open(second_config)
     });
 
     let first_result = first.join().unwrap();
     let second_result = second.join().unwrap();
 
-    match (first_result, second_result) {
-        (Ok(id), Err(err)) | (Err(err), Ok(id)) => {
-            assert_eq!(id, fx.device);
-            assert_already_open(&err);
+    match (&first_result, &second_result) {
+        (Ok(db), Err(err)) | (Err(err), Ok(db)) => {
+            assert_eq!(db.device_id(), fx.device);
+            assert_already_open(err);
         }
-        (a, b) => panic!(
-            "lock must produce exactly one Ok + one AlreadyOpen; got {a:?} + {b:?}"
-        ),
+        _ => panic!("lock must produce exactly one Ok + one AlreadyOpen"),
     }
 }
 
@@ -109,29 +107,27 @@ fn concurrent_first_opens_with_different_device_ids_reject_the_loser() {
     let first_start = Arc::clone(&start);
     let first = thread::spawn(move || {
         first_start.wait();
-        Database::open(first_config).map(|db| db.device_id())
+        Database::open(first_config)
     });
     let second_start = Arc::clone(&start);
     let second = thread::spawn(move || {
         second_start.wait();
-        Database::open(other_config).map(|db| db.device_id())
+        Database::open(other_config)
     });
 
     let first_result = first.join().unwrap();
     let second_result = second.join().unwrap();
 
-    match (first_result, second_result) {
-        (Ok(id), Err(err)) => {
-            assert_eq!(id, fx.device);
-            assert_already_open(&err);
+    match (&first_result, &second_result) {
+        (Ok(db), Err(err)) => {
+            assert_eq!(db.device_id(), fx.device);
+            assert_already_open(err);
         }
-        (Err(err), Ok(id)) => {
-            assert_eq!(id, other_device);
-            assert_already_open(&err);
+        (Err(err), Ok(db)) => {
+            assert_eq!(db.device_id(), other_device);
+            assert_already_open(err);
         }
-        (a, b) => panic!(
-            "lock must produce exactly one Ok + one AlreadyOpen; got {a:?} + {b:?}"
-        ),
+        _ => panic!("lock must produce exactly one Ok + one AlreadyOpen"),
     }
 }
 
