@@ -2,7 +2,7 @@
 
 SQLite + SQLCipher storage with column-level LWW CRDT sync (uhlc-based Hybrid Logical Clocks). Extracted from `haex-vault` so both `haex-vault` and `holzi` can consume it as a Rust crate dependency.
 
-**Status**: pre-alpha. Trait foundation, HLC service, SQL transformers, trigger installer, scanner, cleanup, migration engine, apply pipeline, public `Database` facade, and cross-process file locking all land. A standalone-git-tag acceptance test remains before the first tagged release — see [Roadmap](#roadmap).
+**Status**: pre-alpha. Trait foundation, HLC service, SQL transformers, trigger installer, scanner, cleanup, migration engine, apply pipeline, public `Database` facade, cross-process file locking, and the plan §8 end-to-end acceptance test all land. LICENSE, CI, and the `v0.1.0` tag remain — see [Roadmap](#roadmap).
 
 **Ownership**: source lived in `haex-vault`. This repository is the extraction target. Both `haex-vault` and `holzi` will depend on tagged releases here.
 
@@ -50,7 +50,7 @@ Extracted from [plan §5](../holzi/docs/plans/2026-09-04-haex-crdt-extraction-pl
 - [x] **Batch E** — apply pipeline with all-or-nothing signature preflight per plan §4.2.
 - [x] **Batch F** — public `Database` facade (`src/database/`) tying `DeviceIdProvider`, `SignatureProvider`, `MigrationSource` and the SQLCipher key together, with `install_crdt` backfill contract per plan §6.
 - [x] **Batch F.5** — port haex-vault's `vault_lock.rs` to `src/db/lock.rs`; wired into `Database::open` as the first step so cross-process (and in-process concurrent) opens fail fast with `VaultAlreadyOpenElsewhere`.
-- [ ] **Batch G** — port relevant integration tests from haex-vault. Add the standalone-git-tag acceptance test (plan §8) as a `tests/` binary.
+- [x] **Batch G** — plan §8 end-to-end acceptance test in `tests/end_to_end.rs`: two `Database`s on two SQLCipher files, backfill on A, plain install on B, local write → scan → apply → readback with device-id contract enforced. Gated behind `raw-connection` since the local write goes through `with_connection`. The true "consumable from a tagged git commit" check lands with the `v0.1.0` tag in Batch H.
 - [ ] **Batch H** — LICENSE decision (plan §9 defers this), CI, first `v0.1.0` tag.
 
 ## Sequence deviation from plan §7
