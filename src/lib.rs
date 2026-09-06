@@ -22,6 +22,7 @@ pub mod device_id;
 pub mod error;
 pub mod migration;
 pub mod signature;
+pub mod store;
 pub mod table_names;
 
 /// Re-export used by [`PostWriteHook`] implementations to name transactions.
@@ -79,4 +80,9 @@ pub use db::row::{get_bool, get_string};
 pub use db::DbConnection;
 pub use table_names::{
     TABLE_APP_MIGRATIONS, TABLE_CRDT_CONFIGS, TABLE_CRDT_DIRTY_TABLES, TABLE_CRDT_MIGRATIONS,
+};
+
+pub use store::{
+    InstallCrdtOptions, SqlCipherKey, Store, StoreConfig, CONFIG_KEY_DEVICE_ID,
+    DEFAULT_TRIGGER_VERSION,
 };
