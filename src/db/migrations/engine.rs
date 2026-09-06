@@ -164,7 +164,9 @@ fn read_journal(conn: &Connection, journal_table: &str) -> Result<Vec<(String, S
         "SELECT migration_name, sha256_digest FROM {journal_table} ORDER BY migration_name ASC"
     ))?;
     let rows = stmt
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(rows)
 }
@@ -203,9 +205,7 @@ fn apply_single_migration(
 
     execute_statements(&tx, content, transform_ddl)?;
     tx.execute(
-        &format!(
-            "INSERT INTO {journal_table} (migration_name, sha256_digest) VALUES (?1, ?2)"
-        ),
+        &format!("INSERT INTO {journal_table} (migration_name, sha256_digest) VALUES (?1, ?2)"),
         params![name.as_str(), digest],
     )?;
     tx.commit()?;

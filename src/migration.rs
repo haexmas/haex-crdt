@@ -55,12 +55,13 @@ pub struct StaticMigrationSource(pub BTreeMap<MigrationName, String>);
 
 impl MigrationSource for StaticMigrationSource {
     fn load_migration(&self, name: &MigrationName) -> Result<String> {
-        self.0.get(name).cloned().ok_or_else(|| {
-            Error::MigrationMissingFromSource {
+        self.0
+            .get(name)
+            .cloned()
+            .ok_or_else(|| Error::MigrationMissingFromSource {
                 journal: MigrationJournal::ConsumerOwned,
                 name: name.0.clone(),
-            }
-        })
+            })
     }
 
     fn list_migrations(&self) -> Result<Vec<MigrationName>> {
@@ -116,7 +117,9 @@ mod tests {
     #[test]
     fn static_source_load_returns_stored_content() {
         let src = source(&[("0001_init", "CREATE TABLE t (id INTEGER);")]);
-        let content = src.load_migration(&MigrationName::from("0001_init")).unwrap();
+        let content = src
+            .load_migration(&MigrationName::from("0001_init"))
+            .unwrap();
         assert_eq!(content, "CREATE TABLE t (id INTEGER);");
     }
 
@@ -156,7 +159,10 @@ mod tests {
     #[test]
     fn static_source_list_returns_identical_sequence_across_calls() {
         let src = source(&[("0001_a", "a"), ("0002_b", "b")]);
-        assert_eq!(src.list_migrations().unwrap(), src.list_migrations().unwrap());
+        assert_eq!(
+            src.list_migrations().unwrap(),
+            src.list_migrations().unwrap()
+        );
     }
 
     #[test]

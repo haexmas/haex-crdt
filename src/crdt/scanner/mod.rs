@@ -334,10 +334,9 @@ fn emit_row_changes(
             pk_json.push(',');
         }
         first = false;
-        let key_json =
-            serde_json::to_string(&pk.name).map_err(|e| DatabaseError::QueryError {
-                reason: format!("serialize pk column name '{}': {e}", pk.name),
-            })?;
+        let key_json = serde_json::to_string(&pk.name).map_err(|e| DatabaseError::QueryError {
+            reason: format!("serialize pk column name '{}': {e}", pk.name),
+        })?;
         let val_json = serde_json::to_string(&val).map_err(|e| DatabaseError::QueryError {
             reason: format!("serialize pk column value for '{}': {e}", pk.name),
         })?;

@@ -92,7 +92,10 @@ fn consumer_migration_creates_its_table_and_records_in_app_journal() {
 
     assert_eq!(report.consumer_applied, 1);
     assert!(table_exists(&conn, "items"));
-    assert_eq!(journal_names(&conn, TABLE_APP_MIGRATIONS), vec!["0001_items"]);
+    assert_eq!(
+        journal_names(&conn, TABLE_APP_MIGRATIONS),
+        vec!["0001_items"]
+    );
 }
 
 #[test]
@@ -213,10 +216,7 @@ fn content_drift_never_rolls_back_previously_applied_content() {
     // Drift must abort the run before touching anything; already-applied
     // migrations stay in the journal so a second correct run resumes cleanly.
     let mut conn = Connection::open_in_memory().unwrap();
-    let src = source_from(&[(
-        "0001_a",
-        "CREATE TABLE a_no_sync (id INTEGER PRIMARY KEY);",
-    )]);
+    let src = source_from(&[("0001_a", "CREATE TABLE a_no_sync (id INTEGER PRIMARY KEY);")]);
     run_migrations(&mut conn, &src).unwrap();
 
     let drifted = source_from(&[("0001_a", "CREATE TABLE a_no_sync (id TEXT PRIMARY KEY);")]);
@@ -340,7 +340,10 @@ fn concurrent_connections_apply_each_migration_only_once() {
 
     let conn = Connection::open(path).unwrap();
     assert!(table_exists(&conn, "shared_no_sync"));
-    assert_eq!(journal_names(&conn, TABLE_APP_MIGRATIONS), vec!["0001_shared"]);
+    assert_eq!(
+        journal_names(&conn, TABLE_APP_MIGRATIONS),
+        vec!["0001_shared"]
+    );
 }
 
 // --- transactional isolation of a single migration -------------------------
@@ -375,14 +378,14 @@ fn crate_bootstrap_records_a_stable_digest() {
     let (name, _) = CRATE_MIGRATIONS[0];
     let digest: String = conn
         .query_row(
-            &format!(
-                "SELECT sha256_digest FROM {TABLE_CRDT_MIGRATIONS} WHERE migration_name = ?"
-            ),
+            &format!("SELECT sha256_digest FROM {TABLE_CRDT_MIGRATIONS} WHERE migration_name = ?"),
             [name],
             |r| r.get(0),
         )
         .unwrap();
     // SHA-256 hex is 64 lowercase hex chars.
     assert_eq!(digest.len(), 64);
-    assert!(digest.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    assert!(digest
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
 }

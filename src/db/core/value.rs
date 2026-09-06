@@ -140,9 +140,8 @@ mod tests {
 
     #[test]
     fn convert_params_preserves_order_and_types() {
-        let out =
-            ValueConverter::convert_params(&[json!(1), json!("x"), json!(null), json!(true)])
-                .unwrap();
+        let out = ValueConverter::convert_params(&[json!(1), json!("x"), json!(null), json!(true)])
+            .unwrap();
         assert_eq!(
             out,
             vec![
@@ -156,7 +155,10 @@ mod tests {
 
     #[test]
     fn value_ref_null_maps_to_json_null() {
-        assert_eq!(convert_value_ref_to_json(ValueRef::Null).unwrap(), json!(null));
+        assert_eq!(
+            convert_value_ref_to_json(ValueRef::Null).unwrap(),
+            json!(null)
+        );
     }
 
     #[test]

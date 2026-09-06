@@ -132,7 +132,9 @@ mod tests {
         ];
         let err = verify_all_signatures(&batch, &NoopSignatureProvider).unwrap_err();
         match err {
-            Error::SignatureVerificationFailed { first_failed_change } => {
+            Error::SignatureVerificationFailed {
+                first_failed_change,
+            } => {
                 assert_eq!(first_failed_change, 1, "must report the first offender");
             }
             other => panic!("wrong variant: {other:?}"),
@@ -146,15 +148,17 @@ mod tests {
         // subset-of-signed position — otherwise callers can't locate the
         // change in their own record.
         let batch = vec![
-            change_with_sig(0, None),                         // batch pos 0
-            change_with_sig(1, Some(json!({"idx": 1}))),      // batch pos 1 (signed pos 0)
-            change_with_sig(2, None),                         // batch pos 2
-            change_with_sig(3, Some(json!({"idx": 3}))),      // batch pos 3 (signed pos 1, fail here)
+            change_with_sig(0, None),                    // batch pos 0
+            change_with_sig(1, Some(json!({"idx": 1}))), // batch pos 1 (signed pos 0)
+            change_with_sig(2, None),                    // batch pos 2
+            change_with_sig(3, Some(json!({"idx": 3}))), // batch pos 3 (signed pos 1, fail here)
         ];
         let provider = RejectingProvider { fail_at: 3 };
         let err = verify_all_signatures(&batch, &provider).unwrap_err();
         match err {
-            Error::SignatureVerificationFailed { first_failed_change } => {
+            Error::SignatureVerificationFailed {
+                first_failed_change,
+            } => {
                 assert_eq!(first_failed_change, 3);
             }
             other => panic!("wrong variant: {other:?}"),

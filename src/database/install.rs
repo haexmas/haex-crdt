@@ -21,11 +21,11 @@ use crate::crdt::hlc::HlcService;
 use crate::crdt::trigger::{
     ensure_crdt_columns_and_triggers, get_table_schema, is_safe_identifier,
 };
+use crate::database::config::InstallCrdtOptions;
 use crate::db::core::convert_value_ref_to_json;
 use crate::db::error::DatabaseError;
 use crate::error::{Error, Result};
 use crate::signature::SignatureProvider;
-use crate::database::config::InstallCrdtOptions;
 use crate::table_names::TABLE_CRDT_DIRTY_TABLES;
 
 use crate::crdt::apply::column_sig_preimage_from_parts;

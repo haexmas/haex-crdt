@@ -67,8 +67,7 @@ pub fn ensure_triggers_initialized(
 ) -> Result<bool, DatabaseError> {
     let tx = conn.transaction()?;
 
-    let check_sql =
-        format!("SELECT value FROM {TABLE_CRDT_CONFIGS} WHERE key = ?");
+    let check_sql = format!("SELECT value FROM {TABLE_CRDT_CONFIGS} WHERE key = ?");
     let current_version: Option<i32> = tx
         .query_row(&check_sql, params![CONFIG_KEY_TRIGGER_VERSION], |row| {
             let val: String = row.get(0)?;

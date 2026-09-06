@@ -192,10 +192,7 @@ pub fn get_table_schema(conn: &Connection, table_name: &str) -> RusqliteResult<V
 }
 
 /// Drops all CRDT trigger names associated with `table_name` if they exist.
-pub fn drop_triggers_for_table(
-    tx: &Transaction,
-    table_name: &str,
-) -> Result<(), CrdtSetupError> {
+pub fn drop_triggers_for_table(tx: &Transaction, table_name: &str) -> Result<(), CrdtSetupError> {
     if !is_safe_identifier(table_name) {
         return Err(rusqlite::Error::InvalidParameterName(format!(
             "Invalid or unsafe table name provided: {table_name}"

@@ -252,9 +252,7 @@ fn insert_populates_column_hlcs_and_marks_table_dirty() {
 
     let dirty: i64 = conn
         .query_row(
-            &format!(
-                "SELECT COUNT(*) FROM {TABLE_CRDT_DIRTY_TABLES} WHERE table_name = 'items'"
-            ),
+            &format!("SELECT COUNT(*) FROM {TABLE_CRDT_DIRTY_TABLES} WHERE table_name = 'items'"),
             [],
             |r| r.get(0),
         )
@@ -370,9 +368,7 @@ fn update_that_touches_only_meta_column_does_not_mark_dirty() {
 
     let dirty: i64 = conn
         .query_row(
-            &format!(
-                "SELECT COUNT(*) FROM {TABLE_CRDT_DIRTY_TABLES} WHERE table_name = 'items'"
-            ),
+            &format!("SELECT COUNT(*) FROM {TABLE_CRDT_DIRTY_TABLES} WHERE table_name = 'items'"),
             [],
             |r| r.get(0),
         )
@@ -404,9 +400,7 @@ fn delete_records_event_row_and_marks_deleted_rows_dirty() {
 
     let dirty: i64 = conn
         .query_row(
-            &format!(
-                "SELECT COUNT(*) FROM {TABLE_CRDT_DIRTY_TABLES} WHERE table_name = ?"
-            ),
+            &format!("SELECT COUNT(*) FROM {TABLE_CRDT_DIRTY_TABLES} WHERE table_name = ?"),
             [DELETED_ROWS_TABLE],
             |r| r.get(0),
         )
@@ -439,12 +433,20 @@ fn triggers_disabled_flag_suppresses_all_three_triggers() {
         .unwrap();
 
     let dirty: i64 = conn
-        .query_row(&format!("SELECT COUNT(*) FROM {TABLE_CRDT_DIRTY_TABLES}"), [], |r| r.get(0))
+        .query_row(
+            &format!("SELECT COUNT(*) FROM {TABLE_CRDT_DIRTY_TABLES}"),
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(dirty, 0);
 
     let delete_events: i64 = conn
-        .query_row(&format!("SELECT COUNT(*) FROM {DELETED_ROWS_TABLE}"), [], |r| r.get(0))
+        .query_row(
+            &format!("SELECT COUNT(*) FROM {DELETED_ROWS_TABLE}"),
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(delete_events, 0);
 }
@@ -649,8 +651,7 @@ fn ensure_crdt_columns_and_triggers_installs_both_on_bare_table() {
         .unwrap();
 
     let tx = conn.unchecked_transaction().unwrap();
-    let (cols_added, triggers_created) =
-        ensure_crdt_columns_and_triggers(&tx, "items").unwrap();
+    let (cols_added, triggers_created) = ensure_crdt_columns_and_triggers(&tx, "items").unwrap();
     tx.commit().unwrap();
 
     assert!(cols_added);
