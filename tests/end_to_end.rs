@@ -34,9 +34,9 @@ use std::sync::Arc;
 use haex_crdt::crdt::columns::HLC_TIMESTAMP_COLUMN;
 use haex_crdt::rusqlite::params;
 use haex_crdt::{
-    device_uuid_to_hlc_node, hlc_is_from_node, Database, DatabaseConfig, DeviceIdProvider,
-    InstallCrdtOptions, MigrationName, NoopSignatureProvider, SqlCipherKey, StaticDeviceId,
-    StaticMigrationSource, DEFAULT_TRIGGER_VERSION,
+    device_uuid_to_hlc_node, hlc_is_from_node, Database, DatabaseConfig, DeviceIdPolicy,
+    DeviceIdProvider, InstallCrdtOptions, MigrationName, NoopSignatureProvider, SqlCipherKey,
+    StaticDeviceId, StaticMigrationSource, DEFAULT_TRIGGER_VERSION,
 };
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -69,6 +69,7 @@ fn config(
         signature_provider: Arc::new(NoopSignatureProvider),
         migration_source: source,
         trigger_version: DEFAULT_TRIGGER_VERSION,
+        device_id_policy: DeviceIdPolicy::default(),
     }
 }
 

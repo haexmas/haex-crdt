@@ -16,6 +16,9 @@ Provided by this crate:
 - Column-level LWW CRDT infrastructure: schema transformer, trigger installer, scanner, apply pipeline.
 - Cleanup / retention utilities for deleted-row logs.
 - Pluggable [`DeviceIdProvider`](src/device_id.rs) — consumers supply the durable device UUID.
+  A mismatch on reopen is resolved by `DeviceIdPolicy`: `Reject` (default) fails the open,
+  `AdoptOnMismatch` takes the supplied UUID over so a relocated `.db` can be adopted as a
+  device handover.
 - Pluggable [`SignatureProvider`](src/signature.rs) — consumers add per-column signing without this crate depending on any identity system. `NoopSignatureProvider` is bundled for consumers that already have an authenticated transport (e.g. an MLS group or an attested iroh channel).
 - Pluggable [`MigrationSource`](src/migration.rs) — consumers control where schema migration SQL comes from.
 

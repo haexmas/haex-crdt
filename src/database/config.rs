@@ -43,6 +43,38 @@ impl SqlCipherKey {
     }
 }
 
+/// What [`super::Database::open`] does when the [`DeviceIdProvider`] supplies
+/// a device UUID that differs from the one recorded in the database on its
+/// first open.
+///
+/// The recorded UUID scopes the store's HLC node id. A mismatch means the
+/// database file is being opened on a host that is not the one that created
+/// it — a moved or copied `.db`. That is a legitimate operation for a
+/// portable store, but it must be a deliberate one: two *live* copies sharing
+/// a lineage is a different situation from one copy that migrated.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DeviceIdPolicy {
+    /// Refuse the open with [`crate::error::Error::DeviceIdMismatch`] and
+    /// leave the recorded UUID untouched. The default, and the right choice
+    /// for a consumer whose device UUID is durable per physical device: a
+    /// mismatch there signals a provider bug.
+    #[default]
+    Reject,
+    /// Adopt the supplied UUID: rewrite the recorded value and continue the
+    /// open. For consumers that mint a device UUID per (host, database) and
+    /// treat a moved `.db` as a device handover.
+    ///
+    /// Safe for the HLC because the clock is built from the supplied UUID and
+    /// seeded from the last persisted timestamp, so the new node id continues
+    /// monotonically from the causal position the previous host left behind.
+    ///
+    /// The caller is responsible for the part this crate cannot see: the copy
+    /// the database came from must be retired. Two live copies that both
+    /// adopt will diverge under one lineage, and no clock discipline can
+    /// repair that.
+    AdoptOnMismatch,
+}
+
 /// Configuration passed to [`super::Database::open`].
 ///
 /// `Clone` because open takes it by value but downstream owners (tests, a
@@ -71,6 +103,9 @@ pub struct DatabaseConfig {
     /// Source of consumer-owned schema migrations. The crate-owned
     /// bookkeeping migrations are compiled in and applied automatically.
     pub migration_source: Arc<dyn MigrationSource>,
+    /// What to do when the supplied device UUID differs from the recorded
+    /// one. Defaults to [`DeviceIdPolicy::Reject`].
+    pub device_id_policy: DeviceIdPolicy,
     /// The CRDT trigger-schema version the store should install on open.
     /// Bumping this on the next release triggers a rewrite via
     /// `ensure_triggers_initialized`. Defaults to
@@ -108,6 +143,7 @@ mod tests {
             signature_provider: Arc::new(NoopSignatureProvider),
             migration_source: Arc::new(StaticMigrationSource(BTreeMap::new())),
             trigger_version: DEFAULT_TRIGGER_VERSION,
+            device_id_policy: DeviceIdPolicy::default(),
         }
     }
 

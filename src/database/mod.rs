@@ -34,15 +34,20 @@
 //! 3. Initialize the HLC service from the persisted row in
 //!    `haex_crdt_configs_no_sync` — or seed it on first open.
 //! 4. Enforce the device-id contract (plan §4.1): the first-open device UUID
-//!    is stored in `haex_crdt_configs_no_sync`; every subsequent open rejects a
-//!    provider that returns a different UUID with
-//!    [`crate::Error::DeviceIdMismatch`].
+//!    is stored in `haex_crdt_configs_no_sync`; every subsequent open compares
+//!    the supplied UUID against it. A mismatch is resolved by
+//!    [`crate::DeviceIdPolicy`] — `Reject` (the default) fails the open with
+//!    [`crate::Error::DeviceIdMismatch`], `AdoptOnMismatch` rewrites the
+//!    record and continues, for consumers that treat a moved `.db` as a
+//!    device handover.
 //! 5. Ensure CRDT triggers are at the requested `trigger_version`.
 
 pub mod config;
 mod install;
 
-pub use config::{DatabaseConfig, InstallCrdtOptions, SqlCipherKey, DEFAULT_TRIGGER_VERSION};
+pub use config::{
+    DatabaseConfig, DeviceIdPolicy, InstallCrdtOptions, SqlCipherKey, DEFAULT_TRIGGER_VERSION,
+};
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -136,7 +141,7 @@ impl Database {
             .map_err(|e| DatabaseError::HlcError {
                 reason: e.to_string(),
             })?;
-        reconcile_device_id(&conn, supplied_uuid)?;
+        reconcile_device_id(&conn, supplied_uuid, config.device_id_policy)?;
 
         ensure_triggers_initialized(&mut conn, config.trigger_version)?;
 
@@ -278,11 +283,17 @@ impl Database {
 }
 
 /// Enforce the device-id contract from plan §4.1: first-open records the
-/// UUID, later opens reject a mismatched provider with
-/// [`Error::DeviceIdMismatch`]. Stored under the reserved config key
+/// UUID, later opens compare against it. Stored under the reserved config key
 /// [`CONFIG_KEY_DEVICE_ID`] in the `haex_crdt_configs_no_sync` table (already
 /// materialised by the crate bootstrap migration).
-fn reconcile_device_id(conn: &Connection, supplied: Uuid) -> Result<()> {
+///
+/// On mismatch the outcome is the caller's choice, per `policy`:
+/// [`DeviceIdPolicy::Reject`] returns [`Error::DeviceIdMismatch`] and leaves
+/// the recorded value alone; [`DeviceIdPolicy::AdoptOnMismatch`] rewrites the
+/// record to `supplied` and lets the open proceed, which is how a consumer
+/// that mints device UUIDs per (host, database) performs a device handover on
+/// a moved `.db`.
+fn reconcile_device_id(conn: &Connection, supplied: Uuid, policy: DeviceIdPolicy) -> Result<()> {
     // The insert is the arbitration point for concurrent first opens. The
     // config key is unique, so exactly one value can win; every opener then
     // compares against the value that actually persisted rather than against
@@ -311,10 +322,21 @@ fn reconcile_device_id(conn: &Connection, supplied: Uuid) -> Result<()> {
     let expected = Uuid::parse_str(&recorded).map_err(|e| DatabaseError::ValidationError {
         reason: format!("stored device_id is not a UUID: {e}"),
     })?;
-    if expected != supplied {
-        return Err(Error::DeviceIdMismatch { expected, supplied });
+    if expected == supplied {
+        return Ok(());
     }
-    Ok(())
+
+    match policy {
+        DeviceIdPolicy::Reject => Err(Error::DeviceIdMismatch { expected, supplied }),
+        DeviceIdPolicy::AdoptOnMismatch => {
+            conn.execute(
+                &format!("UPDATE {TABLE_CRDT_CONFIGS} SET value = ?2 WHERE key = ?1"),
+                params![CONFIG_KEY_DEVICE_ID, supplied.to_string()],
+            )
+            .map_err(DatabaseError::from)?;
+            Ok(())
+        }
+    }
 }
 
 /// Map a [`DatabaseLockError`] into the crate's top-level [`Error`], routing

@@ -55,6 +55,66 @@ fn reopen_with_different_device_id_returns_device_id_mismatch() {
 }
 
 #[test]
+fn reopen_with_adopt_policy_takes_over_the_supplied_device_id() {
+    // A `.db` carried to another host: the consumer's provider mints a fresh
+    // UUID there, and `AdoptOnMismatch` turns that into a device handover
+    // instead of a refusal to open.
+    let fx = Fixture::new();
+    Database::open(fx.config.clone()).unwrap();
+
+    let moved_to = Uuid::new_v4();
+    let mut cfg = fx.config.clone();
+    cfg.create_if_missing = false;
+    cfg.device_id = Arc::new(StaticDeviceId(moved_to));
+    cfg.device_id_policy = DeviceIdPolicy::AdoptOnMismatch;
+
+    let db = Database::open(cfg).unwrap();
+    assert_eq!(db.device_id(), moved_to);
+    drop(db);
+
+    // The adoption is durable: a later open under the default `Reject`
+    // policy now accepts the adopted UUID and rejects the original one.
+    let mut adopted = fx.config.clone();
+    adopted.create_if_missing = false;
+    adopted.device_id = Arc::new(StaticDeviceId(moved_to));
+    let db = Database::open(adopted).unwrap();
+    assert_eq!(db.device_id(), moved_to);
+    drop(db);
+
+    let mut stale = fx.config.clone();
+    stale.create_if_missing = false;
+    match Database::open(stale) {
+        Err(crate::Error::DeviceIdMismatch { expected, supplied }) => {
+            assert_eq!(expected, moved_to);
+            assert_eq!(supplied, fx.device);
+        }
+        Err(other) => panic!("wrong variant: {other:?}"),
+        Ok(_) => panic!("adopted UUID must become the new expectation"),
+    }
+}
+
+#[test]
+fn adopt_policy_is_not_the_default() {
+    // Guards the safe default: a consumer that never mentions the policy
+    // keeps the rejecting behaviour.
+    assert_eq!(DeviceIdPolicy::default(), DeviceIdPolicy::Reject);
+    let fx = Fixture::new();
+    assert_eq!(fx.config.device_id_policy, DeviceIdPolicy::Reject);
+}
+
+#[test]
+fn adopt_policy_on_matching_device_id_is_a_no_op() {
+    let fx = Fixture::new();
+    Database::open(fx.config.clone()).unwrap();
+
+    let mut cfg = fx.config.clone();
+    cfg.create_if_missing = false;
+    cfg.device_id_policy = DeviceIdPolicy::AdoptOnMismatch;
+    let db = Database::open(cfg).unwrap();
+    assert_eq!(db.device_id(), fx.device);
+}
+
+#[test]
 fn concurrent_first_opens_serialize_via_vault_lock() {
     // With the fs2 advisory lock in place, exactly one racing `open` may
     // succeed; the other must fail with `VaultAlreadyOpenElsewhere`. This

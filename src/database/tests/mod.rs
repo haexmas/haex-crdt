@@ -53,6 +53,7 @@ impl Fixture {
             signature_provider: Arc::new(NoopSignatureProvider),
             migration_source,
             trigger_version: DEFAULT_TRIGGER_VERSION,
+            device_id_policy: DeviceIdPolicy::default(),
         };
         Fixture {
             _tmp: tmp,
