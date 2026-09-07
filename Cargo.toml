@@ -17,6 +17,11 @@ default = []
 # Requires that all downstream consumers link the exact same `rusqlite`
 # version this crate resolves to. See README §rusqlite version contract.
 raw-connection = []
+# Enables deprecated compatibility shims used by pre-extraction test
+# fixtures in downstream consumers (currently haex-vault). Adds a
+# `blake3` dependency. Not enabled by default; consumers that do not opt
+# in pay no cost.
+test-shims = ["dep:blake3"]
 
 [dependencies]
 rusqlite = { version = "0.40", features = [
@@ -33,6 +38,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 base64 = "0.22"
+# Optional; only pulled in by the `test-shims` feature.
+blake3 = { version = "1.5", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

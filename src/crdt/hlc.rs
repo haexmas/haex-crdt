@@ -66,6 +66,27 @@ impl HlcService {
         }
     }
 
+    /// Deprecated compatibility shim used by pre-extraction test code that
+    /// created HLC services with an arbitrary device-id *string* rather than
+    /// a UUID. Hashes the input with a stable derivation (BLAKE3 truncated
+    /// to 16 bytes) and delegates to [`Self::new_with_uuid`].
+    ///
+    /// Do NOT use in new code — take a `Uuid` and call `new_with_uuid`
+    /// directly. Wire-visible behavior is undefined if two call sites hash
+    /// different inputs to the same UUID (BLAKE3 collision resistance makes
+    /// this vanishingly unlikely, but it is nonetheless not a contract).
+    #[cfg(feature = "test-shims")]
+    #[deprecated(
+        note = "Take a Uuid and call new_with_uuid; this shim exists only to bridge haex-vault test fixtures."
+    )]
+    pub fn new_for_testing(device_id_str: &str) -> Self {
+        let hash = blake3::hash(device_id_str.as_bytes());
+        let bytes = hash.as_bytes();
+        let mut uuid_bytes = [0u8; 16];
+        uuid_bytes.copy_from_slice(&bytes[..16]);
+        Self::new_with_uuid(Uuid::from_bytes(uuid_bytes))
+    }
+
     /// Create an HLC service with a fixed device UUID. Useful for tests
     /// and for consumers that already hold a persisted UUID and want to
     /// skip the provider indirection at construction time.
@@ -507,6 +528,37 @@ mod tests {
         let svc = HlcService::new_with_uuid(Uuid::from_bytes([3u8; 16]));
         let result = svc.advance_past_remote("");
         assert!(result.is_ok(), "Expected Ok(()), got: {:?}", result);
+    }
+
+    /// The `new_for_testing` shim must derive its UUID deterministically
+    /// from the input string: two constructions from the same string must
+    /// yield HLC services with the same node id.
+    #[cfg(feature = "test-shims")]
+    #[allow(deprecated)]
+    #[test]
+    fn new_for_testing_is_deterministic() {
+        let svc_a = HlcService::new_for_testing("test-device-a");
+        let svc_b = HlcService::new_for_testing("test-device-a");
+        let ts_a = svc_a.new_timestamp().expect("timestamp a").to_string();
+        let ts_b = svc_b.new_timestamp().expect("timestamp b").to_string();
+        let node_a = hlc_node_id_suffix(&ts_a).expect("node id a");
+        let node_b = hlc_node_id_suffix(&ts_b).expect("node id b");
+        assert_eq!(
+            node_a, node_b,
+            "the shim must hash equal inputs to equal UUIDs"
+        );
+        // uhlc strips leading zeros; a 16-byte UUID hex is 1..=32 chars.
+        assert!(!node_a.is_empty(), "node id must be non-empty");
+        assert!(node_a.len() <= 32, "node id must be at most 16 bytes hex");
+        // Sanity check that we are not accidentally returning a constant:
+        // a different input must hash to a *different* node id.
+        let svc_c = HlcService::new_for_testing("test-device-b");
+        let ts_c = svc_c.new_timestamp().expect("timestamp c").to_string();
+        let node_c = hlc_node_id_suffix(&ts_c).expect("node id c");
+        assert_ne!(
+            node_a, node_c,
+            "different inputs must hash to different UUIDs"
+        );
     }
 
     /// Locks the `HlcError::DeviceStore` variant name at the type level.
