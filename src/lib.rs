@@ -56,7 +56,7 @@ pub use crdt::scanner::{
 pub use crdt::trigger::{
     drop_triggers_for_table, ensure_crdt_columns, ensure_crdt_columns_and_triggers,
     get_table_schema, is_safe_identifier, setup_triggers_for_table, ColumnInfo, CrdtSetupError,
-    TriggerSetupResult,
+    TriggerInstallerConfig, TriggerSetupResult,
 };
 
 pub use db::connection_context::ConnectionContext;

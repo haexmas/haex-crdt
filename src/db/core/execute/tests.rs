@@ -4,7 +4,9 @@
 
 use super::*;
 use crate::crdt::hlc::HlcService;
-use crate::crdt::trigger::{ensure_crdt_columns_and_triggers, setup_triggers_for_table};
+use crate::crdt::trigger::{
+    ensure_crdt_columns_and_triggers, setup_triggers_for_table, TriggerInstallerConfig,
+};
 use crate::db::connection_context::ConnectionContext;
 use crate::db::core::init::{install_tx_hlc_hooks, register_current_hlc_udf};
 use crate::db::execute_hook::{NoopPostWriteHook, PostWriteHook, WriteContext};
@@ -169,7 +171,7 @@ fn setup_fixture() -> Fixture {
     .unwrap();
     {
         let tx = conn.unchecked_transaction().unwrap();
-        ensure_crdt_columns_and_triggers(&tx, "items").unwrap();
+        ensure_crdt_columns_and_triggers(&tx, "items", &TriggerInstallerConfig::default()).unwrap();
         tx.commit().unwrap();
     }
 
@@ -190,7 +192,7 @@ fn execute_without_crdt_bypasses_triggers_and_leaves_dirty_tables_empty() {
     let fx = setup_fixture();
     // Triggers must start enabled so this test exercises execute's suppression.
     with_connection(&fx.connection, |conn| {
-        ensure_triggers_initialized(conn, 1).unwrap();
+        ensure_triggers_initialized(conn, 1, &TriggerInstallerConfig::default()).unwrap();
         Ok(())
     })
     .unwrap();
@@ -710,7 +712,7 @@ fn hook_can_write_to_the_transaction_it_receives() {
     let fx = setup_fixture();
     // Ensure triggers config is present so execute_with_crdt's transformer/triggers see it.
     with_connection(&fx.connection, |conn| {
-        ensure_triggers_initialized(conn, 1).unwrap();
+        ensure_triggers_initialized(conn, 1, &TriggerInstallerConfig::default()).unwrap();
         Ok(())
     })
     .unwrap();
@@ -798,7 +800,7 @@ fn integration_setup_triggers_then_write_populates_dirty_and_column_hlcs() {
     {
         let tx = conn.unchecked_transaction().unwrap();
         crate::crdt::trigger::ensure_crdt_columns(&tx, "items").unwrap();
-        setup_triggers_for_table(&tx, "items", false).unwrap();
+        setup_triggers_for_table(&tx, "items", false, &TriggerInstallerConfig::default()).unwrap();
         // Seed triggers_enabled = 1.
         tx.execute(
             &format!(

@@ -65,6 +65,28 @@ pub enum TriggerSetupResult {
     TableNotFound,
 }
 
+/// Consumer-configurable installer settings.
+///
+/// [`Self::additional_skip_columns`] names consumer-owned columns that must
+/// be omitted from the trigger-body tracking list — e.g. per-row timestamps
+/// that housekeeping updates whose changes must not mark the row dirty for
+/// sync (`updated_at`, `last_push_hlc_timestamp` in haex-vault).
+///
+/// The three CRDT metadata columns ([`crate::crdt::columns::HLC_TIMESTAMP_COLUMN`],
+/// [`crate::crdt::columns::COLUMN_HLCS_COLUMN`], [`crate::crdt::columns::COLUMN_SIGS_COLUMN`])
+/// and every primary-key column are always skipped and cannot be un-skipped
+/// — those are structural requirements of the CRDT protocol, not consumer
+/// policy. Listing them here is harmless (the structural filter still wins),
+/// so consumers do not need to reason about the intersection.
+#[derive(Debug, Clone, Default)]
+pub struct TriggerInstallerConfig {
+    /// Additional column names to exclude from the trigger-body tracking
+    /// list. Compared verbatim against the columns reported by
+    /// `PRAGMA table_info`; unknown names are silently ignored (a table that
+    /// happens not to carry a listed column simply has no column to skip).
+    pub additional_skip_columns: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 /// Schema metadata used to derive CRDT trigger expressions.
@@ -109,6 +131,7 @@ pub fn setup_triggers_for_table(
     tx: &Transaction,
     table_name: &str,
     recreate: bool,
+    config: &TriggerInstallerConfig,
 ) -> Result<TriggerSetupResult, CrdtSetupError> {
     let columns = get_table_schema(tx, table_name)?;
 
@@ -135,11 +158,10 @@ pub fn setup_triggers_for_table(
         });
     }
 
-    // Columns eligible for LWW tracking: everything except PKs and the three
-    // CRDT metadata columns. Consumer-schema conventions (mutation-tracking
-    // columns like `updated_at`, sync-metadata like `last_push_hlc`) are the
-    // consumer's concern — either don't put them on CRDT tables, or accept
-    // that changes to them mark the row dirty.
+    // Columns eligible for LWW tracking: everything except PKs, the three
+    // CRDT metadata columns, and any consumer-declared additional skip
+    // columns (D-2). Schema-declaration order is preserved so trigger
+    // bodies remain stable across reinstalls that pass the same config.
     let cols_to_track: Vec<String> = columns
         .iter()
         .filter(|c| {
@@ -147,6 +169,7 @@ pub fn setup_triggers_for_table(
                 && c.name != HLC_TIMESTAMP_COLUMN
                 && c.name != COLUMN_HLCS_COLUMN
                 && c.name != COLUMN_SIGS_COLUMN
+                && !config.additional_skip_columns.iter().any(|s| s == &c.name)
         })
         .map(|c| c.name.clone())
         .collect();
@@ -386,6 +409,7 @@ pub fn ensure_crdt_columns(tx: &Transaction, table_name: &str) -> Result<bool, C
 pub fn ensure_crdt_columns_and_triggers(
     tx: &Transaction,
     table_name: &str,
+    config: &TriggerInstallerConfig,
 ) -> Result<(bool, bool), CrdtSetupError> {
     let columns_added = ensure_crdt_columns(tx, table_name)?;
 
@@ -406,7 +430,7 @@ pub fn ensure_crdt_columns_and_triggers(
 
     let triggers_created = if !has_all_triggers {
         matches!(
-            setup_triggers_for_table(tx, table_name, false)?,
+            setup_triggers_for_table(tx, table_name, false, config)?,
             TriggerSetupResult::Success
         )
     } else {
