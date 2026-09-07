@@ -19,10 +19,12 @@ It does **not** fire for renames, in-place edits, trivial inline expressions, or
 
 ## What to do (the loop)
 
-1. **Bootstrap or refresh first on tracked branches** (independent of any git hook running):
+1. **Classify the checkout exactly once, then bootstrap or refresh according to that class** (independent of any git hook running):
+   - Apply this mutually exclusive precedence: a **linked worktree** is a checkout whose git directory is managed as a linked worktree; otherwise a **feature branch** is the branch carrying the current change or pull request, even when it has an upstream tracking ref; otherwise the checkout is a **tracked branch**. If the branch role is unclear, classify it as a feature branch.
+   - A linked worktree or feature branch always uses the complete fork-point snapshot as-is. It never participates in current-`HEAD` freshness checks, even when its branch has an upstream remote or is also checked out in a repository that tracks it.
    - On a tracked branch, if `graphify-out/` or its required `graph.json` is **absent**, run `graphify update <repo-root>` to build the graph before continuing. A directory without `graph.json` is not a usable graph.
    - On a tracked branch, if `graphify-out/.meta.json` is absent, invalid, or its `indexed_at_sha` does **not** match current `HEAD`, run `graphify update <repo-root>` to refresh incrementally.
-   - On a feature branch or worktree, use a complete fork-point snapshot as-is. Do not compare its marker with the feature branch's advancing `HEAD`, and do not refresh it. If the snapshot lacks `graph.json`, warn and continue with the normal consultation failure handling.
+   - On a feature branch or linked worktree, use a complete fork-point snapshot as-is. Do not compare its marker with the feature branch's advancing `HEAD`, and do not refresh it. If the snapshot lacks `graph.json`, warn and continue with the normal consultation failure handling.
    - If bootstrap or refresh fails, warn, continue with the consultation/authoring flow, and flag the incomplete refresh for a later manual check. The failure MUST NOT block authoring.
    - These tracked-branch checks hold even when the git hooks are not installed or were bypassed (e.g. `git commit --no-verify`).
 2. **Query the graph** for candidates using plain `graphify` CLI invocations — `graphify query "<intent>"`, `graphify path <from> <to>`, `graphify explain <symbol>`. Do **not** substitute any single harness's slash-command syntax; the rule reads correctly regardless of which harness loads it.
