@@ -31,6 +31,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use haex_crdt::crdt::columns::HLC_TIMESTAMP_COLUMN;
 use haex_crdt::rusqlite::params;
 use haex_crdt::{
     device_uuid_to_hlc_node, hlc_is_from_node, Database, DatabaseConfig, DeviceIdProvider,
@@ -197,11 +198,15 @@ fn two_devices_sync_backfilled_and_fresh_writes_end_to_end() {
 
     // Local write via the raw connection, using the transaction-scoped
     // `current_hlc()` UDF so the write carries the store's device node id
-    // and fires the CRDT INSERT trigger (which requires haex_hlc IS NOT
-    // NULL to populate haex_column_hlcs and mark the table dirty).
+    // and fires the CRDT INSERT trigger (which requires the row-level HLC
+    // to be non-NULL to populate the column-HLC map and mark the table
+    // dirty).
     db_a.with_connection(|conn| {
         conn.execute(
-            "INSERT INTO toy_no_sync (id, body, haex_hlc) VALUES (?1, ?2, current_hlc())",
+            &format!(
+                "INSERT INTO toy_no_sync (id, body, {HLC_TIMESTAMP_COLUMN}) \
+                 VALUES (?1, ?2, current_hlc())"
+            ),
             params!["fresh-1", "fresh body from device_a"],
         )
         .map(|_| ())
@@ -245,7 +250,7 @@ fn two_devices_sync_backfilled_and_fresh_writes_end_to_end() {
     let (body_on_b, hlc_on_b) = db_b
         .with_connection(|conn| {
             conn.query_row(
-                "SELECT body, haex_hlc FROM toy_no_sync WHERE id = ?1",
+                &format!("SELECT body, {HLC_TIMESTAMP_COLUMN} FROM toy_no_sync WHERE id = ?1"),
                 ["fresh-1"],
                 |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
             )

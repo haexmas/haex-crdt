@@ -196,8 +196,7 @@ fn execute_without_crdt_bypasses_triggers_and_leaves_dirty_tables_empty() {
     .unwrap();
 
     execute(
-        "INSERT INTO items (id, name, body, haex_hlc) VALUES ('i1', 'a', 'b', 'seed-hlc')"
-            .to_string(),
+        format!("INSERT INTO items (id, name, body, {HLC_TIMESTAMP_COLUMN}) VALUES ('i1', 'a', 'b', 'seed-hlc')"),
         vec![],
         &fx.connection,
     )
@@ -231,8 +230,7 @@ fn execute_without_crdt_bypasses_triggers_and_leaves_dirty_tables_empty() {
 fn execute_returning_yields_row_values() {
     let fx = setup_fixture();
     let rows = execute(
-        "INSERT INTO items (id, name, body, haex_hlc) VALUES ('i1', 'a', 'b', 'h') RETURNING id, name"
-            .to_string(),
+        format!("INSERT INTO items (id, name, body, {HLC_TIMESTAMP_COLUMN}) VALUES ('i1', 'a', 'b', 'h') RETURNING id, name"),
         vec![],
         &fx.connection,
     )
@@ -257,7 +255,7 @@ fn execute_restores_disabled_trigger_state() {
     .unwrap();
 
     execute(
-        "INSERT INTO items (id, name, body, haex_hlc) VALUES ('i1', 'a', 'b', 'h')".to_string(),
+        format!("INSERT INTO items (id, name, body, {HLC_TIMESTAMP_COLUMN}) VALUES ('i1', 'a', 'b', 'h')"),
         vec![],
         &fx.connection,
     )
@@ -279,7 +277,7 @@ fn execute_restores_disabled_trigger_state() {
 fn execute_restores_missing_trigger_state() {
     let fx = setup_fixture();
     execute(
-        "INSERT INTO items (id, name, body, haex_hlc) VALUES ('i1', 'a', 'b', 'h')".to_string(),
+        format!("INSERT INTO items (id, name, body, {HLC_TIMESTAMP_COLUMN}) VALUES ('i1', 'a', 'b', 'h')"),
         vec![],
         &fx.connection,
     )
@@ -302,7 +300,7 @@ fn execute_restores_missing_trigger_state() {
 // -------------------------------------------------------------------------
 
 #[test]
-fn execute_with_crdt_populates_haex_hlc_and_marks_table_dirty() {
+fn execute_with_crdt_populates_row_hlc_and_marks_table_dirty() {
     let fx = setup_fixture();
     execute_with_crdt(
         "INSERT INTO items (id, name, body) VALUES ('i1', 'a', 'b')".to_string(),
@@ -315,11 +313,13 @@ fn execute_with_crdt_populates_haex_hlc_and_marks_table_dirty() {
 
     with_connection(&fx.connection, |conn| {
         let hlc: Option<String> = conn
-            .query_row("SELECT haex_hlc FROM items WHERE id = 'i1'", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                &format!("SELECT {HLC_TIMESTAMP_COLUMN} FROM items WHERE id = 'i1'"),
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert!(hlc.is_some(), "haex_hlc must be populated");
+        assert!(hlc.is_some(), "row-level HLC must be populated");
 
         let dirty: i64 = conn
             .query_row(
@@ -337,10 +337,10 @@ fn execute_with_crdt_populates_haex_hlc_and_marks_table_dirty() {
 }
 
 #[test]
-fn execute_with_crdt_rejects_write_to_haex_hlc_meta_column() {
+fn execute_with_crdt_rejects_write_to_row_hlc_meta_column() {
     let fx = setup_fixture();
     let err = execute_with_crdt(
-        "INSERT INTO items (id, name, haex_hlc) VALUES ('i1', 'a', 'attacker-hlc')".to_string(),
+        format!("INSERT INTO items (id, name, {HLC_TIMESTAMP_COLUMN}) VALUES ('i1', 'a', 'attacker-hlc')"),
         vec![],
         &fx.connection,
         &fx.hlc_service,
@@ -349,17 +349,17 @@ fn execute_with_crdt_rejects_write_to_haex_hlc_meta_column() {
     .unwrap_err();
     match err {
         DatabaseError::CrdtMetaColumnWriteForbidden { column } => {
-            assert_eq!(column, "haex_hlc");
+            assert_eq!(column, HLC_TIMESTAMP_COLUMN);
         }
         other => panic!("expected CrdtMetaColumnWriteForbidden, got {other:?}"),
     }
 }
 
 #[test]
-fn execute_with_crdt_rejects_write_to_haex_column_hlcs_meta_column() {
+fn execute_with_crdt_rejects_write_to_column_hlcs_meta_column() {
     let fx = setup_fixture();
     let err = execute_with_crdt(
-        "UPDATE items SET haex_column_hlcs = '{\"forged\":\"x\"}' WHERE id = 'i1'".to_string(),
+        format!("UPDATE items SET {COLUMN_HLCS_COLUMN} = '{{\"forged\":\"x\"}}' WHERE id = 'i1'"),
         vec![],
         &fx.connection,
         &fx.hlc_service,
@@ -445,7 +445,7 @@ fn execute_with_crdt_update_touches_only_named_columns() {
 
     let original_name_hlc = with_connection(&fx.connection, |conn| {
         let hlcs: String = conn.query_row(
-            "SELECT haex_column_hlcs FROM items WHERE id = 'i1'",
+            &format!("SELECT {COLUMN_HLCS_COLUMN} FROM items WHERE id = 'i1'"),
             [],
             |row| row.get(0),
         )?;
@@ -467,7 +467,7 @@ fn execute_with_crdt_update_touches_only_named_columns() {
     with_connection(&fx.connection, |conn| {
         let hlcs: String = conn
             .query_row(
-                "SELECT haex_column_hlcs FROM items WHERE id = 'i1'",
+                &format!("SELECT {COLUMN_HLCS_COLUMN} FROM items WHERE id = 'i1'"),
                 [],
                 |r| r.get(0),
             )
@@ -556,7 +556,7 @@ impl PostWriteHook for RowWritingHook {
         _ctx: &WriteContext<'_>,
     ) -> Result<(), DatabaseError> {
         tx.execute(
-            "UPDATE items SET haex_column_sigs = json_set(haex_column_sigs, '$.body', ?1) WHERE id = ?2",
+            &format!("UPDATE items SET {COLUMN_SIGS_COLUMN} = json_set({COLUMN_SIGS_COLUMN}, '$.body', ?1) WHERE id = ?2"),
             ["hook-sig-for-body", self.row_id.as_str()],
         )?;
         Ok(())
@@ -634,7 +634,9 @@ fn hook_receives_transformed_statement() {
     assert_eq!(rows, vec![vec![json!("i1")]]);
     let statement = observed.lock().unwrap().clone().unwrap();
     assert!(
-        statement.to_ascii_lowercase().contains("haex_hlc"),
+        statement
+            .to_ascii_lowercase()
+            .contains(HLC_TIMESTAMP_COLUMN),
         "hook must receive the transformer output: {statement}"
     );
 }
@@ -730,7 +732,7 @@ fn hook_can_write_to_the_transaction_it_receives() {
     with_connection(&fx.connection, |conn| {
         let sigs_json: String = conn
             .query_row(
-                "SELECT haex_column_sigs FROM items WHERE id = 'i1'",
+                &format!("SELECT {COLUMN_SIGS_COLUMN} FROM items WHERE id = 'i1'"),
                 [],
                 |r| r.get(0),
             )
@@ -835,7 +837,7 @@ fn integration_setup_triggers_then_write_populates_dirty_and_column_hlcs() {
 
         let hlcs: String = c
             .query_row(
-                "SELECT haex_column_hlcs FROM items WHERE id = 'i1'",
+                &format!("SELECT {COLUMN_HLCS_COLUMN} FROM items WHERE id = 'i1'"),
                 [],
                 |r| r.get(0),
             )

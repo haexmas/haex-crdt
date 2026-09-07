@@ -266,8 +266,8 @@ impl Default for HlcService {
 /// paths, so it intentionally does **NOT** log. An earlier version
 /// `eprintln!`-ed on every parse failure, which produced one log line *per
 /// comparison* and flooded the logs whenever a single corrupt row (empty
-/// `haex_hlc`) was present. Malformed/empty HLCs are detected and kept off
-/// the wire at the ingestion boundary in the scanner instead.
+/// row-level HLC) was present. Malformed/empty HLCs are detected and kept
+/// off the wire at the ingestion boundary in the scanner instead.
 pub fn compare_hlc_strings(a: &str, b: &str) -> std::cmp::Ordering {
     fn parse(s: &str) -> (u64, u128) {
         let (time_str, node_str) = match s.split_once('/') {

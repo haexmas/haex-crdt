@@ -1,10 +1,11 @@
 //! Bootstraps CRDT triggers on all discovered CRDT-managed tables.
 //!
-//! A table is considered CRDT-managed iff it carries the `haex_hlc` column
-//! (see [`discover_crdt_tables`]). This is a security-load-bearing
-//! invariant: any table that must stay device-local MUST be created without
-//! CRDT metadata columns. The `_no_sync` name suffix is only a convention;
-//! the discovery query keys on the column alone.
+//! A table is considered CRDT-managed iff it carries the row-level HLC
+//! column ([`crate::crdt::columns::HLC_TIMESTAMP_COLUMN`]); see
+//! [`discover_crdt_tables`]. This is a security-load-bearing invariant:
+//! any table that must stay device-local MUST be created without CRDT
+//! metadata columns. The `_no_sync` name suffix is only a convention; the
+//! discovery query keys on the column alone.
 //!
 //! [`ensure_triggers_initialized`] is the one-shot bootstrap called on open.
 //! It stores the applied trigger version in
@@ -18,6 +19,7 @@
 //! callers who just applied a schema migration and want to install triggers
 //! on any new CRDT-managed tables without touching the version bookkeeping.
 
+use crate::crdt::columns::HLC_TIMESTAMP_COLUMN;
 use crate::crdt::trigger::{setup_triggers_for_table, TriggerSetupResult};
 use crate::db::error::DatabaseError;
 use crate::table_names::TABLE_CRDT_CONFIGS;
@@ -31,19 +33,19 @@ pub const CONFIG_KEY_TRIGGER_VERSION: &str = "trigger_version";
 pub const CONFIG_KEY_TRIGGERS_ENABLED: &str = "triggers_enabled";
 
 /// Discovers CRDT-managed tables by scanning `sqlite_master` for tables that
-/// carry a `haex_hlc` column. The `_no_sync` naming convention is enforced by
-/// callers omitting CRDT columns on those tables at CREATE-TABLE time; the
-/// query itself does not filter by name.
+/// carry the row-level HLC column. The `_no_sync` naming convention is
+/// enforced by callers omitting CRDT columns on those tables at
+/// CREATE-TABLE time; the query itself does not filter by name.
 pub fn discover_crdt_tables(conn: &Connection) -> Result<Vec<String>, DatabaseError> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT m.name as table_name
          FROM sqlite_master m
          JOIN pragma_table_info(m.name) p
          WHERE m.type = 'table'
-           AND p.name = 'haex_hlc'
+           AND p.name = '{HLC_TIMESTAMP_COLUMN}'
          GROUP BY m.name
-         ORDER BY m.name",
-    )?;
+         ORDER BY m.name"
+    ))?;
 
     let tables: Result<Vec<String>, _> = stmt.query_map([], |row| row.get(0))?.collect();
     Ok(tables?)
@@ -230,7 +232,7 @@ mod tests {
     // --- discover_crdt_tables ---
 
     #[test]
-    fn discover_lists_only_tables_carrying_haex_hlc() {
+    fn discover_lists_only_tables_carrying_the_row_hlc_column() {
         let conn = Connection::open_in_memory().unwrap();
         create_synced_table(&conn, "items");
         create_no_sync_table(&conn, "haex_logs_no_sync");

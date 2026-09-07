@@ -60,7 +60,7 @@ impl CrdtColumns {
         });
 
         // Per-column author signatures (parallel to column_hlcs). Emitted as
-        // `haex_column_sigs TEXT NOT NULL DEFAULT '{}'` so that pre-existing
+        // `<sigs_column> TEXT NOT NULL DEFAULT '{}'` so that pre-existing
         // rows and inserts that don't yet know about the column still land
         // with a valid empty map.
         columns.push(ColumnDef {
@@ -295,9 +295,10 @@ impl CrdtTransformer {
         }
     }
 
-    /// Transforms a DDL statement (CREATE TABLE) to add CRDT columns. Used by
-    /// migrations to ensure all syncable tables get `haex_hlc` and
-    /// `haex_column_hlcs` columns.
+    /// Transforms a DDL statement (CREATE TABLE) to add CRDT columns. Used
+    /// by migrations to ensure all syncable tables get the row-level HLC
+    /// column and the column-HLC map (see the constants in
+    /// [`crate::crdt::columns`]).
     ///
     /// Returns the transformed SQL string, or the original if no transformation was needed.
     pub fn transform_ddl_statement(&self, sql: &str) -> Result<String, DatabaseError> {

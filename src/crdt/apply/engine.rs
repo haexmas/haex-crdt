@@ -273,7 +273,7 @@ fn apply_row(
         })?;
 
     if row_exists {
-        // Never regress the row-level haex_hlc: an older column-late-arrival
+        // Never regress the row-level HLC: an older column-late-arrival
         // legally has an older HLC, but the row HLC feeds the delete-
         // resurrection comparison — a regression would let an older delete
         // shadow a newer local write.
@@ -306,7 +306,7 @@ fn apply_row(
     Ok(())
 }
 
-/// `(row_haex_hlc, parsed_column_hlcs)` for a row that already exists.
+/// `(row_level_hlc, parsed_column_hlcs)` for a row that already exists.
 type ExistingHlcs = Option<(String, serde_json::Map<String, JsonValue>)>;
 
 fn fetch_existing_hlcs(
@@ -443,7 +443,7 @@ fn write_insert(
     Ok(())
 }
 
-/// Serialise the `haex_column_sigs` JSON map for a fresh INSERT — only the
+/// Serialise the column-signature JSON map for a fresh INSERT — only the
 /// staged columns that carry a `sig` land in the map.
 fn build_sigs_json_for_insert(staged: &[(String, SqlValue, String, Option<JsonValue>)]) -> String {
     let mut map = serde_json::Map::new();
@@ -455,7 +455,7 @@ fn build_sigs_json_for_insert(staged: &[(String, SqlValue, String, Option<JsonVa
     serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string())
 }
 
-/// Merge staged sigs into the row's existing `haex_column_sigs` JSON for an
+/// Merge staged sigs into the row's existing column-signature JSON for an
 /// UPDATE. A signed value replaces the column's previous signature; an
 /// unsigned value removes it because the old signature no longer describes
 /// the current column value.

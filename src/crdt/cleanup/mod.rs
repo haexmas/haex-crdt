@@ -15,7 +15,7 @@
 //! anchor after the delete instead would leave a resurrection window on
 //! crash-recovery — the crate refuses that shape.
 
-use crate::crdt::columns::DELETED_ROWS_TABLE;
+use crate::crdt::columns::{DELETED_ROWS_TABLE, HLC_TIMESTAMP_COLUMN};
 use crate::db::error::DatabaseError;
 use crate::table_names::TABLE_CRDT_CONFIGS;
 use rusqlite::{Connection, OptionalExtension, Transaction};
@@ -152,8 +152,9 @@ where
 
         let rows_deleted = match policy {
             RetentionPolicy::All => {
-                let sql =
-                    format!("DELETE FROM \"{DELETED_ROWS_TABLE}\" WHERE haex_hlc IS NOT NULL");
+                let sql = format!(
+                    "DELETE FROM \"{DELETED_ROWS_TABLE}\" WHERE {HLC_TIMESTAMP_COLUMN} IS NOT NULL"
+                );
                 tx.execute(&sql, [])?
             }
             RetentionPolicy::TimeBasedDays { .. } => {
@@ -166,8 +167,8 @@ where
                 };
                 let sql = format!(
                     "DELETE FROM \"{DELETED_ROWS_TABLE}\" \
-                     WHERE haex_hlc IS NOT NULL \
-                       AND CAST(substr(haex_hlc, 1, instr(haex_hlc, '/') - 1) AS INTEGER) < ?1"
+                     WHERE {HLC_TIMESTAMP_COLUMN} IS NOT NULL \
+                       AND CAST(substr({HLC_TIMESTAMP_COLUMN}, 1, instr({HLC_TIMESTAMP_COLUMN}, '/') - 1) AS INTEGER) < ?1"
                 );
                 tx.execute(&sql, [cutoff])?
             }
@@ -190,7 +191,7 @@ where
 #[serde(rename_all = "camelCase")]
 pub struct CrdtStats {
     /// Live rows across every CRDT-managed table (identified by the
-    /// presence of a `haex_hlc` column). Excludes `_no_sync` tables,
+    /// presence of the row-level HLC column). Excludes `_no_sync` tables,
     /// SQLite internals, and the delete-log table itself.
     pub live_row_count: i64,
     /// Number of CRDT-managed tables discovered.
@@ -205,14 +206,14 @@ pub fn get_crdt_stats(conn: &Connection) -> Result<CrdtStats, DatabaseError> {
     let mut live_row_count: i64 = 0;
     let mut crdt_table_count: i64 = 0;
 
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT m.name FROM sqlite_master m \
          WHERE m.type = 'table' \
          AND m.name NOT LIKE 'sqlite_%' \
          AND m.name NOT LIKE '%_no_sync' \
          AND m.name != ?1 \
-         AND EXISTS (SELECT 1 FROM pragma_table_info(m.name) WHERE name = 'haex_hlc')",
-    )?;
+         AND EXISTS (SELECT 1 FROM pragma_table_info(m.name) WHERE name = '{HLC_TIMESTAMP_COLUMN}')"
+    ))?;
 
     let table_names: Vec<String> = stmt
         .query_map([DELETED_ROWS_TABLE], |row| row.get(0))?
@@ -260,10 +261,10 @@ fn read_max_prunable_hlc(
             let hlc: Option<String> = tx
                 .query_row(
                     &format!(
-                        "SELECT haex_hlc FROM \"{DELETED_ROWS_TABLE}\" \
-                         WHERE haex_hlc IS NOT NULL \
+                        "SELECT {HLC_TIMESTAMP_COLUMN} FROM \"{DELETED_ROWS_TABLE}\" \
+                         WHERE {HLC_TIMESTAMP_COLUMN} IS NOT NULL \
                          ORDER BY \
-                           CAST(substr(haex_hlc, 1, instr(haex_hlc, '/') - 1) AS INTEGER) DESC \
+                           CAST(substr({HLC_TIMESTAMP_COLUMN}, 1, instr({HLC_TIMESTAMP_COLUMN}, '/') - 1) AS INTEGER) DESC \
                          LIMIT 1"
                     ),
                     [],
@@ -279,11 +280,11 @@ fn read_max_prunable_hlc(
             let hlc: Option<String> = tx
                 .query_row(
                     &format!(
-                        "SELECT haex_hlc FROM \"{DELETED_ROWS_TABLE}\" \
-                         WHERE haex_hlc IS NOT NULL \
-                           AND CAST(substr(haex_hlc, 1, instr(haex_hlc, '/') - 1) AS INTEGER) < ?1 \
+                        "SELECT {HLC_TIMESTAMP_COLUMN} FROM \"{DELETED_ROWS_TABLE}\" \
+                         WHERE {HLC_TIMESTAMP_COLUMN} IS NOT NULL \
+                           AND CAST(substr({HLC_TIMESTAMP_COLUMN}, 1, instr({HLC_TIMESTAMP_COLUMN}, '/') - 1) AS INTEGER) < ?1 \
                          ORDER BY \
-                           CAST(substr(haex_hlc, 1, instr(haex_hlc, '/') - 1) AS INTEGER) DESC \
+                           CAST(substr({HLC_TIMESTAMP_COLUMN}, 1, instr({HLC_TIMESTAMP_COLUMN}, '/') - 1) AS INTEGER) DESC \
                          LIMIT 1"
                     ),
                     [cutoff],

@@ -104,18 +104,16 @@ pub fn is_safe_identifier(name: &str) -> bool {
 ///
 /// # Column skip rule (D-4, revised)
 ///
-/// Two kinds of columns are excluded from trigger tracking:
+/// One rule: any column whose name ends in `_no_trigger` is skipped —
+/// sync-system bookkeeping and app-local metadata that must not participate
+/// in per-column HLC tracking (`updated_at_no_trigger`,
+/// `local_meta_no_trigger`, …). This is symmetric with the `_no_sync`
+/// suffix that marks whole tables non-syncing.
 ///
-/// 1. **The `_no_trigger` suffix convention.** Any column whose name ends in
-///    `_no_trigger` is skipped — sync-system bookkeeping and app-local
-///    metadata that must not participate in per-column HLC tracking
-///    (`updated_at_no_trigger`, `local_meta_no_trigger`, …). Symmetric with
-///    the `_no_sync` suffix that marks whole tables non-syncing.
-///
-/// 2. **Structural CRDT metadata columns** ([`HLC_TIMESTAMP_COLUMN`],
-///    [`COLUMN_HLCS_COLUMN`], [`COLUMN_SIGS_COLUMN`]) are covered by a
-///    small hardcoded exemption. They do not follow the `_no_trigger`
-///    suffix convention, so the installer names them explicitly.
+/// The three structural CRDT metadata columns ([`HLC_TIMESTAMP_COLUMN`],
+/// [`COLUMN_HLCS_COLUMN`], [`COLUMN_SIGS_COLUMN`]) all end in
+/// `_no_trigger` too, so the same rule catches them — no separate
+/// hardcoded exemption.
 ///
 /// Primary-key columns are also skipped. Consumers who want a column tracked
 /// simply do not name it with the `_no_trigger` suffix.
@@ -153,18 +151,12 @@ pub fn setup_triggers_for_table(
         });
     }
 
-    // D-4 (revised): skip PKs, any column whose name ends in `_no_trigger`,
-    // and the three structural CRDT metadata columns (they do not follow the
-    // suffix convention, so we name them explicitly).
+    // D-4 (revised): one rule — skip PKs and any column whose name ends in
+    // `_no_trigger`. The three structural CRDT metadata columns all end in
+    // `_no_trigger` too, so this catches them without a separate exemption.
     let cols_to_track: Vec<String> = columns
         .iter()
-        .filter(|c| {
-            !c.is_pk
-                && !c.name.ends_with("_no_trigger")
-                && c.name != HLC_TIMESTAMP_COLUMN
-                && c.name != COLUMN_HLCS_COLUMN
-                && c.name != COLUMN_SIGS_COLUMN
-        })
+        .filter(|c| !c.is_pk && !c.name.ends_with("_no_trigger"))
         .map(|c| c.name.clone())
         .collect();
 

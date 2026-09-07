@@ -68,14 +68,14 @@ impl InsertTransformer {
     /// Hard Delete: Kein ON CONFLICT mehr nötig - gelöschte Einträge sind wirklich weg
     ///
     /// LIMITATION / TODO: `ON CONFLICT ... DO UPDATE SET` wird NICHT unterstützt.
-    /// Diese Transformation hängt `haex_hlc` nur an die INSERT-Spalten/-Werte an,
+    /// Diese Transformation hängt die HLC-Spalte nur an die INSERT-Spalten/-Werte an,
     /// aber nicht an die `DO UPDATE SET`-Assignments. Ein Upsert mit DO UPDATE
     /// erzeugt daher entweder ungültiges SQL oder eine Zeile mit veraltetem
     /// HLC-Timestamp (→ CRDT-Sync-Konflikte). Extensions müssen stattdessen
     /// `onConflictDoNothing()` + ein separates `UPDATE` verwenden (siehe z. B.
     /// stores/vault/settings.ts::setInitialSyncCompleteAsync im Host und
-    /// haex-mail persistEnvelopesAsync). Ein echter Fix müsste `haex_hlc` auch
-    /// in die DO-UPDATE-Assignments injizieren.
+    /// haex-mail persistEnvelopesAsync). Ein echter Fix müsste die HLC-Spalte
+    /// auch in die DO-UPDATE-Assignments injizieren.
     pub fn transform_insert(
         &self,
         insert_stmt: &mut Insert,
@@ -117,7 +117,7 @@ impl InsertTransformer {
             }
         }
 
-        // Add haex_hlc column if not exists
+        // Add the row-level HLC column if not present
         let hlc_col_index =
             Self::find_or_add_column(&mut insert_stmt.columns, self.hlc_timestamp_column);
 
@@ -207,14 +207,14 @@ mod tests {
     fn single_row_values_gets_hlc_column_and_value_appended() {
         let out = transform("INSERT INTO t (id, name) VALUES ('x', 'a')");
         assert!(
-            out.contains("haex_hlc"),
-            "haex_hlc column must be added; got: {out}"
+            out.contains(HLC_TIMESTAMP_COLUMN),
+            "HLC column must be added; got: {out}"
         );
     }
 
     #[test]
     fn multi_row_values_gets_hlc_appended_to_each_row() {
-        // With three rows and no pre-existing haex_hlc column, each row must
+        // With three rows and no pre-existing HLC column, each row must
         // carry the HLC value in the appended position.
         let out = transform("INSERT INTO t (id) VALUES ('x'), ('y'), ('z')");
         let occurrences = out.matches('/').count(); // uhlc timestamps look like `<ns>/<node>`
@@ -225,14 +225,16 @@ mod tests {
     }
 
     #[test]
-    fn haex_hlc_already_in_column_list_overwrites_supplied_value() {
-        // If the caller supplies `haex_hlc` themselves, the transformer must
-        // overwrite the value with its own (authoritative) HLC — otherwise a
-        // client could inject a bogus HLC and skew LWW ordering.
-        let out = transform("INSERT INTO t (id, haex_hlc) VALUES ('x', 'attacker-hlc')");
+    fn caller_supplied_hlc_column_value_is_overwritten() {
+        // If the caller supplies the HLC column themselves, the transformer
+        // must overwrite the value with its own (authoritative) HLC —
+        // otherwise a client could inject a bogus HLC and skew LWW ordering.
+        let sql =
+            format!("INSERT INTO t (id, {HLC_TIMESTAMP_COLUMN}) VALUES ('x', 'attacker-hlc')");
+        let out = transform(&sql);
         assert!(
             !out.contains("attacker-hlc"),
-            "caller-supplied haex_hlc must be replaced; got: {out}"
+            "caller-supplied HLC must be replaced; got: {out}"
         );
     }
 
@@ -242,8 +244,8 @@ mod tests {
         // the new column's index.
         let out = transform("INSERT INTO t (id) SELECT other_id FROM other");
         assert!(
-            out.contains("haex_hlc"),
-            "haex_hlc column must be added to INSERT SELECT; got: {out}"
+            out.contains(HLC_TIMESTAMP_COLUMN),
+            "HLC column must be added to INSERT SELECT; got: {out}"
         );
     }
 

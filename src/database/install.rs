@@ -1,8 +1,8 @@
 //! `install_crdt` backfill contract (plan §6).
 //!
 //! Adding CRDT metadata columns to a table that already carries rows leaves
-//! those rows with `NULL` in `haex_hlc` and `'{}'` in
-//! `haex_column_hlcs` — from the CRDT engine's point of view they look
+//! those rows with `NULL` in the row-level HLC and `'{}'` in the
+//! column-HLC map — from the CRDT engine's point of view they look
 //! non-existent, no column has ever been written to, and the row could not
 //! participate in an LWW comparison. That is a silent-corruption vector.
 //!

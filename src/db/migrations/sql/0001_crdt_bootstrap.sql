@@ -13,7 +13,7 @@ CREATE TABLE haex_deleted_rows (
     id TEXT PRIMARY KEY NOT NULL,
     table_name TEXT NOT NULL,
     row_pks TEXT NOT NULL,
-    haex_hlc TEXT,
-    haex_column_hlcs TEXT NOT NULL DEFAULT '{}',
-    haex_column_sigs TEXT NOT NULL DEFAULT '{}'
+    haex_hlc_no_trigger TEXT,
+    haex_column_hlcs_no_trigger TEXT NOT NULL DEFAULT '{}',
+    haex_column_sigs_no_trigger TEXT NOT NULL DEFAULT '{}'
 );

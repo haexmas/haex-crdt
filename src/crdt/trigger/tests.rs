@@ -358,8 +358,9 @@ fn update_that_touches_only_meta_column_does_not_mark_dirty() {
     )
     .unwrap();
 
-    // Bump only haex_hlc (a meta column, not in cols_to_track). No tracked
-    // column changed, so the dirty entry must not reappear.
+    // Bump only the row-level HLC column (a meta column, not in
+    // cols_to_track). No tracked column changed, so the dirty entry must
+    // not reappear.
     conn.execute(
         &format!("UPDATE items SET {HLC_TIMESTAMP_COLUMN} = 'hlc-2' WHERE id = 'i1'"),
         [],
@@ -690,8 +691,9 @@ fn crdt_setup_error_converts_into_database_error_crdt_setup_variant() {
 }
 
 // -------------------------------------------------------------------------
-// D-4 (revised): `_no_trigger` suffix on columns is the skip rule; structural
-// CRDT metadata columns are covered by a small hardcoded exemption.
+// D-4 (revised): `_no_trigger` suffix on columns is the sole skip rule.
+// Structural CRDT metadata columns follow the same convention and are
+// caught by it.
 // -------------------------------------------------------------------------
 
 /// Reads the raw SQL body of the AFTER-UPDATE trigger for `table_name` from
@@ -753,17 +755,18 @@ fn tracked_columns_of(sql: &str) -> Vec<String> {
 }
 
 #[test]
-fn installer_skips_structural_metadata_via_hardcoded_names() {
-    // Verifies the three structural CRDT metadata columns are still skipped
-    // via the hardcoded exemption — they do not end in `_no_trigger` and so
-    // are not covered by the suffix rule.
+fn installer_skips_structural_metadata_via_no_trigger_suffix() {
+    // Verifies the three structural CRDT metadata columns are skipped via
+    // the same `_no_trigger` suffix rule that skips consumer-declared
+    // `_no_trigger` columns. Their names all end in `_no_trigger`, so no
+    // separate hardcoded exemption is needed.
     let conn = setup_trigger_fixture();
     let sql = update_trigger_ddl(&conn, "items");
 
     let tracked = tracked_columns_of(&sql);
     // Fixture table `items` carries id (PK), name, body, and the three
     // metadata columns. The tracked list is exactly {name, body} — metadata
-    // columns are excluded via the hardcoded name exemption.
+    // columns are excluded via the `_no_trigger` suffix rule.
     assert_eq!(
         tracked,
         vec!["\"name\"".to_string(), "\"body\"".to_string()],
@@ -771,30 +774,12 @@ fn installer_skips_structural_metadata_via_hardcoded_names() {
     );
     for meta in [HLC_TIMESTAMP_COLUMN, COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN] {
         assert!(
+            meta.ends_with("_no_trigger"),
+            "invariant: structural metadata name {meta} must follow the `_no_trigger` suffix convention"
+        );
+        assert!(
             !tracked.iter().any(|c| c == &format!("\"{meta}\"")),
             "structural metadata column {meta} must not be tracked"
-        );
-    }
-}
-
-#[test]
-fn installer_still_skips_haex_hlc_even_without_no_trigger_suffix() {
-    // Locks the invariant: the structural CRDT metadata columns do NOT end
-    // in `_no_trigger`, so the hardcoded exemption is what keeps them out
-    // of the `AFTER UPDATE OF <cols>` tracked list. If that exemption ever
-    // regressed to depend on the suffix rule, this test would catch it.
-    let conn = setup_trigger_fixture();
-    let sql = update_trigger_ddl(&conn, "items");
-    let tracked = tracked_columns_of(&sql);
-
-    for meta in [HLC_TIMESTAMP_COLUMN, COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN] {
-        assert!(
-            !meta.ends_with("_no_trigger"),
-            "invariant: structural metadata name {meta} must not accidentally end in `_no_trigger`"
-        );
-        assert!(
-            !tracked.iter().any(|c| c == &format!("\"{meta}\"")),
-            "structural metadata column {meta} must not appear in the tracked column list: {tracked:?}"
         );
     }
 }

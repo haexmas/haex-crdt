@@ -30,10 +30,10 @@ use super::report::ApplyReport;
 /// and the HLC of the target row currently in the table (if any).
 ///
 /// CRDT semantics: a delete is a timestamped operation. If the target row
-/// carries a `haex_hlc` strictly newer than the delete-log entry, the row
-/// was inserted or updated *after* the delete and must be kept — that is a
-/// "resurrection" and must NOT be dropped. Row-absent → propagate is a
-/// no-op DELETE (safe).
+/// carries a row-level HLC strictly newer than the delete-log entry, the
+/// row was inserted or updated *after* the delete and must be kept — that
+/// is a "resurrection" and must NOT be dropped. Row-absent → propagate is
+/// a no-op DELETE (safe).
 pub fn should_propagate_delete(delete_log_hlc: &str, target_row_hlc: Option<&str>) -> bool {
     match target_row_hlc {
         None => true,
@@ -54,9 +54,9 @@ pub fn delete_shadows_insert(delete_hlc: &str, insert_hlc: &str) -> bool {
 /// insert-site check can compare against a live snapshot without re-parsing
 /// the JSON `row_pks` per candidate.
 ///
-/// Entries with NULL `haex_hlc` are skipped: they cannot participate in an
-/// HLC comparison so treating them as absent is safer than assigning a
-/// default that could shadow an unrelated insert.
+/// Entries with a NULL row-level HLC are skipped: they cannot participate
+/// in an HLC comparison so treating them as absent is safer than assigning
+/// a default that could shadow an unrelated insert.
 pub type DeleteShadowMap = HashMap<String, Vec<(serde_json::Map<String, JsonValue>, String)>>;
 
 /// Load the whole delete-log into a per-table shadow map once, before the
@@ -69,7 +69,7 @@ pub fn load_delete_shadow_map(tx: &Transaction<'_>) -> Result<DeleteShadowMap, D
     let mut map: DeleteShadowMap = HashMap::new();
     let mut stmt = tx
         .prepare(&format!(
-            "SELECT table_name, row_pks, haex_hlc FROM \"{DELETED_ROWS_TABLE}\""
+            "SELECT table_name, row_pks, {HLC_TIMESTAMP_COLUMN} FROM \"{DELETED_ROWS_TABLE}\""
         ))
         .map_err(DatabaseError::from)?;
     let rows = stmt
@@ -130,7 +130,7 @@ pub fn propagate_deleted_rows_to_target_tables(
     for id in delete_log_ids {
         let entry = tx.query_row(
             &format!(
-                "SELECT table_name, row_pks, haex_hlc FROM \"{DELETED_ROWS_TABLE}\" WHERE id = ?1"
+                "SELECT table_name, row_pks, {HLC_TIMESTAMP_COLUMN} FROM \"{DELETED_ROWS_TABLE}\" WHERE id = ?1"
             ),
             params![id],
             |row| {
@@ -196,7 +196,7 @@ pub fn propagate_deleted_rows_to_target_tables(
         // Resurrection check: if the target row was inserted or updated
         // after this delete-log entry, keep it.
         let select_hlc_sql =
-            format!("SELECT haex_hlc FROM \"{target_table}\" WHERE {where_clause}");
+            format!("SELECT {HLC_TIMESTAMP_COLUMN} FROM \"{target_table}\" WHERE {where_clause}");
         let target_row_hlc: Option<String> =
             match tx.query_row(&select_hlc_sql, param_refs.as_slice(), |row| {
                 row.get::<_, Option<String>>(0)

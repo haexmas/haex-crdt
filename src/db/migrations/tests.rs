@@ -7,6 +7,7 @@ use rusqlite::Connection;
 
 use super::bootstrap::CRATE_MIGRATIONS;
 use super::engine::run_migrations;
+use crate::crdt::columns::{COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN, HLC_TIMESTAMP_COLUMN};
 use crate::error::{Error, MigrationJournal};
 use crate::migration::{MigrationName, StaticMigrationSource};
 use crate::table_names::{
@@ -101,8 +102,9 @@ fn consumer_migration_creates_its_table_and_records_in_app_journal() {
 #[test]
 fn consumer_ddl_receives_crdt_metadata_columns() {
     // Plan §4.3: consumer-owned migrations pass through CrdtTransformer,
-    // which injects haex_hlc / haex_column_hlcs / haex_column_sigs into
-    // any CREATE TABLE that isn't marked `_no_sync`.
+    // which injects the three CRDT metadata columns
+    // (HLC_TIMESTAMP_COLUMN / COLUMN_HLCS_COLUMN / COLUMN_SIGS_COLUMN)
+    // into any CREATE TABLE that isn't marked `_no_sync`.
     let mut conn = Connection::open_in_memory().unwrap();
     let src = source_from(&[(
         "0001_items",
@@ -118,13 +120,16 @@ fn consumer_ddl_receives_crdt_metadata_columns() {
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    assert!(cols.iter().any(|c| c == "haex_hlc"), "columns: {cols:?}");
     assert!(
-        cols.iter().any(|c| c == "haex_column_hlcs"),
+        cols.iter().any(|c| c == HLC_TIMESTAMP_COLUMN),
         "columns: {cols:?}"
     );
     assert!(
-        cols.iter().any(|c| c == "haex_column_sigs"),
+        cols.iter().any(|c| c == COLUMN_HLCS_COLUMN),
+        "columns: {cols:?}"
+    );
+    assert!(
+        cols.iter().any(|c| c == COLUMN_SIGS_COLUMN),
         "columns: {cols:?}"
     );
 }

@@ -22,11 +22,11 @@
 //! # `sig` is opaque
 //!
 //! `ColumnChange::sig` is `Option<JsonValue>`: the raw JSON entry
-//! from `haex_column_sigs[column_name]` if present, else `None`. The
-//! crate does not decode a shape here — consumers with a signature
-//! provider decode into their own type. This is what makes the scanner
-//! agnostic to haex-vault's per-space `{col: {space: sig}}` nesting vs a
-//! consumer that stores `{col: sig}` flat.
+//! from the column-signature map keyed by `column_name` if present, else
+//! `None`. The crate does not decode a shape here — consumers with a
+//! signature provider decode into their own type. This is what makes the
+//! scanner agnostic to haex-vault's per-space `{col: {space: sig}}`
+//! nesting vs a consumer that stores `{col: sig}` flat.
 
 use crate::crdt::columns::{COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN, HLC_TIMESTAMP_COLUMN};
 use crate::crdt::hlc::{hlc_is_from_node, hlc_is_newer};
@@ -60,11 +60,11 @@ pub struct ColumnChange {
     pub hlc_timestamp: String,
     pub value: JsonValue,
     pub device_id: String,
-    /// Raw entry from `haex_column_sigs[column_name]` if present. The
-    /// crate does not decode this — consumers own the shape via their
-    /// [`crate::signature::SignatureProvider`] (haex-vault stores
-    /// per-space nested `{space: sig}`, plain deployments store the sig
-    /// directly).
+    /// Raw entry from the column-signature map keyed by `column_name` if
+    /// present. The crate does not decode this — consumers own the shape
+    /// via their [`crate::signature::SignatureProvider`] (haex-vault
+    /// stores per-space nested `{space: sig}`, plain deployments store the
+    /// sig directly).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sig: Option<JsonValue>,
 }
@@ -89,8 +89,8 @@ pub fn scan_dirty_tables(conn: &Connection) -> Result<Vec<String>, DatabaseError
 ///
 /// - `after_hlc` — exclusive lower bound on the per-column HLC. `None`
 ///   emits every column with a usable HLC (fresh scan / full snapshot).
-///   Row-level `haex_hlc` is used as fallback when a column is missing
-///   from `haex_column_hlcs`; empty-string HLCs are treated as absent.
+///   The row-level HLC is used as fallback when a column is missing
+///   from the column-HLC map; empty-string HLCs are treated as absent.
 /// - `origin_node_filter` — when `Some(node_id)`, emits only columns
 ///   whose HLC's node-id matches. Use to skip columns freshly applied
 ///   from remote peers so they are not pushed back (ping-pong prevention).
@@ -174,12 +174,12 @@ pub fn scan_table_for_local_changes(
     let (where_sql, params) = if let Some(hlc) = after_hlc {
         // Admit rows whose row-level HLC is absent (NULL) or empty in addition
         // to those strictly newer than the cursor. A corrupt/legacy row can
-        // carry `haex_hlc = ''` while still holding a valid per-column HLC in
-        // `haex_column_hlcs`; a bare `"haex_hlc" > ?` prefilter drops it before
-        // the per-column fallback below can emit that valid change, so the row
-        // could only ever converge on a full scan. The per-column loop re-checks
-        // each HLC against `after_hlc`, so widening here cannot leak stale
-        // columns — rows with no usable HLC are still skipped.
+        // carry an empty row-level HLC while still holding a valid per-column
+        // HLC in the column-HLC map; a bare `<row_hlc> > ?` prefilter drops
+        // it before the per-column fallback below can emit that valid change,
+        // so the row could only ever converge on a full scan. The per-column
+        // loop re-checks each HLC against `after_hlc`, so widening here cannot
+        // leak stale columns — rows with no usable HLC are still skipped.
         (
             format!(
                 " WHERE (\"{col}\" > ?1 OR \"{col}\" IS NULL OR \"{col}\" = '')",
