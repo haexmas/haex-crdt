@@ -1,2 +1,5 @@
 /target
 Cargo.lock
+
+# spaex advisory manifest lock
+.spaex.json.lock

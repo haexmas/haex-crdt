@@ -1,0 +1,14 @@
+{
+  "generation_id": "g_20260907T220200Z_9691",
+  "molecules": [
+    {
+      "id": "com.github.haexmas.atoms.graphify-first-authoring",
+      "paths": [
+        ".spaex/constitution.md"
+      ],
+      "revision": "c1db86a1fda27b2d9c5cd82fe3a66b9c01f9e1fa",
+      "source": "https://github.com/haexmas/atoms"
+    }
+  ],
+  "spaex_version": "4"
+}
