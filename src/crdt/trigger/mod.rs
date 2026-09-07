@@ -102,6 +102,24 @@ pub fn is_safe_identifier(name: &str) -> bool {
 /// The table must already carry the three CRDT metadata columns (see
 /// [`ensure_crdt_columns`]) and have at least one primary-key column.
 ///
+/// # Column skip rule (D-4)
+///
+/// Any column whose name starts with `haex_` is skipped from trigger
+/// tracking — one uniform, namespace-based rule that subsumes:
+///
+/// - the structural CRDT metadata columns
+///   ([`HLC_TIMESTAMP_COLUMN`], [`COLUMN_HLCS_COLUMN`], [`COLUMN_SIGS_COLUMN`]),
+/// - sync-system bookkeeping columns consumers rename with the prefix
+///   (`haex_last_push_hlc_timestamp` etc.), and
+/// - app-local metadata that must not sync (`haex_local_*`, e.g.
+///   `haex_local_updated_at`).
+///
+/// Primary-key columns are also skipped. Consumers who want a column tracked
+/// simply do not name it with the `haex_` prefix.
+///
+/// Symmetric with tables: the `_no_sync` suffix on a table name marks it
+/// non-syncing; the `haex_` prefix on a column name marks it non-tracked.
+///
 /// The BEFORE-DELETE trigger records the delete as an event row in
 /// [`DELETED_ROWS_TABLE`] on every hard-delete; that table itself is exempt
 /// (a self-referencing DELETE trigger would loop on cleanup).
@@ -135,19 +153,11 @@ pub fn setup_triggers_for_table(
         });
     }
 
-    // Columns eligible for LWW tracking: everything except PKs and the three
-    // CRDT metadata columns. Consumer-schema conventions (mutation-tracking
-    // columns like `updated_at`, sync-metadata like `last_push_hlc`) are the
-    // consumer's concern — either don't put them on CRDT tables, or accept
-    // that changes to them mark the row dirty.
+    // D-4: skip PKs and any column whose name starts with `haex_`. The three
+    // structural metadata columns are natural cases of the same rule.
     let cols_to_track: Vec<String> = columns
         .iter()
-        .filter(|c| {
-            !c.is_pk
-                && c.name != HLC_TIMESTAMP_COLUMN
-                && c.name != COLUMN_HLCS_COLUMN
-                && c.name != COLUMN_SIGS_COLUMN
-        })
+        .filter(|c| !c.is_pk && !c.name.starts_with("haex_"))
         .map(|c| c.name.clone())
         .collect();
 
@@ -294,9 +304,28 @@ fn generate_update_trigger_sql(
             .join(" OR ")
     };
 
+    // D-4: constrain the trigger to only fire when at least one *tracked*
+    // column is UPDATE'd. `AFTER UPDATE OF <cols>` is SQLite's built-in
+    // column-scoped trigger form; an UPDATE that touches only skipped
+    // columns (haex_-prefixed or PKs) then does not fire the trigger at all.
+    //
+    // Empty tracked list is degenerate — the trigger body is inert anyway
+    // (the SELECT ... WHERE (0) guard) — so fall back to bare `AFTER UPDATE
+    // ON` since `UPDATE OF` with no column list is a syntax error.
+    let update_of_clause = if cols_to_track.is_empty() {
+        format!("AFTER UPDATE ON \"{table_name}\"")
+    } else {
+        let column_list = cols_to_track
+            .iter()
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("AFTER UPDATE OF {column_list} ON \"{table_name}\"")
+    };
+
     format!(
         "CREATE TRIGGER IF NOT EXISTS \"{trigger_name}\"
-            AFTER UPDATE ON \"{table_name}\"
+            {update_of_clause}
             FOR EACH ROW
             WHEN NEW.{HLC_TIMESTAMP_COLUMN} IS NOT NULL
                 AND COALESCE((SELECT value FROM {TABLE_CRDT_CONFIGS} WHERE key = 'triggers_enabled'), '1') = '1'

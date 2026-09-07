@@ -688,3 +688,219 @@ fn crdt_setup_error_converts_into_database_error_crdt_setup_variant() {
     let db_err: DatabaseError = err.into();
     assert!(matches!(db_err, DatabaseError::CrdtSetup(_)));
 }
+
+// -------------------------------------------------------------------------
+// D-4: haex_-prefix on columns is a universal skip rule.
+// -------------------------------------------------------------------------
+
+/// Reads the raw SQL body of the AFTER-UPDATE trigger for `table_name` from
+/// `sqlite_master`. The tests below rely on this to inspect the emitted DDL.
+fn update_trigger_ddl(conn: &Connection, table_name: &str) -> String {
+    let trigger_name = format!("z_dirty_{table_name}_update");
+    conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+        [&trigger_name],
+        |r| r.get::<_, String>(0),
+    )
+    .expect("update trigger must exist")
+}
+
+#[test]
+fn installer_skips_any_haex_prefixed_column() {
+    let conn = Connection::open_in_memory().unwrap();
+    register_test_udfs(&conn);
+    setup_crdt_bookkeeping(&conn);
+    conn.execute_batch(&format!(
+        "CREATE TABLE items (
+             id INTEGER PRIMARY KEY,
+             value TEXT,
+             haex_random_stuff TEXT,
+             {HLC_TIMESTAMP_COLUMN} TEXT,
+             {COLUMN_HLCS_COLUMN} TEXT NOT NULL DEFAULT '{{}}',
+             {COLUMN_SIGS_COLUMN} TEXT NOT NULL DEFAULT '{{}}'
+         );"
+    ))
+    .unwrap();
+
+    let tx = conn.unchecked_transaction().unwrap();
+    setup_triggers_for_table(&tx, "items", false).unwrap();
+    tx.commit().unwrap();
+
+    let sql = update_trigger_ddl(&conn, "items");
+    assert!(
+        !sql.contains("haex_random_stuff"),
+        "arbitrary haex_-prefixed column must not appear in tracked list: {sql}"
+    );
+    assert!(
+        sql.contains("\"value\""),
+        "non-prefixed column must be tracked: {sql}"
+    );
+}
+
+/// Extracts the tracked-column list from an `AFTER UPDATE OF ... ON` trigger
+/// header. Returns the column names verbatim (still quoted).
+fn tracked_columns_of(sql: &str) -> Vec<String> {
+    let after = sql
+        .split("AFTER UPDATE OF ")
+        .nth(1)
+        .expect("trigger must emit AFTER UPDATE OF form");
+    let list = after
+        .split(" ON ")
+        .next()
+        .expect("`ON <table>` must follow the column list");
+    list.split(',').map(|s| s.trim().to_string()).collect()
+}
+
+#[test]
+fn installer_skips_structural_metadata_via_prefix_rule_not_hardcoded_names() {
+    // Verifies the rule still covers the three structural metadata columns
+    // even though the hardcoded name checks are gone.
+    let conn = setup_trigger_fixture();
+    let sql = update_trigger_ddl(&conn, "items");
+
+    let tracked = tracked_columns_of(&sql);
+    // Fixture table `items` carries id (PK), name, body, and the three
+    // metadata columns. Under the prefix rule the tracked list is exactly
+    // {name, body} — metadata columns are excluded via the haex_ prefix,
+    // not via hardcoded names.
+    assert_eq!(
+        tracked,
+        vec!["\"name\"".to_string(), "\"body\"".to_string()],
+        "tracked list must be exactly the non-prefixed non-PK columns"
+    );
+    for meta in [HLC_TIMESTAMP_COLUMN, COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN] {
+        assert!(
+            !tracked.iter().any(|c| c == &format!("\"{meta}\"")),
+            "structural metadata column {meta} must not be tracked"
+        );
+    }
+}
+
+#[test]
+fn update_of_haex_prefixed_column_does_not_mark_dirty() {
+    let conn = Connection::open_in_memory().unwrap();
+    register_test_udfs(&conn);
+    setup_crdt_bookkeeping(&conn);
+    conn.execute_batch(&format!(
+        "CREATE TABLE items (
+             id INTEGER PRIMARY KEY,
+             value TEXT,
+             haex_local_meta TEXT,
+             {HLC_TIMESTAMP_COLUMN} TEXT,
+             {COLUMN_HLCS_COLUMN} TEXT NOT NULL DEFAULT '{{}}',
+             {COLUMN_SIGS_COLUMN} TEXT NOT NULL DEFAULT '{{}}'
+         );"
+    ))
+    .unwrap();
+
+    let tx = conn.unchecked_transaction().unwrap();
+    setup_triggers_for_table(&tx, "items", false).unwrap();
+    tx.commit().unwrap();
+
+    conn.execute(
+        &format!(
+            "INSERT INTO items (id, value, haex_local_meta, {HLC_TIMESTAMP_COLUMN})
+             VALUES (1, 'v', 'm1', 'hlc-1')"
+        ),
+        [],
+    )
+    .unwrap();
+    // Clear the dirty entry left by the INSERT so the UPDATE assertion is
+    // unambiguous.
+    conn.execute(
+        &format!("DELETE FROM {TABLE_CRDT_DIRTY_TABLES} WHERE table_name = 'items'"),
+        [],
+    )
+    .unwrap();
+
+    conn.execute(
+        &format!(
+            "UPDATE items SET haex_local_meta = 'm2', {HLC_TIMESTAMP_COLUMN} = 'hlc-2' WHERE id = 1"
+        ),
+        [],
+    )
+    .unwrap();
+
+    let dirty: i64 = conn
+        .query_row(
+            &format!("SELECT COUNT(*) FROM {TABLE_CRDT_DIRTY_TABLES} WHERE table_name = 'items'"),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        dirty, 0,
+        "UPDATE OF a haex_-prefixed column must not mark the row dirty"
+    );
+}
+
+#[test]
+fn update_of_regular_column_still_marks_dirty() {
+    let conn = Connection::open_in_memory().unwrap();
+    register_test_udfs(&conn);
+    setup_crdt_bookkeeping(&conn);
+    conn.execute_batch(&format!(
+        "CREATE TABLE items (
+             id INTEGER PRIMARY KEY,
+             value TEXT,
+             haex_local_meta TEXT,
+             {HLC_TIMESTAMP_COLUMN} TEXT,
+             {COLUMN_HLCS_COLUMN} TEXT NOT NULL DEFAULT '{{}}',
+             {COLUMN_SIGS_COLUMN} TEXT NOT NULL DEFAULT '{{}}'
+         );"
+    ))
+    .unwrap();
+
+    let tx = conn.unchecked_transaction().unwrap();
+    setup_triggers_for_table(&tx, "items", false).unwrap();
+    tx.commit().unwrap();
+
+    conn.execute(
+        &format!(
+            "INSERT INTO items (id, value, haex_local_meta, {HLC_TIMESTAMP_COLUMN})
+             VALUES (1, 'v1', 'm1', 'hlc-1')"
+        ),
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        &format!("DELETE FROM {TABLE_CRDT_DIRTY_TABLES} WHERE table_name = 'items'"),
+        [],
+    )
+    .unwrap();
+
+    conn.execute(
+        &format!("UPDATE items SET value = 'v2', {HLC_TIMESTAMP_COLUMN} = 'hlc-2' WHERE id = 1"),
+        [],
+    )
+    .unwrap();
+
+    let dirty: i64 = conn
+        .query_row(
+            &format!("SELECT COUNT(*) FROM {TABLE_CRDT_DIRTY_TABLES} WHERE table_name = 'items'"),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        dirty, 1,
+        "UPDATE OF a regular (non-prefixed) column must mark the row dirty"
+    );
+}
+
+#[test]
+fn after_update_trigger_uses_explicit_column_list() {
+    // Locks the perf-important emission form: the AFTER-UPDATE trigger must
+    // list its tracked columns explicitly so an UPDATE that touches only
+    // skipped columns does not fire the trigger at all.
+    let conn = setup_trigger_fixture();
+    let sql = update_trigger_ddl(&conn, "items");
+
+    // Fixture table `items` has tracked columns `name` and `body`.
+    assert!(
+        sql.contains("AFTER UPDATE OF"),
+        "trigger must use `AFTER UPDATE OF <cols>`, not bare `AFTER UPDATE ON`: {sql}"
+    );
+    assert!(sql.contains("\"name\""), "tracked col missing: {sql}");
+    assert!(sql.contains("\"body\""), "tracked col missing: {sql}");
+}
