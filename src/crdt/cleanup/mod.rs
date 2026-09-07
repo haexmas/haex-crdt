@@ -298,10 +298,19 @@ fn read_max_prunable_hlc(
 
 /// For `TimeBasedDays`: computes the cutoff HLC time-part from the
 /// current HLC in `haex_crdt_configs_no_sync`. Returns `None` when no HLC has
-/// been recorded yet or when the cutoff would overflow `i64` (SQLite
-/// stores integers signed 64-bit; an `as i64` cast on `u64 > i64::MAX`
-/// would wrap negative and silently skew the comparison).
-fn compute_cutoff(tx: &Transaction, policy: RetentionPolicy) -> Result<Option<i64>, DatabaseError> {
+/// been recorded yet, when the policy is [`RetentionPolicy::All`], or when
+/// the cutoff would overflow `i64` (SQLite stores integers signed 64-bit;
+/// an `as i64` cast on `u64 > i64::MAX` would wrap negative and silently
+/// skew the comparison).
+///
+/// Exposed publicly so consumers that need to prune a separate delete-log
+/// under the same policy (e.g. haex-vault's shared-space log) reuse the
+/// exact cutoff the crate is about to DELETE against, keeping the two
+/// prunes in lockstep instead of relying on a duplicated formula.
+pub fn compute_cutoff(
+    tx: &Transaction,
+    policy: RetentionPolicy,
+) -> Result<Option<i64>, DatabaseError> {
     let days = match policy {
         RetentionPolicy::TimeBasedDays { days } => days,
         RetentionPolicy::All => return Ok(None),
