@@ -14,7 +14,7 @@ use crate::error::Result;
 ///   for minting and persisting one **before** handing a provider to
 ///   `haex-crdt`.
 /// - `Database::open` records the `device_id` observed on first successful
-///   open in `haex_crdt_configs`. On subsequent opens, if the supplied
+///   open in [`crate::TABLE_CRDT_CONFIGS`]. On subsequent opens, if the supplied
 ///   provider returns a different `Uuid`, the outcome is the consumer's
 ///   choice via [`crate::DeviceIdPolicy`]: `Reject` (the default) returns
 ///   `Error::DeviceIdMismatch` rather than silently rewriting the record,

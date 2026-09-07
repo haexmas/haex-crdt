@@ -28,7 +28,7 @@ pub enum Error {
 
     // ---- device identity contract (plan §4.1) --------------------------------
     /// The `DeviceIdProvider` returned a `Uuid` that does not match the one
-    /// recorded in `haex_hlc_state` on first open. Recovery is the consumer's
+    /// recorded in [`crate::TABLE_CRDT_CONFIGS`] on first open. Recovery is the consumer's
     /// decision — this crate never silently rewrites HLC state.
     #[error("device id mismatch: recorded {expected}, supplied {supplied}")]
     DeviceIdMismatch { expected: Uuid, supplied: Uuid },
