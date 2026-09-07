@@ -43,8 +43,13 @@ pub enum HlcError {
     HexDecode(String),
     #[error("UTF-8 conversion error: {0}")]
     Utf8Error(String),
-    #[error("Device id provider error: {0}")]
-    DeviceIdProvider(String),
+    /// The consumer-supplied [`DeviceIdProvider`] failed to yield a device
+    /// UUID. Named after the Tauri-store terminology used on the vault side
+    /// (where these errors typically originate) rather than after the trait,
+    /// so callers can pattern-match a single "device store lookup failed"
+    /// arm regardless of which provider implementation is in play.
+    #[error("Device store error: {0}")]
+    DeviceStore(String),
 }
 
 /// A thread-safe, persistent HLC service.
@@ -114,7 +119,7 @@ impl HlcService {
     fn build_hlc(conn: &Connection, device_id: &dyn DeviceIdProvider) -> Result<HLC, HlcError> {
         let uuid = device_id
             .device_id()
-            .map_err(|e| HlcError::DeviceIdProvider(e.to_string()))?;
+            .map_err(|e| HlcError::DeviceStore(e.to_string()))?;
 
         let node_id = ID::try_from(*uuid.as_bytes()).map_err(|e| {
             HlcError::ParseNodeId(format!("Invalid node ID format from device store: {e:?}"))
@@ -502,5 +507,20 @@ mod tests {
         let svc = HlcService::new_with_uuid(Uuid::from_bytes([3u8; 16]));
         let result = svc.advance_past_remote("");
         assert!(result.is_ok(), "Expected Ok(()), got: {:?}", result);
+    }
+
+    /// Locks the `HlcError::DeviceStore` variant name at the type level.
+    ///
+    /// haex-vault (and other pre-extraction consumers) pattern-match on this
+    /// name; a rename would be a silent semver break for them. This test
+    /// fails at *compile* time if the variant is renamed, which is exactly
+    /// the tripwire we want.
+    #[test]
+    fn device_store_variant_name_is_stable() {
+        let err = HlcError::DeviceStore("boom".to_string());
+        match err {
+            HlcError::DeviceStore(msg) => assert_eq!(msg, "boom"),
+            other => panic!("expected DeviceStore variant, got {other:?}"),
+        }
     }
 }
