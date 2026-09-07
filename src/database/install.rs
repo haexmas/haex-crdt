@@ -1,8 +1,8 @@
 //! `install_crdt` backfill contract (plan §6).
 //!
 //! Adding CRDT metadata columns to a table that already carries rows leaves
-//! those rows with `NULL` in `haex_hlc` and `'{}'` in
-//! `haex_column_hlcs` — from the CRDT engine's point of view they look
+//! those rows with `NULL` in the row-level HLC and `'{}'` in the
+//! column-HLC map — from the CRDT engine's point of view they look
 //! non-existent, no column has ever been written to, and the row could not
 //! participate in an LWW comparison. That is a silent-corruption vector.
 //!
@@ -24,6 +24,7 @@ use crate::crdt::trigger::{
 use crate::database::config::InstallCrdtOptions;
 use crate::db::core::convert_value_ref_to_json;
 use crate::db::error::DatabaseError;
+use crate::db::migrations::migrate_legacy_metadata_columns;
 use crate::error::{Error, Result};
 use crate::signature::SignatureProvider;
 use crate::table_names::TABLE_CRDT_DIRTY_TABLES;
@@ -51,6 +52,8 @@ pub fn install_crdt(
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(DatabaseError::from)?;
+
+    migrate_legacy_metadata_columns(&tx)?;
 
     let already_managed = {
         let cols = get_table_schema(&tx, table_name).map_err(DatabaseError::from)?;

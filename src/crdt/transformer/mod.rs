@@ -2,11 +2,11 @@
 
 use crate::crdt::columns::{COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN, HLC_TIMESTAMP_COLUMN};
 use crate::crdt::insert_transformer::InsertTransformer;
+use crate::crdt::metadata::create_hlc_assignment;
 use crate::db::error::DatabaseError;
 use sqlparser::ast::{
-    AlterTable, Assignment, AssignmentTarget, ColumnDef, ColumnOption, ColumnOptionDef,
-    CreateTable, DataType, Expr, Ident, ObjectName, ObjectNamePart, Query, Select, SetExpr,
-    Statement, TableFactor, TableObject, Value,
+    AlterTable, ColumnDef, ColumnOption, ColumnOptionDef, CreateTable, DataType, Expr, Ident,
+    ObjectName, ObjectNamePart, Query, Select, SetExpr, Statement, TableFactor, TableObject, Value,
 };
 use std::borrow::Cow;
 use uhlc::Timestamp;
@@ -25,16 +25,6 @@ impl CrdtColumns {
         column_hlcs: COLUMN_HLCS_COLUMN,
         column_sigs: COLUMN_SIGS_COLUMN,
     };
-
-    /// Erstellt eine HLC-Zuweisung für UPDATE
-    fn create_hlc_assignment(&self, timestamp: &Timestamp) -> Assignment {
-        Assignment {
-            target: AssignmentTarget::ColumnName(ObjectName(vec![ObjectNamePart::Identifier(
-                Ident::new(self.hlc_timestamp),
-            )])),
-            value: Expr::Value(Value::SingleQuotedString(timestamp.to_string()).into()),
-        }
-    }
 
     /// Fügt CRDT-Spalten zu einer Tabellendefinition hinzu
     /// Überschreibt vorhandene Spalten mit den gleichen Namen, um korrekte Datentypen zu garantieren
@@ -60,7 +50,7 @@ impl CrdtColumns {
         });
 
         // Per-column author signatures (parallel to column_hlcs). Emitted as
-        // `haex_column_sigs TEXT NOT NULL DEFAULT '{}'` so that pre-existing
+        // `<sigs_column> TEXT NOT NULL DEFAULT '{}'` so that pre-existing
         // rows and inserts that don't yet know about the column still land
         // with a valid empty map.
         columns.push(ColumnDef {
@@ -266,9 +256,10 @@ impl CrdtTransformer {
                         // Add HLC timestamp assignment. Hard-delete + delete-log
                         // model: no soft-deleted rows live in the target table,
                         // so there is nothing to filter out.
-                        update
-                            .assignments
-                            .push(self.columns.create_hlc_assignment(hlc_timestamp));
+                        update.assignments.push(create_hlc_assignment(
+                            self.columns.hlc_timestamp,
+                            hlc_timestamp,
+                        ));
                     }
                 }
                 Ok(None)
@@ -295,9 +286,10 @@ impl CrdtTransformer {
         }
     }
 
-    /// Transforms a DDL statement (CREATE TABLE) to add CRDT columns. Used by
-    /// migrations to ensure all syncable tables get `haex_hlc` and
-    /// `haex_column_hlcs` columns.
+    /// Transforms a DDL statement (CREATE TABLE) to add CRDT columns. Used
+    /// by migrations to ensure all syncable tables get the row-level HLC
+    /// column and the column-HLC map (see the constants in
+    /// [`crate::crdt::columns`]).
     ///
     /// Returns the transformed SQL string, or the original if no transformation was needed.
     pub fn transform_ddl_statement(&self, sql: &str) -> Result<String, DatabaseError> {

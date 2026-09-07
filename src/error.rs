@@ -9,9 +9,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// without inspecting the migration name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MigrationJournal {
-    /// `haex_crdt_migrations` — CRDT bookkeeping migrations compiled into this crate.
+    /// `haex_crdt_migrations_no_sync` — CRDT bookkeeping migrations compiled into this crate.
     CrateOwned,
-    /// `haex_app_migrations` — schema migrations supplied by the consumer's `MigrationSource`.
+    /// `haex_app_migrations_no_sync` — schema migrations supplied by the consumer's `MigrationSource`.
     ConsumerOwned,
 }
 
@@ -69,6 +69,12 @@ pub enum Error {
         expected: String,
         found: String,
     },
+
+    /// A legacy CRDT table or metadata column could not be migrated without
+    /// risking data loss. Opening stops before the current schema is created
+    /// so the consumer can resolve the conflict explicitly.
+    #[error("legacy CRDT schema is incompatible: {reason}")]
+    MigrationCompatibility { reason: String },
 
     // ---- install_crdt contract (plan §6) -------------------------------------
     /// `install_crdt` refused to run because the three CRDT metadata columns

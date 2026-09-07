@@ -11,6 +11,7 @@ use serde_json::{json, Value as JsonValue};
 
 use super::{change, create_crdt_table, make_fixture};
 use crate::crdt::apply::{apply_remote_changes, column_sig_preimage};
+use crate::crdt::columns::COLUMN_SIGS_COLUMN;
 use crate::crdt::scanner::ColumnChange;
 use crate::error::{Error, Result};
 use crate::signature::{AuthorId, NoopSignatureProvider, RemoteChanges, SignatureProvider};
@@ -162,9 +163,9 @@ fn noop_provider_rejects_batch_carrying_non_null_signatures() {
 }
 
 #[test]
-fn accepted_sig_lands_in_haex_column_sigs_json_map() {
-    // A verified sig must persist in haex_column_sigs so a downstream peer
-    // can relay the change without re-signing.
+fn accepted_sig_lands_in_column_sigs_json_map() {
+    // A verified sig must persist in the column-sigs map so a downstream
+    // peer can relay the change without re-signing.
     struct AcceptAll;
     impl SignatureProvider for AcceptAll {
         fn sign_column(&self, _p: &[u8]) -> Result<Vec<u8>> {
@@ -190,7 +191,7 @@ fn accepted_sig_lands_in_haex_column_sigs_json_map() {
 
     let sigs_json: String = conn
         .query_row(
-            "SELECT haex_column_sigs FROM items WHERE id = 'r1'",
+            &format!("SELECT {COLUMN_SIGS_COLUMN} FROM items WHERE id = 'r1'"),
             [],
             |r| r.get(0),
         )
@@ -214,7 +215,7 @@ fn accepted_sig_lands_in_haex_column_sigs_json_map() {
     .unwrap();
     let sigs_json: String = conn
         .query_row(
-            "SELECT haex_column_sigs FROM items WHERE id = 'r1'",
+            &format!("SELECT {COLUMN_SIGS_COLUMN} FROM items WHERE id = 'r1'"),
             [],
             |r| r.get(0),
         )

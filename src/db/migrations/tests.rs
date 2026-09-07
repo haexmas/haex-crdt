@@ -7,6 +7,7 @@ use rusqlite::Connection;
 
 use super::bootstrap::CRATE_MIGRATIONS;
 use super::engine::run_migrations;
+use crate::crdt::columns::{COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN, HLC_TIMESTAMP_COLUMN};
 use crate::error::{Error, MigrationJournal};
 use crate::migration::{MigrationName, StaticMigrationSource};
 use crate::table_names::{
@@ -101,8 +102,9 @@ fn consumer_migration_creates_its_table_and_records_in_app_journal() {
 #[test]
 fn consumer_ddl_receives_crdt_metadata_columns() {
     // Plan §4.3: consumer-owned migrations pass through CrdtTransformer,
-    // which injects haex_hlc / haex_column_hlcs / haex_column_sigs into
-    // any CREATE TABLE that isn't marked `_no_sync`.
+    // which injects the three CRDT metadata columns
+    // (HLC_TIMESTAMP_COLUMN / COLUMN_HLCS_COLUMN / COLUMN_SIGS_COLUMN)
+    // into any CREATE TABLE that isn't marked `_no_sync`.
     let mut conn = Connection::open_in_memory().unwrap();
     let src = source_from(&[(
         "0001_items",
@@ -118,13 +120,16 @@ fn consumer_ddl_receives_crdt_metadata_columns() {
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    assert!(cols.iter().any(|c| c == "haex_hlc"), "columns: {cols:?}");
     assert!(
-        cols.iter().any(|c| c == "haex_column_hlcs"),
+        cols.iter().any(|c| c == HLC_TIMESTAMP_COLUMN),
         "columns: {cols:?}"
     );
     assert!(
-        cols.iter().any(|c| c == "haex_column_sigs"),
+        cols.iter().any(|c| c == COLUMN_HLCS_COLUMN),
+        "columns: {cols:?}"
+    );
+    assert!(
+        cols.iter().any(|c| c == COLUMN_SIGS_COLUMN),
         "columns: {cols:?}"
     );
 }
@@ -369,6 +374,35 @@ fn failing_statement_rolls_back_the_whole_migration() {
 
 // --- bootstrap invariants --------------------------------------------------
 
+// --- naming convention invariant (v0.1.1 D-1) ------------------------------
+
+#[test]
+/// D-1: `_no_sync` is the sole rule that excludes a table from CRDT sync.
+/// The crate's own bookkeeping tables must carry that suffix so they follow
+/// the same convention user tables do; the migration bootstrap must
+/// materialize them under those suffixed names.
+fn crate_bookkeeping_table_names_end_with_no_sync_and_bootstrap_creates_them() {
+    for (label, value) in [
+        ("TABLE_CRDT_CONFIGS", TABLE_CRDT_CONFIGS),
+        ("TABLE_CRDT_DIRTY_TABLES", TABLE_CRDT_DIRTY_TABLES),
+        ("TABLE_CRDT_MIGRATIONS", TABLE_CRDT_MIGRATIONS),
+        ("TABLE_APP_MIGRATIONS", TABLE_APP_MIGRATIONS),
+    ] {
+        assert!(
+            value.ends_with("_no_sync"),
+            "{label} must end with `_no_sync`; got {value:?}",
+        );
+    }
+
+    let mut conn = Connection::open_in_memory().unwrap();
+    run_migrations(&mut conn, &empty_source()).unwrap();
+
+    assert!(table_exists(&conn, TABLE_CRDT_CONFIGS));
+    assert!(table_exists(&conn, TABLE_CRDT_DIRTY_TABLES));
+    assert!(table_exists(&conn, TABLE_CRDT_MIGRATIONS));
+    assert!(table_exists(&conn, TABLE_APP_MIGRATIONS));
+}
+
 #[test]
 fn crate_bootstrap_records_a_stable_digest() {
     let mut conn = Connection::open_in_memory().unwrap();
@@ -388,4 +422,145 @@ fn crate_bootstrap_records_a_stable_digest() {
     assert!(digest
         .chars()
         .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+}
+
+#[test]
+fn legacy_crdt_identifiers_are_migrated_before_current_bootstrap() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE haex_crdt_configs (
+             key TEXT PRIMARY KEY NOT NULL, type TEXT NOT NULL, value TEXT NOT NULL
+         );
+         CREATE TABLE haex_crdt_dirty_tables (
+             table_name TEXT PRIMARY KEY NOT NULL, last_modified TEXT
+         );
+         CREATE TABLE haex_crdt_migrations (
+             migration_name TEXT PRIMARY KEY NOT NULL,
+             sha256_digest TEXT NOT NULL,
+             applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+         );
+         CREATE TABLE haex_app_migrations (
+             migration_name TEXT PRIMARY KEY NOT NULL,
+             sha256_digest TEXT NOT NULL,
+             applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+         );
+         CREATE TABLE haex_deleted_rows (
+             id TEXT PRIMARY KEY NOT NULL,
+             table_name TEXT NOT NULL,
+             row_pks TEXT NOT NULL,
+             haex_hlc TEXT,
+             haex_column_hlcs TEXT NOT NULL DEFAULT '{}',
+             haex_column_sigs TEXT NOT NULL DEFAULT '{}'
+         );
+         CREATE TABLE legacy_items (
+             id TEXT PRIMARY KEY NOT NULL,
+             body TEXT,
+             haex_hlc TEXT,
+             haex_column_hlcs TEXT NOT NULL DEFAULT '{}',
+             haex_column_sigs TEXT NOT NULL DEFAULT '{}'
+         );
+         INSERT INTO haex_crdt_configs (key, type, value)
+             VALUES ('hlc_timestamp', 'hlc', '0000000000000001/1');
+         INSERT INTO haex_crdt_dirty_tables (table_name, last_modified)
+             VALUES ('legacy_items', '2026-09-07 12:00:00');
+         INSERT INTO legacy_items
+             (id, body, haex_hlc, haex_column_hlcs, haex_column_sigs)
+             VALUES ('row-1', 'preserve me', 'hlc-1', '{\"body\":\"hlc-1\"}', '{}');",
+    )
+    .unwrap();
+
+    run_migrations(&mut conn, &empty_source()).unwrap();
+
+    for legacy in [
+        "haex_crdt_configs",
+        "haex_crdt_dirty_tables",
+        "haex_crdt_migrations",
+        "haex_app_migrations",
+    ] {
+        assert!(
+            !table_exists(&conn, legacy),
+            "legacy table still exists: {legacy}"
+        );
+    }
+    assert!(table_exists(&conn, TABLE_CRDT_CONFIGS));
+    assert!(table_exists(&conn, TABLE_CRDT_DIRTY_TABLES));
+    assert!(table_exists(&conn, TABLE_CRDT_MIGRATIONS));
+    assert!(table_exists(&conn, TABLE_APP_MIGRATIONS));
+
+    let config: String = conn
+        .query_row(
+            &format!("SELECT value FROM {TABLE_CRDT_CONFIGS} WHERE key = 'hlc_timestamp'"),
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(config, "0000000000000001/1");
+
+    let columns = conn
+        .prepare("PRAGMA table_info(legacy_items)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(columns.iter().any(|name| name == HLC_TIMESTAMP_COLUMN));
+    assert!(columns.iter().any(|name| name == COLUMN_HLCS_COLUMN));
+    assert!(columns.iter().any(|name| name == COLUMN_SIGS_COLUMN));
+
+    let row: (String, String, String) = conn
+        .query_row(
+            &format!(
+                "SELECT body, {HLC_TIMESTAMP_COLUMN}, {COLUMN_HLCS_COLUMN} \
+                 FROM legacy_items WHERE id = 'row-1'"
+            ),
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        row,
+        (
+            "preserve me".into(),
+            "hlc-1".into(),
+            "{\"body\":\"hlc-1\"}".into()
+        )
+    );
+
+    let deleted_columns = conn
+        .prepare("PRAGMA table_info(haex_deleted_rows)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(deleted_columns
+        .iter()
+        .any(|name| name == HLC_TIMESTAMP_COLUMN));
+    assert!(deleted_columns
+        .iter()
+        .any(|name| name == COLUMN_HLCS_COLUMN));
+    assert!(deleted_columns
+        .iter()
+        .any(|name| name == COLUMN_SIGS_COLUMN));
+}
+
+#[test]
+fn conflicting_legacy_and_current_tables_abort_without_merging() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(&format!(
+        "CREATE TABLE {TABLE_CRDT_CONFIGS} (
+                 key TEXT PRIMARY KEY NOT NULL, type TEXT NOT NULL, value TEXT NOT NULL
+             );
+             CREATE TABLE haex_crdt_configs (
+                 key TEXT PRIMARY KEY NOT NULL, type TEXT NOT NULL, value TEXT NOT NULL
+             );
+             INSERT INTO {TABLE_CRDT_CONFIGS} VALUES ('device_id', 'system', 'current');
+             INSERT INTO haex_crdt_configs VALUES ('device_id', 'system', 'legacy');"
+    ))
+    .unwrap();
+
+    let err = run_migrations(&mut conn, &empty_source()).unwrap_err();
+    assert!(matches!(err, Error::MigrationCompatibility { .. }));
+    assert!(table_exists(&conn, TABLE_CRDT_CONFIGS));
+    assert!(table_exists(&conn, "haex_crdt_configs"));
 }

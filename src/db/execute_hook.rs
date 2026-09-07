@@ -2,7 +2,7 @@
 //! commit. Consumers register one or more [`PostWriteHook`] implementations
 //! on [`crate::execute_with_crdt`]; each is called after the CRDT
 //! transformer has written the row (and the after-insert / after-update
-//! triggers have populated `haex_column_hlcs` and the dirty-tables entry),
+//! triggers have populated the column-HLC map and the dirty-tables entry),
 //! but before `tx.commit()` runs. Any implementation returning `Err` rolls
 //! the whole transaction back — the write plus the dirty-tables entry plus
 //! every earlier hook's derived rows disappear atomically.
@@ -12,8 +12,8 @@
 //! The hook is a generic seam, not a signing-specific API. Whatever a
 //! consumer wants to run atomically with the write goes here. Examples:
 //!
-//! - **Per-column signing** (haex-vault's F1/F2/B.3 passes over
-//!   `haex_column_sigs`, using UCAN / DID identities the crate does not
+//! - **Per-column signing** (haex-vault's F1/F2/B.3 passes over the
+//!   column-signature map, using UCAN / DID identities the crate does not
 //!   know about).
 //! - **Audit logging** — append an audit row to a consumer-owned journal
 //!   in the same transaction, so audit and data commit or roll back
@@ -104,7 +104,7 @@ impl TouchedColumns {
 #[derive(Debug)]
 pub struct WriteContext<'a> {
     /// The parsed statement after `crate::crdt::transformer` has rewritten
-    /// it (so `haex_hlc` etc. are already present in the AST).
+    /// it (so the CRDT meta columns are already present in the AST).
     pub statement: &'a Statement,
 
     /// `(target_table, columns)` for INSERT/UPDATE; `None` for statements
@@ -112,8 +112,9 @@ pub struct WriteContext<'a> {
     pub touched: Option<(TouchedTable, TouchedColumns)>,
 
     /// Transaction-scoped HLC used to stamp this write. Same value the
-    /// transformer wrote into `haex_hlc` on every touched row and the same
-    /// value `current_hlc()` returns for the rest of the transaction.
+    /// transformer wrote into the row-level HLC column on every touched
+    /// row and the same value `current_hlc()` returns for the rest of the
+    /// transaction.
     pub hlc: &'a Timestamp,
 }
 

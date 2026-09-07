@@ -5,6 +5,7 @@ use serde_json::json;
 
 use super::{change, create_crdt_table, make_fixture};
 use crate::crdt::apply::apply_remote_changes;
+use crate::crdt::columns::{COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN, HLC_TIMESTAMP_COLUMN};
 use crate::crdt::scanner::ColumnChange;
 use crate::signature::NoopSignatureProvider;
 
@@ -26,9 +27,11 @@ fn insert_creates_a_new_row_with_incoming_hlc() {
         .unwrap();
     assert_eq!(body, "hello");
     let row_hlc: String = conn
-        .query_row("SELECT haex_hlc FROM items WHERE id = 'r1'", [], |r| {
-            r.get(0)
-        })
+        .query_row(
+            &format!("SELECT {HLC_TIMESTAMP_COLUMN} FROM items WHERE id = 'r1'"),
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(row_hlc, HLC2);
 }
@@ -184,9 +187,9 @@ fn hlc_service_advances_past_the_highest_received_timestamp() {
 
 #[test]
 fn incoming_write_does_not_regress_row_hlc_when_older_than_stored() {
-    // A late-arriving older column write must not lower `haex_hlc`, because
-    // that would let an older delete shadow a newer local write on the next
-    // apply pass (delete-resurrection contract).
+    // A late-arriving older column write must not lower the row-level HLC,
+    // because that would let an older delete shadow a newer local write on
+    // the next apply pass (delete-resurrection contract).
     let (mut conn, hlc, _dev) = make_fixture();
     create_crdt_table(&conn, "items", "body TEXT, title TEXT");
 
@@ -203,9 +206,11 @@ fn incoming_write_does_not_regress_row_hlc_when_older_than_stored() {
 
     // Row HLC must equal max(HLC3, HLC1) = HLC3.
     let row_hlc: String = conn
-        .query_row("SELECT haex_hlc FROM items WHERE id = 'r1'", [], |r| {
-            r.get(0)
-        })
+        .query_row(
+            &format!("SELECT {HLC_TIMESTAMP_COLUMN} FROM items WHERE id = 'r1'"),
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(row_hlc, HLC3);
 }
@@ -229,7 +234,7 @@ fn newer_duplicate_column_change_replaces_older_staged_value() {
     assert_eq!(report.applied, 1);
     let (body, column_hlcs): (String, String) = conn
         .query_row(
-            "SELECT body, haex_column_hlcs FROM items WHERE id = 'r1'",
+            &format!("SELECT body, {COLUMN_HLCS_COLUMN} FROM items WHERE id = 'r1'"),
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -248,18 +253,23 @@ fn newer_duplicate_column_change_replaces_older_staged_value() {
 fn nullable_column_hlcs_are_treated_as_empty_on_update() {
     let (mut conn, hlc, _dev) = make_fixture();
     conn.execute(
-        "CREATE TABLE items (
-            id TEXT PRIMARY KEY NOT NULL,
-            body TEXT,
-            haex_hlc TEXT,
-            haex_column_hlcs TEXT,
-            haex_column_sigs TEXT NOT NULL DEFAULT '{}'
-        )",
+        &format!(
+            "CREATE TABLE items (
+                id TEXT PRIMARY KEY NOT NULL,
+                body TEXT,
+                {HLC_TIMESTAMP_COLUMN} TEXT,
+                {COLUMN_HLCS_COLUMN} TEXT,
+                {COLUMN_SIGS_COLUMN} TEXT NOT NULL DEFAULT '{{}}'
+            )"
+        ),
         [],
     )
     .unwrap();
     conn.execute(
-        "INSERT INTO items (id, body, haex_hlc, haex_column_hlcs) VALUES (?1, ?2, ?3, NULL)",
+        &format!(
+            "INSERT INTO items (id, body, {HLC_TIMESTAMP_COLUMN}, {COLUMN_HLCS_COLUMN}) \
+             VALUES (?1, ?2, ?3, NULL)"
+        ),
         rusqlite::params!["r1", "old", HLC1],
     )
     .unwrap();
@@ -283,15 +293,17 @@ fn nullable_column_hlcs_are_treated_as_empty_on_update() {
 fn composite_primary_keys_are_validated_and_bound_by_name() {
     let (mut conn, hlc, _dev) = make_fixture();
     conn.execute(
-        "CREATE TABLE items (
-            left_key TEXT NOT NULL,
-            right_key INTEGER NOT NULL,
-            body TEXT,
-            haex_hlc TEXT,
-            haex_column_hlcs TEXT NOT NULL DEFAULT '{}',
-            haex_column_sigs TEXT NOT NULL DEFAULT '{}',
-            PRIMARY KEY (left_key, right_key)
-        )",
+        &format!(
+            "CREATE TABLE items (
+                left_key TEXT NOT NULL,
+                right_key INTEGER NOT NULL,
+                body TEXT,
+                {HLC_TIMESTAMP_COLUMN} TEXT,
+                {COLUMN_HLCS_COLUMN} TEXT NOT NULL DEFAULT '{{}}',
+                {COLUMN_SIGS_COLUMN} TEXT NOT NULL DEFAULT '{{}}',
+                PRIMARY KEY (left_key, right_key)
+            )"
+        ),
         [],
     )
     .unwrap();

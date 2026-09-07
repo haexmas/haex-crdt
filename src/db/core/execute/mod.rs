@@ -63,10 +63,11 @@ pub fn write_payload_too_large(params: &[JsonValue], limit: usize) -> Option<usi
 /// - `hooks` are called in registration order after the main write, before
 ///   `tx.commit()`. The first `Err` aborts the transaction; later hooks
 ///   are skipped.
-/// - CRDT meta-column writes (`haex_hlc`, `haex_column_hlcs`,
-///   `haex_column_sigs`) are hard-rejected: the transformer would silently
-///   clobber `haex_hlc`, and a caller-supplied `haex_column_hlcs` would
-///   feed a forged HLC into any downstream preimage a signing hook builds.
+/// - CRDT meta-column writes ([`HLC_TIMESTAMP_COLUMN`],
+///   [`COLUMN_HLCS_COLUMN`], [`COLUMN_SIGS_COLUMN`]) are hard-rejected:
+///   the transformer would silently clobber the row-level HLC, and a
+///   caller-supplied column-HLC map would feed a forged HLC into any
+///   downstream preimage a signing hook builds.
 /// - Batches whose serialized params exceed [`MAX_CRDT_TRANSACTION_BYTES`]
 ///   are rejected before any write happens.
 pub fn execute_with_crdt(
@@ -88,11 +89,11 @@ pub fn execute_with_crdt(
     let touched = extract_touched_for_signing(&statement);
 
     // Reject caller-supplied writes to CRDT meta columns. The transformer
-    // would otherwise clobber `haex_hlc` silently, and a caller-supplied
-    // `haex_column_hlcs` would feed a forged HLC into any sig-preimage a
-    // signing hook builds after this write — an attacker could then mint
-    // a valid signature over an arbitrary HLC. Hard rejection is the only
-    // safe choice.
+    // would otherwise clobber the row-level HLC silently, and a
+    // caller-supplied column-HLC map would feed a forged HLC into any
+    // sig-preimage a signing hook builds after this write — an attacker
+    // could then mint a valid signature over an arbitrary HLC. Hard
+    // rejection is the only safe choice.
     if let Some(bad) = touched
         .as_ref()
         .and_then(|(_, cols)| cols.explicit().iter().find(|c| is_crdt_meta_column(c)))

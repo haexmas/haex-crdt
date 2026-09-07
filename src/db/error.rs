@@ -145,11 +145,12 @@ pub enum DatabaseError {
     I2ForeignShareInsert { space_id: String },
 
     /// The caller of `execute_with_crdt` tried to write to a CRDT meta column
-    /// directly (`haex_hlc`, `haex_column_hlcs`, `haex_column_sigs`). Those
-    /// columns are managed exclusively by the CRDT transformer + the F1/F2
-    /// signing passes — a caller-supplied value would either be silently
-    /// clobbered by the transformer (`haex_hlc`) or, worse, would feed a
-    /// forged HLC/sig into the sig preimage (`haex_column_hlcs`, sig-forgery
+    /// directly (the row-level HLC, column-HLC map, or column-signature map
+    /// — see the constants in `crate::crdt::columns`). Those columns are
+    /// managed exclusively by the CRDT transformer + the F1/F2 signing
+    /// passes — a caller-supplied value would either be silently clobbered
+    /// by the transformer (row-level HLC) or, worse, would feed a forged
+    /// HLC/sig into the sig preimage (column-HLC map — sig-forgery
     /// vector). Reject the whole statement — no silent stripping.
     #[error("CRDT meta column write is forbidden: '{column}' is managed by the CRDT layer and must not be set by callers")]
     CrdtMetaColumnWriteForbidden { column: String },

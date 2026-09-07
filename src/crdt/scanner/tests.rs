@@ -159,7 +159,7 @@ fn scan_returns_empty_for_missing_table() {
 #[test]
 fn scan_rejects_table_without_primary_key() {
     let (conn, _hlc, dev) = make_fixture();
-    // No PK, but with an haex_hlc column so it looks CRDT-flavoured.
+    // No PK, but with the row-level HLC column so it looks CRDT-flavoured.
     conn.execute(
         &format!(
             "CREATE TABLE t (a TEXT, {HLC_TIMESTAMP_COLUMN} TEXT, \
@@ -281,7 +281,7 @@ fn origin_node_filter_emits_only_this_nodes_writes() {
     );
     // A row whose per-column HLC carries a DIFFERENT node id (simulates a
     // row applied from a remote peer). Insert directly (no transformer) so
-    // we control the HLC node-id encoded in `haex_column_hlcs`. Node IDs
+    // we control the HLC node-id encoded in the column-HLC map. Node IDs
     // are 32-hex-char (16-byte) uhlc IDs.
     let foreign_hlc = "42/deadbeefdeadbeefdeadbeefdeadbe";
     let foreign_column_hlcs = format!("{{\"name\":\"{foreign_hlc}\"}}");

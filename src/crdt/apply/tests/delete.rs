@@ -9,7 +9,7 @@ use serde_json::json;
 
 use super::{change, create_crdt_table, make_fixture};
 use crate::crdt::apply::apply_remote_changes;
-use crate::crdt::columns::DELETED_ROWS_TABLE;
+use crate::crdt::columns::{COLUMN_HLCS_COLUMN, DELETED_ROWS_TABLE, HLC_TIMESTAMP_COLUMN};
 use crate::signature::NoopSignatureProvider;
 
 const HLC1: &str = "0000000000000001/abcdef0000000000000000000000";
@@ -95,7 +95,8 @@ fn delete_log_entry_fans_out_to_target_row() {
 #[test]
 fn delete_log_does_not_propagate_when_target_row_is_strictly_newer() {
     // Simulate resurrection: after the delete-log entry lands, the row
-    // must not vanish if its haex_hlc is strictly newer than the delete.
+    // must not vanish if its row-level HLC is strictly newer than the
+    // delete.
     let (mut conn, hlc, _dev) = make_fixture();
     create_crdt_table(&conn, "items", "body TEXT");
 
@@ -201,7 +202,7 @@ fn null_delete_hlc_is_skipped_without_aborting_apply() {
     conn.execute(
         &format!(
             "INSERT INTO {DELETED_ROWS_TABLE}
-             (id, table_name, row_pks, haex_hlc, haex_column_hlcs)
+             (id, table_name, row_pks, {HLC_TIMESTAMP_COLUMN}, {COLUMN_HLCS_COLUMN})
              VALUES ('del-null', 'items', '{{\"id\":\"r1\"}}', NULL, '{{}}')"
         ),
         [],

@@ -30,6 +30,7 @@ use crate::migration::{MigrationName, MigrationSource};
 use crate::table_names::{TABLE_APP_MIGRATIONS, TABLE_CRDT_MIGRATIONS};
 
 use super::bootstrap::CRATE_MIGRATIONS;
+use super::compat::{prepare_legacy_schema, record_legacy_bootstrap};
 
 /// Outcome of a [`run_migrations`] call.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,7 +58,11 @@ pub fn run_migrations(
     conn: &mut Connection,
     consumer_source: &dyn MigrationSource,
 ) -> Result<MigrationReport> {
+    let legacy_bootstrap_present = prepare_legacy_schema(conn)?;
     ensure_journal_tables(conn)?;
+    if legacy_bootstrap_present {
+        record_legacy_bootstrap(conn)?;
+    }
 
     let crate_applied = reconcile_and_apply(
         conn,
