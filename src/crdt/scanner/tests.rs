@@ -5,9 +5,7 @@ use crate::crdt::columns::{
     COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN, HLC_TIMESTAMP_COLUMN, UUID_FUNCTION_NAME,
 };
 use crate::crdt::hlc::{device_uuid_to_hlc_node, HlcService};
-use crate::crdt::trigger::{
-    ensure_crdt_columns_and_triggers, setup_triggers_for_table, TriggerInstallerConfig,
-};
+use crate::crdt::trigger::{ensure_crdt_columns_and_triggers, setup_triggers_for_table};
 use crate::db::connection_context::ConnectionContext;
 use crate::db::core::init::{install_tx_hlc_hooks, register_current_hlc_udf};
 use crate::table_names::{TABLE_CRDT_CONFIGS, TABLE_CRDT_DIRTY_TABLES};
@@ -80,7 +78,7 @@ fn create_crdt_table(conn: &Connection, name: &str, extra_cols: &str) {
     )
     .unwrap();
     let tx = conn.unchecked_transaction().unwrap();
-    ensure_crdt_columns_and_triggers(&tx, name, &TriggerInstallerConfig::default()).unwrap();
+    ensure_crdt_columns_and_triggers(&tx, name).unwrap();
     tx.commit().unwrap();
 }
 
@@ -367,8 +365,7 @@ fn row_pks_filter_composite_pk_matches_schema_declaration_order() {
     .unwrap();
     {
         let tx = conn.unchecked_transaction().unwrap();
-        setup_triggers_for_table(&tx, "composites", false, &TriggerInstallerConfig::default())
-            .unwrap();
+        setup_triggers_for_table(&tx, "composites", false).unwrap();
         tx.commit().unwrap();
     }
     insert_row_via_transformer(

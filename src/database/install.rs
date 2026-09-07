@@ -19,7 +19,7 @@ use serde_json::Value as JsonValue;
 
 use crate::crdt::hlc::HlcService;
 use crate::crdt::trigger::{
-    ensure_crdt_columns_and_triggers, get_table_schema, is_safe_identifier, TriggerInstallerConfig,
+    ensure_crdt_columns_and_triggers, get_table_schema, is_safe_identifier,
 };
 use crate::database::config::InstallCrdtOptions;
 use crate::db::core::convert_value_ref_to_json;
@@ -40,7 +40,6 @@ pub fn install_crdt(
     opts: InstallCrdtOptions,
     hlc: &HlcService,
     provider: &dyn SignatureProvider,
-    trigger_installer_config: &TriggerInstallerConfig,
 ) -> Result<()> {
     if !is_safe_identifier(table_name) {
         return Err(DatabaseError::ValidationError {
@@ -68,13 +67,13 @@ pub fn install_crdt(
             });
         }
         // Reinstall path: refresh triggers, skip backfill.
-        ensure_crdt_columns_and_triggers(&tx, table_name, trigger_installer_config)
+        ensure_crdt_columns_and_triggers(&tx, table_name)
             .map_err(|e| DatabaseError::CrdtSetup(e.to_string()))?;
         tx.commit().map_err(DatabaseError::from)?;
         return Ok(());
     }
 
-    ensure_crdt_columns_and_triggers(&tx, table_name, trigger_installer_config)
+    ensure_crdt_columns_and_triggers(&tx, table_name)
         .map_err(|e| DatabaseError::CrdtSetup(e.to_string()))?;
 
     let touched = backfill_existing_rows(&tx, table_name, hlc, provider)?;

@@ -18,7 +18,7 @@
 //! callers who just applied a schema migration and want to install triggers
 //! on any new CRDT-managed tables without touching the version bookkeeping.
 
-use crate::crdt::trigger::{setup_triggers_for_table, TriggerInstallerConfig, TriggerSetupResult};
+use crate::crdt::trigger::{setup_triggers_for_table, TriggerSetupResult};
 use crate::db::error::DatabaseError;
 use crate::table_names::TABLE_CRDT_CONFIGS;
 use rusqlite::{params, Connection};
@@ -64,7 +64,6 @@ pub fn discover_crdt_tables(conn: &Connection) -> Result<Vec<String>, DatabaseEr
 pub fn ensure_triggers_initialized(
     conn: &mut Connection,
     trigger_version: i32,
-    trigger_installer_config: &TriggerInstallerConfig,
 ) -> Result<bool, DatabaseError> {
     let tx = conn.transaction()?;
 
@@ -96,7 +95,7 @@ pub fn ensure_triggers_initialized(
     let crdt_tables = discover_crdt_tables(&tx)?;
 
     for table_name in crdt_tables {
-        setup_triggers_for_table(&tx, &table_name, needs_update, trigger_installer_config)?;
+        setup_triggers_for_table(&tx, &table_name, needs_update)?;
     }
 
     tx.execute(
@@ -116,10 +115,7 @@ pub fn ensure_triggers_initialized(
 /// version bookkeeping. Intended for callers who just applied a schema
 /// migration that added new CRDT-managed tables. Returns the number of tables
 /// that received a fresh trigger set.
-pub fn ensure_triggers_for_all_tables(
-    conn: &mut Connection,
-    trigger_installer_config: &TriggerInstallerConfig,
-) -> Result<usize, DatabaseError> {
+pub fn ensure_triggers_for_all_tables(conn: &mut Connection) -> Result<usize, DatabaseError> {
     let tx = conn.transaction()?;
 
     let crdt_tables = discover_crdt_tables(&tx)?;
@@ -137,7 +133,7 @@ pub fn ensure_triggers_for_all_tables(
 
         if !has_trigger
             && matches!(
-                setup_triggers_for_table(&tx, table_name, false, trigger_installer_config)?,
+                setup_triggers_for_table(&tx, table_name, false)?,
                 TriggerSetupResult::Success
             )
         {
@@ -271,8 +267,7 @@ mod tests {
         setup_bookkeeping(&conn);
         create_synced_table(&conn, "items");
 
-        let was_already =
-            ensure_triggers_initialized(&mut conn, 3, &TriggerInstallerConfig::default()).unwrap();
+        let was_already = ensure_triggers_initialized(&mut conn, 3).unwrap();
         assert!(!was_already, "first-time init returns false");
 
         let version: String = conn
@@ -310,13 +305,9 @@ mod tests {
         setup_bookkeeping(&conn);
         create_synced_table(&conn, "items");
 
-        assert!(
-            !ensure_triggers_initialized(&mut conn, 3, &TriggerInstallerConfig::default()).unwrap()
-        );
+        assert!(!ensure_triggers_initialized(&mut conn, 3).unwrap());
         // Second call at same version: was_already = true, no rewrite.
-        assert!(
-            ensure_triggers_initialized(&mut conn, 3, &TriggerInstallerConfig::default()).unwrap()
-        );
+        assert!(ensure_triggers_initialized(&mut conn, 3).unwrap());
     }
 
     #[test]
@@ -326,18 +317,14 @@ mod tests {
         setup_bookkeeping(&conn);
         create_synced_table(&conn, "items");
 
-        assert!(
-            !ensure_triggers_initialized(&mut conn, 3, &TriggerInstallerConfig::default()).unwrap()
-        );
+        assert!(!ensure_triggers_initialized(&mut conn, 3).unwrap());
         conn.execute(
             &format!("UPDATE {TABLE_CRDT_CONFIGS} SET value = '0' WHERE key = ?"),
             params![CONFIG_KEY_TRIGGERS_ENABLED],
         )
         .unwrap();
 
-        assert!(
-            ensure_triggers_initialized(&mut conn, 3, &TriggerInstallerConfig::default()).unwrap()
-        );
+        assert!(ensure_triggers_initialized(&mut conn, 3).unwrap());
         let enabled: String = conn
             .query_row(
                 &format!("SELECT value FROM {TABLE_CRDT_CONFIGS} WHERE key = ?"),
@@ -355,12 +342,8 @@ mod tests {
         setup_bookkeeping(&conn);
         create_synced_table(&conn, "items");
 
-        assert!(
-            !ensure_triggers_initialized(&mut conn, 3, &TriggerInstallerConfig::default()).unwrap()
-        );
-        assert!(
-            !ensure_triggers_initialized(&mut conn, 5, &TriggerInstallerConfig::default()).unwrap()
-        );
+        assert!(!ensure_triggers_initialized(&mut conn, 3).unwrap());
+        assert!(!ensure_triggers_initialized(&mut conn, 5).unwrap());
 
         let version: String = conn
             .query_row(
@@ -379,13 +362,9 @@ mod tests {
         setup_bookkeeping(&conn);
         create_synced_table(&conn, "items");
 
-        assert!(
-            !ensure_triggers_initialized(&mut conn, 5, &TriggerInstallerConfig::default()).unwrap()
-        );
+        assert!(!ensure_triggers_initialized(&mut conn, 5).unwrap());
         // Requesting an older version returns Ok(true) without rewriting.
-        assert!(
-            ensure_triggers_initialized(&mut conn, 3, &TriggerInstallerConfig::default()).unwrap()
-        );
+        assert!(ensure_triggers_initialized(&mut conn, 3).unwrap());
 
         let version: String = conn
             .query_row(
@@ -407,18 +386,16 @@ mod tests {
         create_synced_table(&conn, "items");
 
         // First pass: bootstrap installs triggers on `items`.
-        ensure_triggers_initialized(&mut conn, 1, &TriggerInstallerConfig::default()).unwrap();
+        ensure_triggers_initialized(&mut conn, 1).unwrap();
 
         // A new CRDT table shows up (e.g. from a later schema migration).
         create_synced_table(&conn, "new_table");
 
-        let created =
-            ensure_triggers_for_all_tables(&mut conn, &TriggerInstallerConfig::default()).unwrap();
+        let created = ensure_triggers_for_all_tables(&mut conn).unwrap();
         assert_eq!(created, 1, "only the new table needed triggers");
 
         // A second call is a full no-op.
-        let created_again =
-            ensure_triggers_for_all_tables(&mut conn, &TriggerInstallerConfig::default()).unwrap();
+        let created_again = ensure_triggers_for_all_tables(&mut conn).unwrap();
         assert_eq!(created_again, 0);
     }
 }

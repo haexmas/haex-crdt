@@ -17,7 +17,6 @@ use tempfile::TempDir;
 use uuid::Uuid;
 
 use super::*;
-use crate::crdt::trigger::TriggerInstallerConfig;
 use crate::device_id::StaticDeviceId;
 use crate::error::Result;
 use crate::migration::{MigrationName, StaticMigrationSource};
@@ -54,7 +53,6 @@ impl Fixture {
             signature_provider: Arc::new(NoopSignatureProvider),
             migration_source,
             trigger_version: DEFAULT_TRIGGER_VERSION,
-            trigger_installer_config: TriggerInstallerConfig::default(),
         };
         Fixture {
             _tmp: tmp,

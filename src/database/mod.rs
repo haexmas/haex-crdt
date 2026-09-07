@@ -54,7 +54,6 @@ use crate::crdt::apply::{apply_remote_changes, ApplyReport};
 use crate::crdt::cleanup::{cleanup_deleted_rows, CleanupResult, RetentionPolicy};
 use crate::crdt::hlc::HlcService;
 use crate::crdt::scanner::{scan_dirty_tables, scan_table_for_local_changes, ColumnChange};
-use crate::crdt::trigger::TriggerInstallerConfig;
 use crate::db::connection_context::ConnectionContext;
 use crate::db::core::open_and_init_db;
 use crate::db::error::DatabaseError;
@@ -85,11 +84,6 @@ struct DatabaseInner {
     #[allow(dead_code)] // kept for future re-check / diagnostics
     migration_source: Arc<dyn MigrationSource>,
     device_uuid: Uuid,
-    /// Consumer-configurable trigger installer settings recorded at open
-    /// time and reused by every later install / reinstall path so the
-    /// generated trigger bodies stay consistent across the store's
-    /// lifetime.
-    trigger_installer_config: TriggerInstallerConfig,
     /// Advisory file lock guarding the DB from cross-process concurrent
     /// mounts. Held for the lifetime of every clone of this `Database`;
     /// dropping the last clone releases the OS-level lock via `Drop`.
@@ -144,11 +138,7 @@ impl Database {
             })?;
         reconcile_device_id(&conn, supplied_uuid)?;
 
-        ensure_triggers_initialized(
-            &mut conn,
-            config.trigger_version,
-            &config.trigger_installer_config,
-        )?;
+        ensure_triggers_initialized(&mut conn, config.trigger_version)?;
 
         Ok(Database {
             inner: Arc::new(DatabaseInner {
@@ -157,7 +147,6 @@ impl Database {
                 signature_provider: config.signature_provider,
                 migration_source: config.migration_source,
                 device_uuid: supplied_uuid,
-                trigger_installer_config: config.trigger_installer_config,
                 lock,
             }),
         })
@@ -191,14 +180,7 @@ impl Database {
     pub fn install_crdt(&self, table_name: &str, opts: InstallCrdtOptions) -> Result<()> {
         let provider = Arc::clone(&self.inner.signature_provider);
         self.with_locked_conn(|conn| {
-            install::install_crdt(
-                conn,
-                table_name,
-                opts,
-                &self.inner.hlc,
-                provider.as_ref(),
-                &self.inner.trigger_installer_config,
-            )
+            install::install_crdt(conn, table_name, opts, &self.inner.hlc, provider.as_ref())
         })
     }
 

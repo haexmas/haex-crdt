@@ -9,7 +9,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::crdt::trigger::TriggerInstallerConfig;
 use crate::device_id::DeviceIdProvider;
 use crate::migration::MigrationSource;
 use crate::signature::SignatureProvider;
@@ -77,12 +76,6 @@ pub struct DatabaseConfig {
     /// `ensure_triggers_initialized`. Defaults to
     /// [`DEFAULT_TRIGGER_VERSION`].
     pub trigger_version: i32,
-    /// Consumer-configurable installer settings threaded through every
-    /// call site that generates or refreshes CRDT triggers on this store
-    /// — the `Database::open` bootstrap and `Database::install_crdt` alike.
-    /// Defaults to no additional skip columns (behavior identical to the
-    /// pre-D-2 installer). See [`TriggerInstallerConfig`].
-    pub trigger_installer_config: TriggerInstallerConfig,
 }
 
 /// Options controlling [`super::Database::install_crdt`]. Defaults to a fresh
@@ -115,7 +108,6 @@ mod tests {
             signature_provider: Arc::new(NoopSignatureProvider),
             migration_source: Arc::new(StaticMigrationSource(BTreeMap::new())),
             trigger_version: DEFAULT_TRIGGER_VERSION,
-            trigger_installer_config: TriggerInstallerConfig::default(),
         }
     }
 
