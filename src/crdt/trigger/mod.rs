@@ -102,23 +102,23 @@ pub fn is_safe_identifier(name: &str) -> bool {
 /// The table must already carry the three CRDT metadata columns (see
 /// [`ensure_crdt_columns`]) and have at least one primary-key column.
 ///
-/// # Column skip rule (D-4)
+/// # Column skip rule (D-4, revised)
 ///
-/// Any column whose name starts with `haex_` is skipped from trigger
-/// tracking — one uniform, namespace-based rule that subsumes:
+/// Two kinds of columns are excluded from trigger tracking:
 ///
-/// - the structural CRDT metadata columns
-///   ([`HLC_TIMESTAMP_COLUMN`], [`COLUMN_HLCS_COLUMN`], [`COLUMN_SIGS_COLUMN`]),
-/// - sync-system bookkeeping columns consumers rename with the prefix
-///   (`haex_last_push_hlc_timestamp` etc.), and
-/// - app-local metadata that must not sync (`haex_local_*`, e.g.
-///   `haex_local_updated_at`).
+/// 1. **The `_no_trigger` suffix convention.** Any column whose name ends in
+///    `_no_trigger` is skipped — sync-system bookkeeping and app-local
+///    metadata that must not participate in per-column HLC tracking
+///    (`updated_at_no_trigger`, `local_meta_no_trigger`, …). Symmetric with
+///    the `_no_sync` suffix that marks whole tables non-syncing.
+///
+/// 2. **Structural CRDT metadata columns** ([`HLC_TIMESTAMP_COLUMN`],
+///    [`COLUMN_HLCS_COLUMN`], [`COLUMN_SIGS_COLUMN`]) are covered by a
+///    small hardcoded exemption. They do not follow the `_no_trigger`
+///    suffix convention, so the installer names them explicitly.
 ///
 /// Primary-key columns are also skipped. Consumers who want a column tracked
-/// simply do not name it with the `haex_` prefix.
-///
-/// Symmetric with tables: the `_no_sync` suffix on a table name marks it
-/// non-syncing; the `haex_` prefix on a column name marks it non-tracked.
+/// simply do not name it with the `_no_trigger` suffix.
 ///
 /// The BEFORE-DELETE trigger records the delete as an event row in
 /// [`DELETED_ROWS_TABLE`] on every hard-delete; that table itself is exempt
@@ -153,11 +153,18 @@ pub fn setup_triggers_for_table(
         });
     }
 
-    // D-4: skip PKs and any column whose name starts with `haex_`. The three
-    // structural metadata columns are natural cases of the same rule.
+    // D-4 (revised): skip PKs, any column whose name ends in `_no_trigger`,
+    // and the three structural CRDT metadata columns (they do not follow the
+    // suffix convention, so we name them explicitly).
     let cols_to_track: Vec<String> = columns
         .iter()
-        .filter(|c| !c.is_pk && !c.name.starts_with("haex_"))
+        .filter(|c| {
+            !c.is_pk
+                && !c.name.ends_with("_no_trigger")
+                && c.name != HLC_TIMESTAMP_COLUMN
+                && c.name != COLUMN_HLCS_COLUMN
+                && c.name != COLUMN_SIGS_COLUMN
+        })
         .map(|c| c.name.clone())
         .collect();
 
@@ -307,7 +314,8 @@ fn generate_update_trigger_sql(
     // D-4: constrain the trigger to only fire when at least one *tracked*
     // column is UPDATE'd. `AFTER UPDATE OF <cols>` is SQLite's built-in
     // column-scoped trigger form; an UPDATE that touches only skipped
-    // columns (haex_-prefixed or PKs) then does not fire the trigger at all.
+    // columns (`_no_trigger`-suffixed, structural metadata, or PKs) then
+    // does not fire the trigger at all.
     //
     // Empty tracked list is degenerate — the trigger body is inert anyway
     // (the SELECT ... WHERE (0) guard) — so fall back to bare `AFTER UPDATE

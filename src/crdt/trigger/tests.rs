@@ -690,7 +690,8 @@ fn crdt_setup_error_converts_into_database_error_crdt_setup_variant() {
 }
 
 // -------------------------------------------------------------------------
-// D-4: haex_-prefix on columns is a universal skip rule.
+// D-4 (revised): `_no_trigger` suffix on columns is the skip rule; structural
+// CRDT metadata columns are covered by a small hardcoded exemption.
 // -------------------------------------------------------------------------
 
 /// Reads the raw SQL body of the AFTER-UPDATE trigger for `table_name` from
@@ -706,7 +707,7 @@ fn update_trigger_ddl(conn: &Connection, table_name: &str) -> String {
 }
 
 #[test]
-fn installer_skips_any_haex_prefixed_column() {
+fn installer_skips_columns_ending_in_no_trigger() {
     let conn = Connection::open_in_memory().unwrap();
     register_test_udfs(&conn);
     setup_crdt_bookkeeping(&conn);
@@ -714,7 +715,7 @@ fn installer_skips_any_haex_prefixed_column() {
         "CREATE TABLE items (
              id INTEGER PRIMARY KEY,
              value TEXT,
-             haex_random_stuff TEXT,
+             bookkeeping_no_trigger TEXT,
              {HLC_TIMESTAMP_COLUMN} TEXT,
              {COLUMN_HLCS_COLUMN} TEXT NOT NULL DEFAULT '{{}}',
              {COLUMN_SIGS_COLUMN} TEXT NOT NULL DEFAULT '{{}}'
@@ -728,12 +729,12 @@ fn installer_skips_any_haex_prefixed_column() {
 
     let sql = update_trigger_ddl(&conn, "items");
     assert!(
-        !sql.contains("haex_random_stuff"),
-        "arbitrary haex_-prefixed column must not appear in tracked list: {sql}"
+        !sql.contains("bookkeeping_no_trigger"),
+        "column ending in `_no_trigger` must not appear in tracked list: {sql}"
     );
     assert!(
         sql.contains("\"value\""),
-        "non-prefixed column must be tracked: {sql}"
+        "non-suffixed column must be tracked: {sql}"
     );
 }
 
@@ -752,21 +753,21 @@ fn tracked_columns_of(sql: &str) -> Vec<String> {
 }
 
 #[test]
-fn installer_skips_structural_metadata_via_prefix_rule_not_hardcoded_names() {
-    // Verifies the rule still covers the three structural metadata columns
-    // even though the hardcoded name checks are gone.
+fn installer_skips_structural_metadata_via_hardcoded_names() {
+    // Verifies the three structural CRDT metadata columns are still skipped
+    // via the hardcoded exemption — they do not end in `_no_trigger` and so
+    // are not covered by the suffix rule.
     let conn = setup_trigger_fixture();
     let sql = update_trigger_ddl(&conn, "items");
 
     let tracked = tracked_columns_of(&sql);
     // Fixture table `items` carries id (PK), name, body, and the three
-    // metadata columns. Under the prefix rule the tracked list is exactly
-    // {name, body} — metadata columns are excluded via the haex_ prefix,
-    // not via hardcoded names.
+    // metadata columns. The tracked list is exactly {name, body} — metadata
+    // columns are excluded via the hardcoded name exemption.
     assert_eq!(
         tracked,
         vec!["\"name\"".to_string(), "\"body\"".to_string()],
-        "tracked list must be exactly the non-prefixed non-PK columns"
+        "tracked list must be exactly the non-metadata non-PK columns"
     );
     for meta in [HLC_TIMESTAMP_COLUMN, COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN] {
         assert!(
@@ -777,7 +778,29 @@ fn installer_skips_structural_metadata_via_prefix_rule_not_hardcoded_names() {
 }
 
 #[test]
-fn update_of_haex_prefixed_column_does_not_mark_dirty() {
+fn installer_still_skips_haex_hlc_even_without_no_trigger_suffix() {
+    // Locks the invariant: the structural CRDT metadata columns do NOT end
+    // in `_no_trigger`, so the hardcoded exemption is what keeps them out
+    // of the `AFTER UPDATE OF <cols>` tracked list. If that exemption ever
+    // regressed to depend on the suffix rule, this test would catch it.
+    let conn = setup_trigger_fixture();
+    let sql = update_trigger_ddl(&conn, "items");
+    let tracked = tracked_columns_of(&sql);
+
+    for meta in [HLC_TIMESTAMP_COLUMN, COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN] {
+        assert!(
+            !meta.ends_with("_no_trigger"),
+            "invariant: structural metadata name {meta} must not accidentally end in `_no_trigger`"
+        );
+        assert!(
+            !tracked.iter().any(|c| c == &format!("\"{meta}\"")),
+            "structural metadata column {meta} must not appear in the tracked column list: {tracked:?}"
+        );
+    }
+}
+
+#[test]
+fn update_of_no_trigger_suffixed_column_does_not_mark_dirty() {
     let conn = Connection::open_in_memory().unwrap();
     register_test_udfs(&conn);
     setup_crdt_bookkeeping(&conn);
@@ -785,7 +808,7 @@ fn update_of_haex_prefixed_column_does_not_mark_dirty() {
         "CREATE TABLE items (
              id INTEGER PRIMARY KEY,
              value TEXT,
-             haex_local_meta TEXT,
+             local_meta_no_trigger TEXT,
              {HLC_TIMESTAMP_COLUMN} TEXT,
              {COLUMN_HLCS_COLUMN} TEXT NOT NULL DEFAULT '{{}}',
              {COLUMN_SIGS_COLUMN} TEXT NOT NULL DEFAULT '{{}}'
@@ -799,7 +822,7 @@ fn update_of_haex_prefixed_column_does_not_mark_dirty() {
 
     conn.execute(
         &format!(
-            "INSERT INTO items (id, value, haex_local_meta, {HLC_TIMESTAMP_COLUMN})
+            "INSERT INTO items (id, value, local_meta_no_trigger, {HLC_TIMESTAMP_COLUMN})
              VALUES (1, 'v', 'm1', 'hlc-1')"
         ),
         [],
@@ -815,7 +838,7 @@ fn update_of_haex_prefixed_column_does_not_mark_dirty() {
 
     conn.execute(
         &format!(
-            "UPDATE items SET haex_local_meta = 'm2', {HLC_TIMESTAMP_COLUMN} = 'hlc-2' WHERE id = 1"
+            "UPDATE items SET local_meta_no_trigger = 'm2', {HLC_TIMESTAMP_COLUMN} = 'hlc-2' WHERE id = 1"
         ),
         [],
     )
@@ -830,7 +853,7 @@ fn update_of_haex_prefixed_column_does_not_mark_dirty() {
         .unwrap();
     assert_eq!(
         dirty, 0,
-        "UPDATE OF a haex_-prefixed column must not mark the row dirty"
+        "UPDATE OF a `_no_trigger`-suffixed column must not mark the row dirty"
     );
 }
 
@@ -843,7 +866,7 @@ fn update_of_regular_column_still_marks_dirty() {
         "CREATE TABLE items (
              id INTEGER PRIMARY KEY,
              value TEXT,
-             haex_local_meta TEXT,
+             local_meta_no_trigger TEXT,
              {HLC_TIMESTAMP_COLUMN} TEXT,
              {COLUMN_HLCS_COLUMN} TEXT NOT NULL DEFAULT '{{}}',
              {COLUMN_SIGS_COLUMN} TEXT NOT NULL DEFAULT '{{}}'
@@ -857,7 +880,7 @@ fn update_of_regular_column_still_marks_dirty() {
 
     conn.execute(
         &format!(
-            "INSERT INTO items (id, value, haex_local_meta, {HLC_TIMESTAMP_COLUMN})
+            "INSERT INTO items (id, value, local_meta_no_trigger, {HLC_TIMESTAMP_COLUMN})
              VALUES (1, 'v1', 'm1', 'hlc-1')"
         ),
         [],
@@ -884,7 +907,7 @@ fn update_of_regular_column_still_marks_dirty() {
         .unwrap();
     assert_eq!(
         dirty, 1,
-        "UPDATE OF a regular (non-prefixed) column must mark the row dirty"
+        "UPDATE OF a regular (non-suffixed) column must mark the row dirty"
     );
 }
 
