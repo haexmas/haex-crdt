@@ -2,7 +2,7 @@
 
 SQLite + SQLCipher storage with column-level LWW CRDT sync (uhlc-based Hybrid Logical Clocks). Extracted from `haex-vault` so both `haex-vault` and `holzi` can consume it as a Rust crate dependency.
 
-**Status**: `v0.1.0`. Trait foundation, HLC service, SQL transformers, trigger installer, scanner, cleanup, migration engine, apply pipeline, public `Database` facade, cross-process file locking, and the plan §8 end-to-end acceptance test all land. Dual-licensed **MIT OR Apache-2.0**. Consume via `haex-crdt = { git = "https://github.com/haexmas/haex-crdt", tag = "v0.1.0" }`.
+**Status**: `v0.2.0`. Trait foundation, HLC service, SQL transformers, trigger installer, scanner, cleanup, migration engine, apply pipeline, public `Database` facade, cross-process file locking, and the plan §8 end-to-end acceptance test all land. Dual-licensed **MIT OR Apache-2.0**. Consume via `haex-crdt = { git = "https://github.com/haexmas/haex-crdt", tag = "v0.2.0" }`.
 
 **Ownership**: source lived in `haex-vault`. This repository is the extraction target. Both `haex-vault` and `holzi` will depend on tagged releases here.
 

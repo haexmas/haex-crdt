@@ -11,9 +11,11 @@
 //! reconcile-then-apply sequence.
 
 pub mod bootstrap;
+mod compat;
 mod engine;
 
 pub use bootstrap::CRATE_MIGRATIONS;
+pub(crate) use compat::migrate_legacy_metadata_columns;
 pub use engine::{run_migrations, MigrationReport};
 
 #[cfg(test)]

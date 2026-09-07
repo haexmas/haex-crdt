@@ -2,11 +2,11 @@
 
 use crate::crdt::columns::{COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN, HLC_TIMESTAMP_COLUMN};
 use crate::crdt::insert_transformer::InsertTransformer;
+use crate::crdt::metadata::create_hlc_assignment;
 use crate::db::error::DatabaseError;
 use sqlparser::ast::{
-    AlterTable, Assignment, AssignmentTarget, ColumnDef, ColumnOption, ColumnOptionDef,
-    CreateTable, DataType, Expr, Ident, ObjectName, ObjectNamePart, Query, Select, SetExpr,
-    Statement, TableFactor, TableObject, Value,
+    AlterTable, ColumnDef, ColumnOption, ColumnOptionDef, CreateTable, DataType, Expr, Ident,
+    ObjectName, ObjectNamePart, Query, Select, SetExpr, Statement, TableFactor, TableObject, Value,
 };
 use std::borrow::Cow;
 use uhlc::Timestamp;
@@ -25,16 +25,6 @@ impl CrdtColumns {
         column_hlcs: COLUMN_HLCS_COLUMN,
         column_sigs: COLUMN_SIGS_COLUMN,
     };
-
-    /// Erstellt eine HLC-Zuweisung für UPDATE
-    fn create_hlc_assignment(&self, timestamp: &Timestamp) -> Assignment {
-        Assignment {
-            target: AssignmentTarget::ColumnName(ObjectName(vec![ObjectNamePart::Identifier(
-                Ident::new(self.hlc_timestamp),
-            )])),
-            value: Expr::Value(Value::SingleQuotedString(timestamp.to_string()).into()),
-        }
-    }
 
     /// Fügt CRDT-Spalten zu einer Tabellendefinition hinzu
     /// Überschreibt vorhandene Spalten mit den gleichen Namen, um korrekte Datentypen zu garantieren
@@ -266,9 +256,10 @@ impl CrdtTransformer {
                         // Add HLC timestamp assignment. Hard-delete + delete-log
                         // model: no soft-deleted rows live in the target table,
                         // so there is nothing to filter out.
-                        update
-                            .assignments
-                            .push(self.columns.create_hlc_assignment(hlc_timestamp));
+                        update.assignments.push(create_hlc_assignment(
+                            self.columns.hlc_timestamp,
+                            hlc_timestamp,
+                        ));
                     }
                 }
                 Ok(None)

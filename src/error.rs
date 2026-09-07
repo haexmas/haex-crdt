@@ -70,6 +70,12 @@ pub enum Error {
         found: String,
     },
 
+    /// A legacy CRDT table or metadata column could not be migrated without
+    /// risking data loss. Opening stops before the current schema is created
+    /// so the consumer can resolve the conflict explicitly.
+    #[error("legacy CRDT schema is incompatible: {reason}")]
+    MigrationCompatibility { reason: String },
+
     // ---- install_crdt contract (plan §6) -------------------------------------
     /// `install_crdt` refused to run because the three CRDT metadata columns
     /// are already present on the table. Pass

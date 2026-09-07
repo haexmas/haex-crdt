@@ -24,6 +24,7 @@ use crate::crdt::trigger::{
 use crate::database::config::InstallCrdtOptions;
 use crate::db::core::convert_value_ref_to_json;
 use crate::db::error::DatabaseError;
+use crate::db::migrations::migrate_legacy_metadata_columns;
 use crate::error::{Error, Result};
 use crate::signature::SignatureProvider;
 use crate::table_names::TABLE_CRDT_DIRTY_TABLES;
@@ -51,6 +52,8 @@ pub fn install_crdt(
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(DatabaseError::from)?;
+
+    migrate_legacy_metadata_columns(&tx)?;
 
     let already_managed = {
         let cols = get_table_schema(&tx, table_name).map_err(DatabaseError::from)?;

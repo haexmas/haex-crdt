@@ -2,6 +2,7 @@
 // INSERT-spezifische CRDT-Transformationen (ON CONFLICT, RETURNING)
 
 use crate::crdt::columns::{COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN, HLC_TIMESTAMP_COLUMN};
+use crate::crdt::metadata::create_hlc_assignment;
 use crate::db::error::DatabaseError;
 use sqlparser::ast::{
     Assignment, AssignmentTarget, DoUpdate, Expr, Function, FunctionArg, FunctionArgExpr,
@@ -169,15 +170,12 @@ impl InsertTransformer {
             .filter(|c| !self.is_owned_metadata_column(c))
             .collect();
 
-        let ts_str = timestamp.to_string();
-
         // haex_hlc_no_trigger = '<ts>'
-        do_update.assignments.push(Assignment {
-            target: AssignmentTarget::ColumnName(ObjectName(vec![ObjectNamePart::Identifier(
-                Ident::new(self.hlc_timestamp_column),
-            )])),
-            value: Expr::Value(Value::SingleQuotedString(ts_str.clone()).into()),
-        });
+        do_update
+            .assignments
+            .push(create_hlc_assignment(self.hlc_timestamp_column, timestamp));
+
+        let ts_str = timestamp.to_string();
 
         // haex_column_hlcs_no_trigger = json_set(<column>, '$.<col1>', '<ts>', ...)
         do_update.assignments.push(Assignment {

@@ -50,6 +50,11 @@ pub enum HlcError {
     /// arm regardless of which provider implementation is in play.
     #[error("Device store error: {0}")]
     DeviceStore(String),
+    /// Legacy spelling retained for source compatibility with consumers that
+    /// matched this public error variant before the `DeviceStore` rename.
+    #[deprecated(note = "use HlcError::DeviceStore")]
+    #[error("Device id provider error: {0}")]
+    DeviceIdProvider(String),
 }
 
 /// A thread-safe, persistent HLC service.
