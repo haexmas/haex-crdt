@@ -1,10 +1,10 @@
-CREATE TABLE haex_crdt_configs (
+CREATE TABLE haex_crdt_configs_no_sync (
     key TEXT PRIMARY KEY NOT NULL,
     type TEXT NOT NULL,
     value TEXT NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE haex_crdt_dirty_tables (
+CREATE TABLE haex_crdt_dirty_tables_no_sync (
     table_name TEXT PRIMARY KEY NOT NULL,
     last_modified TEXT
 );

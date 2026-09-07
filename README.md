@@ -46,7 +46,7 @@ Extracted from [plan §5](../holzi/docs/plans/2026-09-04-haex-crdt-extraction-pl
 - [x] **Batch A** — trait foundation, HLC service, transformers, error types (this slice).
 - [x] **Batch B** — trigger installer, scanner, cleanup ported and trimmed to the CRDT-generic surface.
 - [x] **Batch C** — `database/*` core (read shell, write path with `PostWriteHook`, trigger bootstrap) ported.
-- [x] **Batch D** — migrations engine with two journals (`haex_crdt_migrations` crate-owned, `haex_app_migrations` consumer-owned) and SHA-256 drift detection.
+- [x] **Batch D** — migrations engine with two journals (`haex_crdt_migrations_no_sync` crate-owned, `haex_app_migrations_no_sync` consumer-owned) and SHA-256 drift detection.
 - [x] **Batch E** — apply pipeline with all-or-nothing signature preflight per plan §4.2.
 - [x] **Batch F** — public `Database` facade (`src/database/`) tying `DeviceIdProvider`, `SignatureProvider`, `MigrationSource` and the SQLCipher key together, with `install_crdt` backfill contract per plan §6.
 - [x] **Batch F.5** — port haex-vault's `vault_lock.rs` to `src/db/lock.rs`; wired into `Database::open` as the first step so cross-process (and in-process concurrent) opens fail fast with `VaultAlreadyOpenElsewhere`.

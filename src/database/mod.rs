@@ -32,9 +32,9 @@
 //! 2. Apply crate-owned CRDT bookkeeping migrations, then consumer
 //!    migrations (see [`crate::run_migrations`]).
 //! 3. Initialize the HLC service from the persisted row in
-//!    `haex_crdt_configs` — or seed it on first open.
+//!    `haex_crdt_configs_no_sync` — or seed it on first open.
 //! 4. Enforce the device-id contract (plan §4.1): the first-open device UUID
-//!    is stored in `haex_crdt_configs`; every subsequent open rejects a
+//!    is stored in `haex_crdt_configs_no_sync`; every subsequent open rejects a
 //!    provider that returns a different UUID with
 //!    [`crate::Error::DeviceIdMismatch`].
 //! 5. Ensure CRDT triggers are at the requested `trigger_version`.
@@ -280,7 +280,7 @@ impl Database {
 /// Enforce the device-id contract from plan §4.1: first-open records the
 /// UUID, later opens reject a mismatched provider with
 /// [`Error::DeviceIdMismatch`]. Stored under the reserved config key
-/// [`CONFIG_KEY_DEVICE_ID`] in the `haex_crdt_configs` table (already
+/// [`CONFIG_KEY_DEVICE_ID`] in the `haex_crdt_configs_no_sync` table (already
 /// materialised by the crate bootstrap migration).
 fn reconcile_device_id(conn: &Connection, supplied: Uuid) -> Result<()> {
     // The insert is the arbitration point for concurrent first opens. The

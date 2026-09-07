@@ -93,7 +93,7 @@ where
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetentionPolicy {
     /// Prune entries whose HLC time-part is more than `days` older than the
-    /// current HLC stored in `haex_crdt_configs` under key `hlc_timestamp`.
+    /// current HLC stored in `haex_crdt_configs_no_sync` under key `hlc_timestamp`.
     /// If no HLC is recorded yet, the pass is a no-op.
     TimeBasedDays { days: u32 },
     /// Hard-delete every delete-log entry with an anchorable, non-NULL HLC.
@@ -296,7 +296,7 @@ fn read_max_prunable_hlc(
 }
 
 /// For `TimeBasedDays`: computes the cutoff HLC time-part from the
-/// current HLC in `haex_crdt_configs`. Returns `None` when no HLC has
+/// current HLC in `haex_crdt_configs_no_sync`. Returns `None` when no HLC has
 /// been recorded yet or when the cutoff would overflow `i64` (SQLite
 /// stores integers signed 64-bit; an `as i64` cast on `u64 > i64::MAX`
 /// would wrap negative and silently skew the comparison).

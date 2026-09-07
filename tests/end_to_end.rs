@@ -6,9 +6,9 @@
 //!
 //! - (a) `Database::open` succeeds on both fresh files
 //! - (b) Crate-owned bookkeeping migrations run (journaled in
-//!   `haex_crdt_migrations`)
+//!   `haex_crdt_migrations_no_sync`)
 //! - (c) Consumer-owned toy migration runs (journaled in
-//!   `haex_app_migrations`)
+//!   `haex_app_migrations_no_sync`)
 //! - (d) Store A is pre-populated *before* `install_crdt` runs so the
 //!   backfill contract is exercised on it; the scanner then returns the
 //!   backfilled rows
@@ -120,8 +120,8 @@ fn two_devices_sync_backfilled_and_fresh_writes_end_to_end() {
 
     // ---------- (b) crate-owned migrations journaled ---------------------
 
-    let crate_journal_a = count(&db_a, "SELECT COUNT(*) FROM haex_crdt_migrations");
-    let crate_journal_b = count(&db_b, "SELECT COUNT(*) FROM haex_crdt_migrations");
+    let crate_journal_a = count(&db_a, "SELECT COUNT(*) FROM haex_crdt_migrations_no_sync");
+    let crate_journal_b = count(&db_b, "SELECT COUNT(*) FROM haex_crdt_migrations_no_sync");
     assert!(
         crate_journal_a > 0 && crate_journal_b > 0,
         "crate bootstrap migrations must run on both stores",
@@ -132,7 +132,7 @@ fn two_devices_sync_backfilled_and_fresh_writes_end_to_end() {
     let toy_migration_a = db_a
         .with_connection(|conn| {
             conn.query_row(
-                "SELECT COUNT(*) FROM haex_app_migrations WHERE migration_name = ?1",
+                "SELECT COUNT(*) FROM haex_app_migrations_no_sync WHERE migration_name = ?1",
                 ["0001_toy"],
                 |r| r.get::<_, i64>(0),
             )
@@ -142,7 +142,7 @@ fn two_devices_sync_backfilled_and_fresh_writes_end_to_end() {
     let toy_migration_b = db_b
         .with_connection(|conn| {
             conn.query_row(
-                "SELECT COUNT(*) FROM haex_app_migrations WHERE migration_name = ?1",
+                "SELECT COUNT(*) FROM haex_app_migrations_no_sync WHERE migration_name = ?1",
                 ["0001_toy"],
                 |r| r.get::<_, i64>(0),
             )

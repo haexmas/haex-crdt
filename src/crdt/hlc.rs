@@ -1,5 +1,5 @@
 //! Hybrid Logical Clock service. Owns per-device HLC state, persists the
-//! latest timestamp in `haex_crdt_configs`, and exposes helpers used by the
+//! latest timestamp in `haex_crdt_configs_no_sync`, and exposes helpers used by the
 //! scanner and apply pipeline.
 //!
 //! Extracted from `haex-vault`. The only change of substance is the

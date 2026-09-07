@@ -369,6 +369,35 @@ fn failing_statement_rolls_back_the_whole_migration() {
 
 // --- bootstrap invariants --------------------------------------------------
 
+// --- naming convention invariant (v0.1.1 D-1) ------------------------------
+
+#[test]
+/// D-1: `_no_sync` is the sole rule that excludes a table from CRDT sync.
+/// The crate's own bookkeeping tables must carry that suffix so they follow
+/// the same convention user tables do; the migration bootstrap must
+/// materialize them under those suffixed names.
+fn crate_bookkeeping_table_names_end_with_no_sync_and_bootstrap_creates_them() {
+    for (label, value) in [
+        ("TABLE_CRDT_CONFIGS", TABLE_CRDT_CONFIGS),
+        ("TABLE_CRDT_DIRTY_TABLES", TABLE_CRDT_DIRTY_TABLES),
+        ("TABLE_CRDT_MIGRATIONS", TABLE_CRDT_MIGRATIONS),
+        ("TABLE_APP_MIGRATIONS", TABLE_APP_MIGRATIONS),
+    ] {
+        assert!(
+            value.ends_with("_no_sync"),
+            "{label} must end with `_no_sync`; got {value:?}",
+        );
+    }
+
+    let mut conn = Connection::open_in_memory().unwrap();
+    run_migrations(&mut conn, &empty_source()).unwrap();
+
+    assert!(table_exists(&conn, TABLE_CRDT_CONFIGS));
+    assert!(table_exists(&conn, TABLE_CRDT_DIRTY_TABLES));
+    assert!(table_exists(&conn, TABLE_CRDT_MIGRATIONS));
+    assert!(table_exists(&conn, TABLE_APP_MIGRATIONS));
+}
+
 #[test]
 fn crate_bootstrap_records_a_stable_digest() {
     let mut conn = Connection::open_in_memory().unwrap();
