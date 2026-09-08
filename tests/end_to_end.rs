@@ -36,7 +36,7 @@ use std::sync::Arc;
 use haex_crdt::crdt::columns::HLC_TIMESTAMP_COLUMN;
 use haex_crdt::rusqlite::params;
 use haex_crdt::{
-    device_uuid_to_hlc_node, hlc_is_from_node, Database, DatabaseConfig, DatabaseBootstrap,
+    device_uuid_to_hlc_node, hlc_is_from_node, Database, DatabaseBootstrap, DatabaseConfig,
     InstallCrdtOptions, MigrationName, NoopSignatureProvider, ScanFilters, SqlCipherKey,
     StaticDeviceId, StaticMigrationSource, DEFAULT_TRIGGER_VERSION,
 };

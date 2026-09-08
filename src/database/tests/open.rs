@@ -16,9 +16,11 @@ struct OneShotBootstrap(Mutex<Option<Uuid>>);
 
 impl DatabaseBootstrap for OneShotBootstrap {
     fn bootstrap(&self, _tx: &rusqlite::Transaction<'_>) -> crate::Result<Uuid> {
-        self.0.lock().unwrap().take().ok_or_else(|| {
-            crate::Error::Hlc("bootstrap hook called more than once".to_string())
-        })
+        self.0
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or_else(|| crate::Error::Hlc("bootstrap hook called more than once".to_string()))
     }
 }
 
@@ -61,7 +63,7 @@ fn bootstrap_hook_may_write_and_writes_are_committed() {
     fx.config.bootstrap = Arc::new(WritingBootstrap { uuid });
     let db = Database::open(fx.config.clone()).unwrap();
     let count = db
-        .with_connection(|conn| {
+        .with_locked_conn(|conn| {
             conn.query_row("SELECT COUNT(*) FROM bootstrap_marker", [], |r| {
                 r.get::<_, i64>(0)
             })
@@ -80,7 +82,7 @@ fn bootstrap_hook_may_write_and_writes_are_committed() {
     };
     let db = Database::open(cfg).unwrap();
     let count = db
-        .with_connection(|conn| {
+        .with_locked_conn(|conn| {
             conn.query_row("SELECT COUNT(*) FROM bootstrap_marker", [], |r| {
                 r.get::<_, i64>(0)
             })
@@ -122,7 +124,7 @@ fn bootstrap_hook_error_rolls_back_and_fails_open() {
     fx.config.bootstrap = Arc::new(StaticDeviceId(fx.device));
     let db = Database::open(fx.config).unwrap();
     let exists = db
-        .with_connection(|conn| {
+        .with_locked_conn(|conn| {
             conn.query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='failing_marker'",
                 [],
@@ -131,7 +133,10 @@ fn bootstrap_hook_error_rolls_back_and_fails_open() {
             .map_err(|e| crate::Error::Message(e.to_string()))
         })
         .unwrap();
-    assert_eq!(exists, 0, "failed hook's table must not have been committed");
+    assert_eq!(
+        exists, 0,
+        "failed hook's table must not have been committed"
+    );
 }
 
 #[test]
