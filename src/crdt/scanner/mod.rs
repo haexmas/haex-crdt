@@ -13,8 +13,9 @@
 //! - [`scan_dirty_tables`] — list tables the trigger installer marked
 //!   dirty.
 //! - [`scan_table_for_local_changes`] — read per-column changes since a
-//!   cursor from one table, with optional origin-node and PK allow-list
-//!   filters (the two filters that are content-agnostic).
+//!   cursor from one table, with optional origin-node, PK allow-list and
+//!   single-column equality filters (the filters that need no knowledge of
+//!   what the data means).
 //! - [`paginate_changes`] — pack changes into transaction-HLC groups that
 //!   fit a byte budget without splitting a group across pages.
 //! - [`ColumnChange`] — the change record.
@@ -103,6 +104,18 @@ pub fn scan_dirty_tables(conn: &Connection) -> Result<Vec<String>, DatabaseError
 ///   canonical PK JSON is in the set. Applied BEFORE parsing the HLC/sig
 ///   blobs so a large table with few allow-listed rows pays deserialisation
 ///   cost only on the matches.
+/// - `column_eq_filter` — when `Some((column, value))`, restricts the scan
+///   to rows where `column` equals `value`. `value` is bound as a SQL
+///   parameter; it is never interpolated. If the table has no column of
+///   that name the scan returns no rows at all — fail-closed, both as the
+///   safety gate for the interpolated column name and because a consumer
+///   whose filter target is missing must not silently receive the whole
+///   table. Composes with `after_hlc` via `AND`.
+///
+///   This cannot be a post-filter on the returned changes: if a row's
+///   filter-column HLC is at or below the cursor, no change is emitted for
+///   that column, so a caller inspecting the result set has nothing to
+///   match the row on. The restriction has to reach the `WHERE` clause.
 ///
 /// # PK JSON encoding
 ///
@@ -120,6 +133,7 @@ pub fn scan_table_for_local_changes(
     device_id: &str,
     origin_node_filter: Option<u128>,
     row_pks_filter: Option<&HashSet<String>>,
+    column_eq_filter: Option<(&str, &str)>,
 ) -> Result<Vec<ColumnChange>, DatabaseError> {
     let schema = get_table_schema(conn, table_name)?;
     if schema.is_empty() {
@@ -176,7 +190,12 @@ pub fn scan_table_for_local_changes(
         .collect::<Vec<_>>()
         .join(", ");
 
-    let (where_sql, params) = if let Some(hlc) = after_hlc {
+    // Predicates and their bound values are built together so the `?N`
+    // indices always match the parameter vector's order.
+    let mut predicates: Vec<String> = Vec::new();
+    let mut params: Vec<String> = Vec::new();
+
+    if let Some(hlc) = after_hlc {
         // Admit rows whose row-level HLC is absent (NULL) or empty in addition
         // to those strictly newer than the cursor. A corrupt/legacy row can
         // carry an empty row-level HLC while still holding a valid per-column
@@ -185,15 +204,30 @@ pub fn scan_table_for_local_changes(
         // so the row could only ever converge on a full scan. The per-column
         // loop re-checks each HLC against `after_hlc`, so widening here cannot
         // leak stale columns — rows with no usable HLC are still skipped.
-        (
-            format!(
-                " WHERE (\"{col}\" > ?1 OR \"{col}\" IS NULL OR \"{col}\" = '')",
-                col = HLC_TIMESTAMP_COLUMN
-            ),
-            vec![hlc.to_string()],
-        )
+        params.push(hlc.to_string());
+        predicates.push(format!(
+            "(\"{col}\" > ?{n} OR \"{col}\" IS NULL OR \"{col}\" = '')",
+            col = HLC_TIMESTAMP_COLUMN,
+            n = params.len()
+        ));
+    }
+
+    if let Some((filter_column, filter_value)) = column_eq_filter {
+        // Fail closed on an unknown column: "no matching rows", not "the
+        // whole table". Matching against the schema we already fetched is
+        // also what makes interpolating the name into the SQL safe — only a
+        // name SQLite itself reported can reach the query.
+        if !schema.iter().any(|c| c.name == filter_column) {
+            return Ok(Vec::new());
+        }
+        params.push(filter_value.to_string());
+        predicates.push(format!("\"{filter_column}\" = ?{n}", n = params.len()));
+    }
+
+    let where_sql = if predicates.is_empty() {
+        String::new()
     } else {
-        (String::new(), Vec::new())
+        format!(" WHERE {}", predicates.join(" AND "))
     };
 
     let query = format!("SELECT {column_list} FROM \"{table_name}\"{where_sql}");

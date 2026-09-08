@@ -195,6 +195,8 @@ impl Database {
     /// [`scan_table_for_local_changes`] for the filter semantics; this method
     /// injects the store's device id automatically so scanner-side authoring
     /// attribution matches what the apply pipeline will see on the receiver.
+    /// The scanner's column-equality filter is not surfaced here; callers
+    /// that need it use the free function with their own connection.
     pub fn scan_table_for_local_changes(
         &self,
         table_name: &str,
@@ -211,6 +213,7 @@ impl Database {
                 &device_str,
                 origin_node_filter,
                 row_pks_filter,
+                None,
             )
             .map_err(Error::from)
         })
