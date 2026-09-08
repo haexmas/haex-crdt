@@ -31,14 +31,17 @@ impl AuthorId {
 pub type RemoteChanges = Vec<ColumnChange>;
 
 /// Signs and verifies per-column CRDT payloads. Provides a batch-level
-/// policy hook that runs inside the apply transaction before any write.
+/// policy hook that runs before the apply transaction is opened.
 ///
 /// # Trust contract (plan §4.2)
 ///
-/// - `apply_remote_changes` is all-or-nothing. It runs inside a single
-///   `IMMEDIATE` transaction: pre-apply hook, preflight verification of
-///   every column change, then writes. Any failure rolls back the whole
-///   batch.
+/// - `apply_remote_changes` is all-or-nothing, in two stages. First a
+///   pre-transaction preflight — identifier safety, clock drift, this
+///   trait's [`on_before_apply`] hook, then per-column signature
+///   verification — runs to completion with **no transaction open**; an
+///   `Err` from any of it means nothing was written, with no rollback
+///   involved. Only then are the writes applied, inside a single
+///   `IMMEDIATE` transaction that rolls back as a unit if a write fails.
 /// - This crate does not decide whether an empty (or absent) signature is
 ///   acceptable. That is the provider's policy.
 /// - The `sig` argument to [`verify_column`] is the **raw JSON** the change
@@ -58,19 +61,36 @@ pub trait SignatureProvider: Send + Sync {
 
     /// Verify a column change's signature against its preimage. Called by
     /// [`crate::crdt::apply::apply_remote_changes`] during the preflight
-    /// pass, before any write. `sig` is the raw JSON the change carried
-    /// through the wire (the same value that [`ColumnChange::sig`] would
-    /// carry on the scanner side). Returning `Err` aborts the whole batch.
+    /// pass — before any write, and before the apply transaction is opened.
+    /// `sig` is the raw JSON the change carried through the wire (the same
+    /// value that [`ColumnChange::sig`] would carry on the scanner side).
+    ///
+    /// Called only for changes whose `sig` is `Some(_)`, in batch order, and
+    /// only until the first failure. Returning `Err` refuses the whole batch
+    /// as [`crate::error::Error::SignatureVerificationFailed`]; because no
+    /// transaction is open yet, nothing was written and nothing is rolled
+    /// back.
     fn verify_column(&self, preimage: &[u8], sig: &JsonValue) -> Result<()>;
 
     /// The identity the provider uses for its own signed writes. Independent
     /// of any peer's author — not passed to [`verify_column`].
     fn author_id(&self) -> AuthorId;
 
-    /// Row-level / batch-level policy hook. Called by
-    /// [`crate::crdt::apply::apply_remote_changes`] before any write, inside
-    /// the apply transaction and before the per-column preflight. Returning
-    /// `Err` rejects the entire batch; the transaction rolls back.
+    /// Row-level / batch-level policy hook — the place for batch
+    /// authorization, quota, or space-membership checks.
+    ///
+    /// Called by [`crate::crdt::apply::apply_remote_changes`] **before the
+    /// apply transaction is opened**, after the crate's own identifier and
+    /// clock-drift checks and before the per-column signature pass. It is
+    /// deliberately ahead of that pass so a whole-batch veto costs no
+    /// per-column crypto.
+    ///
+    /// Returning `Err` refuses the entire batch and that error reaches the
+    /// caller unchanged. Since no transaction exists yet, nothing was
+    /// written and there is no rollback — do not rely on transactional
+    /// rollback to undo work done inside this hook, and do not expect to
+    /// observe in-transaction state from it. The `&Connection` is not
+    /// offered here for the same reason.
     fn on_before_apply(&self, changes: &RemoteChanges) -> Result<()> {
         let _ = changes;
         Ok(())

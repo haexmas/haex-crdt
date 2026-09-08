@@ -2,12 +2,14 @@
 //!
 //! Every remote change arrives as a [`crate::ColumnChange`] with the same
 //! shape the scanner emits on the sender side. The apply pipeline takes a
-//! batch, verifies signatures, and merges the changes into the local
+//! batch, preflights it, and merges the surviving changes into the local
 //! database under column-level LWW.
 //!
 //! Public entry point: [`apply_remote_changes`]. Its contract is spelled out
-//! on [`crate::SignatureProvider`] — all-or-nothing, preflight-verify before
-//! any write.
+//! on [`crate::SignatureProvider`] — all-or-nothing, with every check that
+//! can refuse the batch completing before a transaction is opened. The
+//! `preflight` module owns that phase and documents what a refusal
+//! guarantees; `engine` owns the write loop that follows it.
 //!
 //! Sub-modules are internal-only helpers; the public surface stays flat.
 

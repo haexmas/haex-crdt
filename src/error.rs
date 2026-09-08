@@ -36,9 +36,12 @@ pub enum Error {
 
     // ---- signature contract (plan §4.2) --------------------------------------
     /// `apply_remote_changes` preflight verification found a change whose
-    /// signature does not verify. The batch has been rolled back; no writes
-    /// remain. `first_failed_change` names the offending column change so
-    /// the caller can diagnose the source.
+    /// signature does not verify. Preflight completes before the apply
+    /// transaction is opened, so no write was ever attempted — nothing to
+    /// roll back, and nothing of this batch is in local state.
+    /// `first_failed_change` names the offending column change, by its
+    /// index in the batch as submitted, so the caller can diagnose the
+    /// source.
     #[error("signature verification failed at change #{first_failed_change}")]
     SignatureVerificationFailed { first_failed_change: usize },
 

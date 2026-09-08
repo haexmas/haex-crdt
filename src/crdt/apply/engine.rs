@@ -3,11 +3,9 @@
 //! One `apply_remote_changes` call is one all-or-nothing sync round:
 //!
 //! ```text
-//! reject the batch on an unsafe identifier or an over-drift HLC
+//! preflight_batch(&changes, provider)?      // no transaction open yet
 //! with_fk_disabled(conn):
 //!     IMMEDIATE tx {
-//!         provider.on_before_apply(&changes)?
-//!         verify_all_signatures(&changes, provider)?
 //!         disable triggers
 //!         load delete-shadow map
 //!         for each (table, row) in HLC-ordered groups:
@@ -34,19 +32,19 @@ use crate::crdt::apply::delete_propagation::{
 use crate::crdt::apply::grouping::{
     build_pk_where_from_map, group_by_transaction_hlc, group_row_changes_in_hlc_order,
 };
-use crate::crdt::apply::preflight::verify_all_signatures;
+use crate::crdt::apply::preflight::preflight_batch;
 use crate::crdt::apply::report::ApplyReport;
 use crate::crdt::apply::write::{write_insert, write_update};
 use crate::crdt::cleanup::with_fk_disabled;
 use crate::crdt::columns::{
     COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN, DELETED_ROWS_TABLE, HLC_TIMESTAMP_COLUMN,
 };
-use crate::crdt::hlc::{hlc_is_newer, remote_hlc_drift, HlcService, MAX_REMOTE_HLC_DRIFT};
+use crate::crdt::hlc::{hlc_is_newer, HlcService};
 use crate::crdt::scanner::ColumnChange;
-use crate::crdt::trigger::{get_table_schema, is_safe_identifier};
+use crate::crdt::trigger::get_table_schema;
 use crate::db::core::ValueConverter;
 use crate::db::error::DatabaseError;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::signature::{RemoteChanges, SignatureProvider};
 use crate::table_names::TABLE_CRDT_CONFIGS;
 
@@ -58,54 +56,10 @@ pub fn apply_remote_changes(
     hlc_service: &HlcService,
     provider: &dyn SignatureProvider,
 ) -> Result<ApplyReport> {
-    // Pre-tx sanity: refuse identifier-unsafe and clock-implausible input at
-    // the boundary so the rest of the code can build SQL without re-checking
-    // and can treat every surviving HLC as a clock reading.
-    for change in &changes {
-        if !is_safe_identifier(&change.table_name) {
-            return Err(DatabaseError::ValidationError {
-                reason: format!(
-                    "Invalid table name '{}' in remote change",
-                    change.table_name
-                ),
-            }
-            .into());
-        }
-        if !is_safe_identifier(&change.column_name) {
-            return Err(DatabaseError::ValidationError {
-                reason: format!(
-                    "Invalid column name '{}' in table '{}'",
-                    change.column_name, change.table_name
-                ),
-            }
-            .into());
-        }
-        // Clock-drift gate. Beyond the tolerance an HLC is not a reading of
-        // anybody's clock, so the batch's LWW ordering is meaningless and
-        // there is nothing in it worth salvaging — refuse the whole call
-        // rather than skip the change, and refuse it here, before the
-        // transaction is opened, so a refusal provably wrote nothing. That
-        // placement is also what stops the post-commit `advance_past_remote`
-        // below from being a drift risk: every HLC that reaches it has
-        // already cleared this gate against the same clock.
-        //
-        // Malformed timestamps are deliberately NOT refused here. Drift is
-        // undefined for a string that is not a timestamp, and such a change
-        // already has a path: `compare_hlc_strings` reads it as ancient, so
-        // it loses LWW and lands in `skipped_stale`.
-        if let Some(drift) = remote_hlc_drift(&change.hlc_timestamp) {
-            if drift > MAX_REMOTE_HLC_DRIFT {
-                return Err(Error::RemoteHlcDriftTooLarge {
-                    hlc: change.hlc_timestamp.clone(),
-                    drift,
-                    limit: MAX_REMOTE_HLC_DRIFT,
-                });
-            }
-        }
-    }
-
-    provider.on_before_apply(&changes)?;
-    verify_all_signatures(&changes, provider)?;
+    // Every check that can refuse this batch runs here, to completion,
+    // before a transaction exists — so a refusal provably wrote nothing.
+    // New whole-batch checks belong in `preflight`, not in the write loop.
+    preflight_batch(&changes, provider)?;
 
     // Reorder for the write loop: transaction-HLC groups sorted ascending,
     // flattened back to a single vec. Same content, deterministic order.

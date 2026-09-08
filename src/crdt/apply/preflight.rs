@@ -1,22 +1,119 @@
-//! Signature preflight — the pass that MUST run to completion before any
-//! write, per plan §4.2's all-or-nothing trust contract.
+//! Pre-transaction preflight — every check that can refuse a batch, run to
+//! completion *before* [`super::apply_remote_changes`] opens its
+//! transaction, per plan §4.2's all-or-nothing trust contract.
 //!
-//! Skipping preflight and verifying inline (as each column is about to be
-//! written) would let earlier writes land before a later verification
-//! failure aborts the batch. The transaction's rollback would then be
-//! doing the crate's crash-safety work — correct, but a bad shape: the
-//! `SignatureProvider::verify_column` calls happen while the DB is being
-//! mutated, and any timing- or trace-based side effect a real provider
-//! might emit would refer to a partly-applied state that never lands.
+//! [`preflight_batch`] is the whole phase. It runs four checks in order:
 //!
-//! Doing preflight first also lets [`crate::error::Error::SignatureVerificationFailed`]
-//! name the offending change by index without the caller having to correlate
-//! against an interleaved apply log.
+//! 1. **Identifier safety** — every change's `table_name` and `column_name`
+//!    must be a safe SQL identifier, so everything downstream may build SQL
+//!    without re-checking.
+//! 2. **Clock drift** — no change may carry an HLC further than
+//!    [`MAX_REMOTE_HLC_DRIFT`] beyond local now.
+//! 3. **Consumer batch veto** — [`SignatureProvider::on_before_apply`], the
+//!    consumer's own batch-level policy hook (authorization, quota, space
+//!    membership). Deliberately ahead of step 4: it is the cheap
+//!    whole-batch veto, and running it first spares a rejected batch the
+//!    per-column crypto.
+//! 4. **Per-column signatures** — [`verify_all_signatures`].
+//!
+//! # What a consumer may rely on
+//!
+//! An `Err` from any of the four means **nothing was written** — not
+//! "written, then rolled back". No transaction exists yet at that point, so
+//! there is no partial state to reconcile, no rollback to depend on, and no
+//! window in which a crash could expose a half-applied batch. That is what
+//! makes quarantine-and-retry safe: a consumer can park the refused batch,
+//! ask the user, and resubmit it verbatim later without first inspecting
+//! local state to work out how far the previous attempt got.
+//!
+//! Adding a new whole-batch check means adding it here, not to the write
+//! loop, so that guarantee keeps holding.
+//!
+//! # Why signatures are not verified inline
+//!
+//! Verifying as each column is about to be written would let earlier writes
+//! land before a later verification failure aborts the batch. The
+//! transaction's rollback would then be doing the crate's crash-safety work
+//! — correct, but a bad shape: the [`SignatureProvider::verify_column`]
+//! calls would happen while the DB is being mutated, and any timing- or
+//! trace-based side effect a real provider might emit would refer to a
+//! partly-applied state that never lands.
+//!
+//! Verifying up front also lets
+//! [`crate::error::Error::SignatureVerificationFailed`] name the offending
+//! change by index without the caller having to correlate against an
+//! interleaved apply log.
 
 use crate::crdt::apply::preimage::column_sig_preimage;
+use crate::crdt::hlc::{remote_hlc_drift, MAX_REMOTE_HLC_DRIFT};
 use crate::crdt::scanner::ColumnChange;
+use crate::crdt::trigger::is_safe_identifier;
+use crate::db::error::DatabaseError;
 use crate::error::{Error, Result};
-use crate::signature::SignatureProvider;
+use crate::signature::{RemoteChanges, SignatureProvider};
+
+/// Run the whole pre-transaction phase over `changes`, returning the first
+/// refusal. See the module docs for the phases and for what an `Err` from
+/// this function guarantees to the caller.
+pub fn preflight_batch(changes: &RemoteChanges, provider: &dyn SignatureProvider) -> Result<()> {
+    check_identifiers_and_drift(changes)?;
+    provider.on_before_apply(changes)?;
+    verify_all_signatures(changes, provider)?;
+    Ok(())
+}
+
+/// Phases 1 and 2: refuse identifier-unsafe and clock-implausible input at
+/// the crate boundary, per change, in batch order.
+///
+/// The two identifier checks come first, ahead of the drift check, because
+/// they decide whether the change is even well-formed enough to be talked
+/// about in a SQL statement; reading a clock to reject a change whose table
+/// name could not be quoted anyway would be answering the wrong question.
+fn check_identifiers_and_drift(changes: &[ColumnChange]) -> Result<()> {
+    for change in changes {
+        if !is_safe_identifier(&change.table_name) {
+            return Err(DatabaseError::ValidationError {
+                reason: format!(
+                    "Invalid table name '{}' in remote change",
+                    change.table_name
+                ),
+            }
+            .into());
+        }
+        if !is_safe_identifier(&change.column_name) {
+            return Err(DatabaseError::ValidationError {
+                reason: format!(
+                    "Invalid column name '{}' in table '{}'",
+                    change.column_name, change.table_name
+                ),
+            }
+            .into());
+        }
+        // Clock-drift gate. Beyond the tolerance an HLC is not a reading of
+        // anybody's clock, so the batch's LWW ordering is meaningless and
+        // there is nothing in it worth salvaging — refuse the whole call
+        // rather than skip the change. Refusing from here, before the
+        // transaction is opened, is also what stops the post-commit
+        // `advance_past_remote` in the engine from being a drift risk:
+        // every HLC that reaches it has already cleared this gate against
+        // the same clock.
+        //
+        // Malformed timestamps are deliberately NOT refused here. Drift is
+        // undefined for a string that is not a timestamp, and such a change
+        // already has a path: `compare_hlc_strings` reads it as ancient, so
+        // it loses LWW and lands in `skipped_stale`.
+        if let Some(drift) = remote_hlc_drift(&change.hlc_timestamp) {
+            if drift > MAX_REMOTE_HLC_DRIFT {
+                return Err(Error::RemoteHlcDriftTooLarge {
+                    hlc: change.hlc_timestamp.clone(),
+                    drift,
+                    limit: MAX_REMOTE_HLC_DRIFT,
+                });
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Verify every `sig`-carrying change in `changes` against the provider,
 /// in list order. Returns the index of the first change whose sig fails
@@ -50,6 +147,8 @@ mod tests {
     use super::*;
     use crate::signature::{AuthorId, NoopSignatureProvider};
     use serde_json::{json, Value as JsonValue};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
 
     fn change_with_sig(idx: usize, sig: Option<JsonValue>) -> ColumnChange {
         ColumnChange {
@@ -163,5 +262,115 @@ mod tests {
             }
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    /// An HLC `offset` beyond the live wall clock. Derived from the clock so
+    /// a value chosen to sit outside the tolerance cannot rot into it.
+    fn hlc_ahead_of_now(offset: Duration) -> String {
+        let shifted = uhlc::system_time_clock().as_u64() + uhlc::NTP64::from(offset).as_u64();
+        format!("{shifted}/abcdef")
+    }
+
+    /// Records whether the consumer's batch hook was reached, so the phase
+    /// order can be asserted rather than inferred from the source.
+    #[derive(Default)]
+    struct RecordingProvider {
+        hook_called: AtomicBool,
+    }
+    impl SignatureProvider for RecordingProvider {
+        fn sign_column(&self, _preimage: &[u8]) -> Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+        fn verify_column(&self, _preimage: &[u8], _sig: &JsonValue) -> Result<()> {
+            Ok(())
+        }
+        fn author_id(&self) -> AuthorId {
+            AuthorId::anonymous()
+        }
+        fn on_before_apply(&self, _changes: &RemoteChanges) -> Result<()> {
+            self.hook_called.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn assert_validation_error(err: Error, needle: &str) {
+        match err {
+            // `DatabaseError::ValidationError` flattens through
+            // `From<DatabaseError> for Error`, so the variant is `Message`.
+            Error::Message(msg) => assert!(
+                msg.contains(needle),
+                "expected a validation error naming {needle:?}, got: {msg}"
+            ),
+            other => panic!("expected a validation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preflight_rejects_an_unsafe_table_name() {
+        let mut batch = vec![change_with_sig(0, None)];
+        batch[0].table_name = "items; DROP TABLE users".to_string();
+        let err = preflight_batch(&batch, &NoopSignatureProvider).unwrap_err();
+        assert_validation_error(err, "Invalid table name");
+    }
+
+    #[test]
+    fn preflight_rejects_an_unsafe_column_name() {
+        let mut batch = vec![change_with_sig(0, None)];
+        batch[0].column_name = "body\" = 1 --".to_string();
+        let err = preflight_batch(&batch, &NoopSignatureProvider).unwrap_err();
+        assert_validation_error(err, "Invalid column name");
+    }
+
+    #[test]
+    fn an_unsafe_identifier_is_reported_ahead_of_drift_on_the_same_change() {
+        // Phase order, pinned on a change that violates both. Reading a
+        // clock to reject a change whose table name could not be quoted
+        // anyway would answer the wrong question, and would change which
+        // error a consumer sees for input that has always been refused as
+        // malformed.
+        let mut batch = vec![change_with_sig(0, None)];
+        batch[0].table_name = "bad;name".to_string();
+        batch[0].hlc_timestamp = hlc_ahead_of_now(MAX_REMOTE_HLC_DRIFT + Duration::from_secs(3600));
+        let err = preflight_batch(&batch, &NoopSignatureProvider).unwrap_err();
+        assert_validation_error(err, "Invalid table name");
+    }
+
+    #[test]
+    fn the_input_boundary_runs_before_the_consumer_hook() {
+        // The consumer's authorization hook must never be handed a batch the
+        // crate has already decided to refuse on shape or clock grounds.
+        let mut unsafe_batch = vec![change_with_sig(0, None)];
+        unsafe_batch[0].table_name = "bad;name".to_string();
+        let provider = RecordingProvider::default();
+        preflight_batch(&unsafe_batch, &provider).unwrap_err();
+        assert!(
+            !provider.hook_called.load(Ordering::SeqCst),
+            "on_before_apply must not see an identifier-unsafe batch"
+        );
+
+        let mut drifted = vec![change_with_sig(0, None)];
+        drifted[0].hlc_timestamp =
+            hlc_ahead_of_now(MAX_REMOTE_HLC_DRIFT + Duration::from_secs(3600));
+        let provider = RecordingProvider::default();
+        let err = preflight_batch(&drifted, &provider).unwrap_err();
+        assert!(
+            matches!(err, Error::RemoteHlcDriftTooLarge { .. }),
+            "expected a drift refusal, got: {err:?}"
+        );
+        assert!(
+            !provider.hook_called.load(Ordering::SeqCst),
+            "on_before_apply must not see an over-drift batch"
+        );
+    }
+
+    #[test]
+    fn preflight_accepts_a_clean_batch_and_reaches_the_consumer_hook() {
+        let batch = vec![change_with_sig(0, None), change_with_sig(1, None)];
+        let provider = RecordingProvider::default();
+        preflight_batch(&batch, &provider).expect("a clean batch must pass every phase");
+        assert!(
+            provider.hook_called.load(Ordering::SeqCst),
+            "a batch that clears the boundary must reach the consumer hook"
+        );
     }
 }
