@@ -13,9 +13,9 @@
 //! - [`scan_dirty_tables`] — list tables the trigger installer marked
 //!   dirty.
 //! - [`scan_table_for_local_changes`] — read per-column changes since a
-//!   cursor from one table, with optional origin-node, PK allow-list and
-//!   single-column equality filters (the filters that need no knowledge of
-//!   what the data means).
+//!   cursor from one table, restricted by a [`ScanFilters`] carrying the
+//!   optional origin-node, PK allow-list and single-column equality
+//!   filters (the filters that need no knowledge of what the data means).
 //! - [`paginate_changes`] — pack changes into transaction-HLC groups that
 //!   fit a byte budget without splitting a group across pages.
 //! - [`ColumnChange`] — the change record.
@@ -117,7 +117,7 @@ pub fn scan_dirty_tables(conn: &Connection) -> Result<Vec<String>, DatabaseError
 ///
 /// All three default to "no restriction", so a full scan is
 /// `ScanFilters::default()` and a single restriction is
-/// `ScanFilters { column_eq: Some(("space_id", id)), ..Default::default() }`.
+/// `ScanFilters { column_eq: Some(("tenant_id", id)), ..Default::default() }`.
 #[derive(Debug, Clone, Default)]
 pub struct ScanFilters<'a> {
     /// When `Some(node_id)`, emits only columns whose HLC's node-id
@@ -396,9 +396,9 @@ pub fn paginate_changes<T: Paginable>(changes: Vec<T>, page_budget: usize) -> (V
 /// The scanner must honour the rule and not just the installer: because a
 /// `_no_trigger` column is never tracked, it never gets an entry in the
 /// per-column HLC map, so the per-column loop in
-/// [`emit::emit_row_changes`]
-/// would fall back to the row-level HLC and ship the column on every scan
-/// — the opposite of what the suffix promised.
+/// [`emit::emit_row_changes`] would fall back to the row-level HLC and
+/// ship the column on every scan — the opposite of what the suffix
+/// promised.
 fn partition_columns(schema: &[ColumnInfo]) -> (Vec<&ColumnInfo>, Vec<&ColumnInfo>) {
     let pk_columns: Vec<&ColumnInfo> = schema.iter().filter(|c| c.is_pk).collect();
     let data_columns: Vec<&ColumnInfo> = schema
