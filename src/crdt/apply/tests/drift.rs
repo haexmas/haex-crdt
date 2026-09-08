@@ -12,7 +12,7 @@ use std::time::Duration;
 use serde_json::json;
 
 use super::{change, create_crdt_table, hlc_ahead_of_now, hlc_behind_now, make_fixture};
-use crate::crdt::apply::apply_remote_changes;
+use crate::crdt::apply::{apply_remote_changes, SignatureApplyPolicy};
 use crate::crdt::columns::HLC_TIMESTAMP_COLUMN;
 use crate::crdt::hlc::{hlc_is_newer, MAX_REMOTE_HLC_DRIFT};
 use crate::error::Error;
@@ -46,7 +46,7 @@ fn an_over_drift_change_is_refused_before_anything_is_written() {
             change("items", "r2", "body", &poisoned, json!("theirs")),
         ],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .expect_err("a batch carrying an over-drift HLC must be refused");
 
@@ -75,7 +75,7 @@ fn the_drift_refusal_names_the_timestamp_and_the_measured_drift() {
         &mut conn,
         vec![change("items", "r1", "body", &poisoned, json!("theirs"))],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .expect_err("refused");
 
@@ -106,11 +106,11 @@ fn a_timestamp_just_inside_the_tolerance_is_accepted_and_advances_the_clock() {
         &mut conn,
         vec![change("items", "r1", "body", &ahead, json!("theirs"))],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .expect("a timestamp inside the tolerance must be accepted");
 
-    assert_eq!(report.applied, 1);
+    assert_eq!(report.report.applied, 1);
     assert_eq!(body(&conn), "theirs");
     // Advancing is the reason the tolerance is generous rather than zero:
     // this device's clock now covers the peer's, so its own next write wins
@@ -142,11 +142,11 @@ fn a_timestamp_far_in_the_past_is_accepted() {
             json!("stale but valid"),
         )],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .expect("a past timestamp is never a drift refusal");
 
-    assert_eq!(report.applied, 1);
+    assert_eq!(report.report.applied, 1);
     assert_eq!(body(&conn), "stale but valid");
 }
 
@@ -164,12 +164,12 @@ fn a_malformed_timestamp_is_not_a_drift_refusal() {
         &mut conn,
         vec![change("items", "r1", "body", "not-a-timestamp", json!("x"))],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .expect("a malformed HLC must not be refused as drift");
 
-    assert_eq!(report.applied, 0);
-    assert_eq!(report.skipped_stale, 1);
+    assert_eq!(report.report.applied, 0);
+    assert_eq!(report.report.skipped_stale, 1);
     assert_eq!(row_count(&conn), 0);
 }
 
@@ -191,7 +191,7 @@ fn a_malformed_full_timestamp_is_refused_before_anything_is_written() {
             ),
         ],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .expect_err("a malformed full HLC must be refused before the transaction");
 
@@ -238,7 +238,7 @@ fn an_over_drift_change_the_write_loop_would_drop_still_fails_the_batch() {
             ),
         ],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .expect_err("the drift gate runs before the reserved-column guard");
 

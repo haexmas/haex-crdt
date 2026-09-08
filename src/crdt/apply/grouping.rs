@@ -22,44 +22,49 @@ use std::collections::HashMap;
 use serde_json::Value as JsonValue;
 
 use crate::crdt::hlc::{compare_hlc_strings, hlc_min};
-use crate::crdt::scanner::ColumnChange;
 use crate::crdt::trigger::is_safe_identifier;
 
-/// Groups a flat list of column changes into transaction-HLC groups and
-/// returns them sorted ascending by HLC. All writes issued inside the same
-/// sender-side transaction share a timestamp, so `hlc_timestamp` is the
-/// semantic grouping key.
-pub fn group_by_transaction_hlc(changes: Vec<ColumnChange>) -> Vec<(String, Vec<ColumnChange>)> {
-    let mut groups: HashMap<String, Vec<ColumnChange>> = HashMap::new();
-    for change in changes {
+/// Groups arbitrary items into ascending-HLC-ordered buckets, keyed by
+/// `hlc_of`. Generic so the same grouping logic serves both a plain
+/// `ColumnChange` batch and an index-tagged one — see the engine's use for
+/// the latter; a plain-`ColumnChange` batch groups with `hlc_of: |c|
+/// c.hlc_timestamp.as_str()`. All writes issued inside the same sender-side
+/// transaction share a timestamp, so `hlc_timestamp` is the semantic
+/// grouping key.
+pub fn group_by_hlc_key<T>(items: Vec<T>, hlc_of: impl Fn(&T) -> &str) -> Vec<(String, Vec<T>)> {
+    let mut groups: HashMap<String, Vec<T>> = HashMap::new();
+    for item in items {
         groups
-            .entry(change.hlc_timestamp.clone())
+            .entry(hlc_of(&item).to_string())
             .or_default()
-            .push(change);
+            .push(item);
     }
-    let mut ordered: Vec<(String, Vec<ColumnChange>)> = groups.into_iter().collect();
+    let mut ordered: Vec<(String, Vec<T>)> = groups.into_iter().collect();
     ordered.sort_by(|a, b| compare_hlc_strings(&a.0, &b.0));
     ordered
 }
 
-/// Groups column changes by `(table, row_pks)` and returns rows in ascending
-/// order of their earliest HLC. Plain `HashMap` iteration is unordered — a
-/// remote batch that spans several transactions would apply rows in
-/// nondeterministic order and future logic that observes the per-row
-/// sequence would see inconsistent results across runs.
-pub fn group_row_changes_in_hlc_order(
-    changes: impl IntoIterator<Item = ColumnChange>,
-) -> Vec<((String, String), Vec<ColumnChange>)> {
-    let mut map: HashMap<(String, String), Vec<ColumnChange>> = HashMap::new();
-    for change in changes {
-        map.entry((change.table_name.clone(), change.row_pks.clone()))
-            .or_default()
-            .push(change);
+/// Groups arbitrary items by a `(String, String)` row key and returns rows in
+/// ascending order of their earliest HLC, with a stable tie-break on the key
+/// itself. Generic so the same grouping logic serves both a plain
+/// `ColumnChange` batch (`key_of: |c| (c.table_name.clone(),
+/// c.row_pks.clone())`) and an index-tagged one. Plain `HashMap` iteration is
+/// unordered — a remote batch that spans several transactions would apply
+/// rows in nondeterministic order and future logic that observes the
+/// per-row sequence would see inconsistent results across runs.
+pub fn group_by_row_key_hlc_ordered<T>(
+    items: impl IntoIterator<Item = T>,
+    key_of: impl Fn(&T) -> (String, String),
+    hlc_of: impl Fn(&T) -> &str,
+) -> Vec<((String, String), Vec<T>)> {
+    let mut map: HashMap<(String, String), Vec<T>> = HashMap::new();
+    for item in items {
+        map.entry(key_of(&item)).or_default().push(item);
     }
-    let mut entries: Vec<((String, String), Vec<ColumnChange>)> = map.into_iter().collect();
+    let mut entries: Vec<((String, String), Vec<T>)> = map.into_iter().collect();
     entries.sort_by(|a, b| {
-        let a_min = hlc_min(a.1.iter().map(|c| c.hlc_timestamp.as_str()));
-        let b_min = hlc_min(b.1.iter().map(|c| c.hlc_timestamp.as_str()));
+        let a_min = hlc_min(a.1.iter().map(|t| hlc_of(t)));
+        let b_min = hlc_min(b.1.iter().map(|t| hlc_of(t)));
         let primary = match (a_min, b_min) {
             (Some(am), Some(bm)) => compare_hlc_strings(am, bm),
             (Some(_), None) => std::cmp::Ordering::Less,
@@ -113,6 +118,7 @@ pub fn build_pk_where_from_map(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crdt::scanner::ColumnChange;
     use serde_json::json;
 
     fn change(table: &str, pk: &str, col: &str, hlc: &str) -> ColumnChange {
@@ -134,7 +140,15 @@ mod tests {
     const HLC3: &str = "0000000000000003/abcdef";
     const HLC4: &str = "0000000000000004/abcdef";
 
-    // ---------- group_by_transaction_hlc -------------------------------
+    fn tx_hlc(c: &ColumnChange) -> &str {
+        c.hlc_timestamp.as_str()
+    }
+
+    fn row_key(c: &ColumnChange) -> (String, String) {
+        (c.table_name.clone(), c.row_pks.clone())
+    }
+
+    // ---------- group_by_hlc_key (ColumnChange case) -------------------
 
     #[test]
     fn tx_grouping_collapses_same_hlc_into_one_group() {
@@ -142,7 +156,7 @@ mod tests {
             change("t", r#"{"id":"a"}"#, "c1", HLC1),
             change("t", r#"{"id":"b"}"#, "c1", HLC1),
         ];
-        let grouped = group_by_transaction_hlc(changes);
+        let grouped = group_by_hlc_key(changes, tx_hlc);
         assert_eq!(grouped.len(), 1);
         assert_eq!(grouped[0].1.len(), 2);
     }
@@ -154,12 +168,12 @@ mod tests {
             change("t", r#"{"id":"b"}"#, "c", HLC1),
             change("t", r#"{"id":"c"}"#, "c", HLC2),
         ];
-        let grouped = group_by_transaction_hlc(changes);
+        let grouped = group_by_hlc_key(changes, tx_hlc);
         let hlcs: Vec<&str> = grouped.iter().map(|(h, _)| h.as_str()).collect();
         assert_eq!(hlcs, vec![HLC1, HLC2, HLC3]);
     }
 
-    // ---------- group_row_changes_in_hlc_order -------------------------
+    // ---------- group_by_row_key_hlc_ordered (ColumnChange case) -------
 
     #[test]
     fn row_grouping_orders_by_min_hlc_per_row() {
@@ -170,7 +184,7 @@ mod tests {
             change("t", r#"{"id":"b"}"#, "c", HLC2),
             change("t", r#"{"id":"a"}"#, "c2", HLC1),
         ];
-        let ordered = group_row_changes_in_hlc_order(changes);
+        let ordered = group_by_row_key_hlc_ordered(changes, row_key, tx_hlc);
         assert_eq!(ordered.len(), 2);
         assert_eq!(ordered[0].0 .1, r#"{"id":"a"}"#);
         assert_eq!(ordered[0].1.len(), 2);
@@ -185,7 +199,7 @@ mod tests {
                 change("t", &format!(r#"{{"id":"r{i}"}}"#), "c", &hlc)
             })
             .collect();
-        let baseline_keys: Vec<String> = group_row_changes_in_hlc_order(baseline)
+        let baseline_keys: Vec<String> = group_by_row_key_hlc_ordered(baseline, row_key, tx_hlc)
             .into_iter()
             .map(|(k, _)| k.1)
             .collect();
@@ -197,7 +211,7 @@ mod tests {
                 change("t", &format!(r#"{{"id":"r{i}"}}"#), "c", &hlc)
             })
             .collect();
-        let reversed_keys: Vec<String> = group_row_changes_in_hlc_order(reversed)
+        let reversed_keys: Vec<String> = group_by_row_key_hlc_ordered(reversed, row_key, tx_hlc)
             .into_iter()
             .map(|(k, _)| k.1)
             .collect();

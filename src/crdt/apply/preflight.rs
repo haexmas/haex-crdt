@@ -2,7 +2,8 @@
 //! completion *before* [`super::apply_remote_changes`] opens its
 //! transaction, per plan §4.2's all-or-nothing trust contract.
 //!
-//! [`preflight_batch`] is the whole phase. It runs four checks in order:
+//! [`preflight_batch`] is the whole phase. It runs the core's own checks,
+//! then hands off to the policy's own batch-level veto:
 //!
 //! 1. **Identifier safety** — every change's `table_name` and `column_name`
 //!    must be a safe SQL identifier, so everything downstream may build SQL
@@ -10,12 +11,11 @@
 //! 2. **HLC validity and clock drift** — a complete HLC must parse, and no
 //!    change may carry an HLC further than [`MAX_REMOTE_HLC_DRIFT`] beyond
 //!    local now.
-//! 3. **Consumer batch veto** — [`SignatureProvider::on_before_apply`], the
-//!    consumer's own batch-level policy hook (authorization, quota, space
-//!    membership). Deliberately ahead of step 4: it is the cheap
-//!    whole-batch veto, and running it first spares a rejected batch the
-//!    per-column crypto.
-//! 4. **Per-column signatures** — [`verify_all_signatures`].
+//! 3. **[`crate::crdt::apply::ApplyPolicy::preflight`]** — the policy's own
+//!    whole-batch check, with no transaction open yet.
+//!    [`crate::crdt::apply::SignatureApplyPolicy`] reproduces today's
+//!    `SignatureProvider`-based sequence exactly:
+//!    [`SignatureProvider::on_before_apply`] then [`verify_all_signatures`].
 //!
 //! # What a consumer may rely on
 //!
@@ -45,6 +45,7 @@
 //! change by index without the caller having to correlate against an
 //! interleaved apply log.
 
+use crate::crdt::apply::policy::ApplyPolicy;
 use crate::crdt::apply::preimage::column_sig_preimage;
 use crate::crdt::hlc::{remote_hlc_drift, MAX_REMOTE_HLC_DRIFT};
 use crate::crdt::scanner::ColumnChange;
@@ -58,10 +59,9 @@ use uhlc::Timestamp;
 /// Run the whole pre-transaction phase over `changes`, returning the first
 /// refusal. See the module docs for the phases and for what an `Err` from
 /// this function guarantees to the caller.
-pub fn preflight_batch(changes: &RemoteChanges, provider: &dyn SignatureProvider) -> Result<()> {
+pub fn preflight_batch(changes: &RemoteChanges, policy: &mut dyn ApplyPolicy) -> Result<()> {
     check_identifiers_and_drift(changes)?;
-    provider.on_before_apply(changes)?;
-    verify_all_signatures(changes, provider)?;
+    policy.preflight(changes)?;
     Ok(())
 }
 
@@ -162,6 +162,7 @@ pub fn verify_all_signatures(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crdt::apply::signature_policy::SignatureApplyPolicy;
     use crate::signature::{AuthorId, NoopSignatureProvider};
     use serde_json::{json, Value as JsonValue};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -326,7 +327,8 @@ mod tests {
     fn preflight_rejects_an_unsafe_table_name() {
         let mut batch = vec![change_with_sig(0, None)];
         batch[0].table_name = "items; DROP TABLE users".to_string();
-        let err = preflight_batch(&batch, &NoopSignatureProvider).unwrap_err();
+        let mut policy = SignatureApplyPolicy::new(&NoopSignatureProvider);
+        let err = preflight_batch(&batch, &mut policy).unwrap_err();
         assert_validation_error(err, "Invalid table name");
     }
 
@@ -334,7 +336,8 @@ mod tests {
     fn preflight_rejects_an_unsafe_column_name() {
         let mut batch = vec![change_with_sig(0, None)];
         batch[0].column_name = "body\" = 1 --".to_string();
-        let err = preflight_batch(&batch, &NoopSignatureProvider).unwrap_err();
+        let mut policy = SignatureApplyPolicy::new(&NoopSignatureProvider);
+        let err = preflight_batch(&batch, &mut policy).unwrap_err();
         assert_validation_error(err, "Invalid column name");
     }
 
@@ -348,7 +351,8 @@ mod tests {
         let mut batch = vec![change_with_sig(0, None)];
         batch[0].table_name = "bad;name".to_string();
         batch[0].hlc_timestamp = hlc_ahead_of_now(MAX_REMOTE_HLC_DRIFT + Duration::from_secs(3600));
-        let err = preflight_batch(&batch, &NoopSignatureProvider).unwrap_err();
+        let mut policy = SignatureApplyPolicy::new(&NoopSignatureProvider);
+        let err = preflight_batch(&batch, &mut policy).unwrap_err();
         assert_validation_error(err, "Invalid table name");
     }
 
@@ -359,7 +363,8 @@ mod tests {
         let mut unsafe_batch = vec![change_with_sig(0, None)];
         unsafe_batch[0].table_name = "bad;name".to_string();
         let provider = RecordingProvider::default();
-        preflight_batch(&unsafe_batch, &provider).unwrap_err();
+        let mut policy = SignatureApplyPolicy::new(&provider);
+        preflight_batch(&unsafe_batch, &mut policy).unwrap_err();
         assert!(
             !provider.hook_called.load(Ordering::SeqCst),
             "on_before_apply must not see an identifier-unsafe batch"
@@ -369,7 +374,8 @@ mod tests {
         drifted[0].hlc_timestamp =
             hlc_ahead_of_now(MAX_REMOTE_HLC_DRIFT + Duration::from_secs(3600));
         let provider = RecordingProvider::default();
-        let err = preflight_batch(&drifted, &provider).unwrap_err();
+        let mut policy = SignatureApplyPolicy::new(&provider);
+        let err = preflight_batch(&drifted, &mut policy).unwrap_err();
         assert!(
             matches!(err, Error::RemoteHlcDriftTooLarge { .. }),
             "expected a drift refusal, got: {err:?}"
@@ -384,7 +390,8 @@ mod tests {
     fn preflight_accepts_a_clean_batch_and_reaches_the_consumer_hook() {
         let batch = vec![change_with_sig(0, None), change_with_sig(1, None)];
         let provider = RecordingProvider::default();
-        preflight_batch(&batch, &provider).expect("a clean batch must pass every phase");
+        let mut policy = SignatureApplyPolicy::new(&provider);
+        preflight_batch(&batch, &mut policy).expect("a clean batch must pass every phase");
         assert!(
             provider.hook_called.load(Ordering::SeqCst),
             "a batch that clears the boundary must reach the consumer hook"

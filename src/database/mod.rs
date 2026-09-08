@@ -1,7 +1,7 @@
 //! Public `Database` facade (plan §6).
 //!
-//! [`Database`] ties together the crate's four consumer-owned traits
-//! (`DeviceIdProvider`, `SignatureProvider`, `MigrationSource`, plus the
+//! [`Database`] ties together the crate's four consumer-owned seams
+//! (`DatabaseBootstrap`, `SignatureProvider`, `MigrationSource`, plus the
 //! SQLCipher key) and exposes the CRDT operations as method calls. Consumers
 //! do not need to touch the internal helpers unless they explicitly opt into
 //! `with_connection` (see the crate `raw-connection` feature).
@@ -50,7 +50,7 @@ use std::sync::{Arc, Mutex};
 use rusqlite::Connection;
 use uuid::Uuid;
 
-use crate::crdt::apply::{apply_remote_changes, ApplyReport};
+use crate::crdt::apply::{apply_remote_changes, ApplyOutcome, SignatureApplyPolicy};
 use crate::crdt::cleanup::{cleanup_deleted_rows, CleanupResult, RetentionPolicy};
 use crate::crdt::hlc::HlcService;
 use crate::crdt::scanner::{
@@ -208,12 +208,20 @@ impl Database {
         })
     }
 
-    /// Merge a remote batch into the local DB. See
-    /// [`apply_remote_changes`] for the trust contract (plan §4.2).
-    pub fn apply_remote_changes(&self, changes: RemoteChanges) -> Result<ApplyReport> {
+    /// Merge a remote batch into the local DB using a
+    /// [`SignatureApplyPolicy`] built from this store's configured
+    /// [`SignatureProvider`] — same trust contract as before this facade's
+    /// widening (plan §4.2), same conceptual outcome. The return type
+    /// widened from `ApplyReport` to [`ApplyOutcome`] (which wraps
+    /// `ApplyReport` unchanged) because the indexed skip detail is more
+    /// information for existing callers at no extra cost: every prior
+    /// caller reading `.applied` / `.skipped_*` still finds them, now one
+    /// field deeper at `.report.*`.
+    pub fn apply_remote_changes(&self, changes: RemoteChanges) -> Result<ApplyOutcome> {
         let provider = Arc::clone(&self.inner.signature_provider);
         self.with_locked_conn(|conn| {
-            apply_remote_changes(conn, changes, &self.inner.hlc, provider.as_ref())
+            let mut policy = SignatureApplyPolicy::new(provider.as_ref());
+            apply_remote_changes(conn, changes, &self.inner.hlc, &mut policy)
         })
     }
 

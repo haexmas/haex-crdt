@@ -11,7 +11,7 @@ use std::sync::Arc;
 use serde_json::{json, Value as JsonValue};
 
 use super::{change, create_crdt_table, make_fixture};
-use crate::crdt::apply::{apply_remote_changes, column_sig_preimage};
+use crate::crdt::apply::{apply_remote_changes, column_sig_preimage, SignatureApplyPolicy};
 use crate::crdt::columns::COLUMN_SIGS_COLUMN;
 use crate::crdt::scanner::ColumnChange;
 use crate::error::{Error, Result};
@@ -97,7 +97,7 @@ fn on_before_apply_rejection_aborts_the_batch_before_any_write() {
         &mut conn,
         vec![change("items", "r1", "body", HLC1, json!("v"))],
         &hlc,
-        &provider,
+        &mut SignatureApplyPolicy::new(&provider),
     )
     .unwrap_err();
     assert!(matches!(err, Error::UnexpectedSignatureUnderNoop));
@@ -130,7 +130,13 @@ fn preflight_rejection_reports_offender_index_and_leaves_db_untouched() {
             json!({"idx": 1}),
         ),
     ];
-    let err = apply_remote_changes(&mut conn, batch, &hlc, &provider).unwrap_err();
+    let err = apply_remote_changes(
+        &mut conn,
+        batch,
+        &hlc,
+        &mut SignatureApplyPolicy::new(&provider),
+    )
+    .unwrap_err();
     match err {
         Error::SignatureVerificationFailed {
             first_failed_change,
@@ -154,7 +160,13 @@ fn noop_provider_rejects_batch_carrying_non_null_signatures() {
         change("items", "r1", "body", HLC1, json!("v")),
         json!("real-sig"),
     )];
-    let err = apply_remote_changes(&mut conn, batch, &hlc, &NoopSignatureProvider).unwrap_err();
+    let err = apply_remote_changes(
+        &mut conn,
+        batch,
+        &hlc,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
+    )
+    .unwrap_err();
     assert!(matches!(
         err,
         Error::SignatureVerificationFailed {
@@ -188,7 +200,13 @@ fn accepted_sig_lands_in_column_sigs_json_map() {
         change("items", "r1", "body", HLC1, json!("v")),
         sig.clone(),
     )];
-    apply_remote_changes(&mut conn, batch, &hlc, &AcceptAll).unwrap();
+    apply_remote_changes(
+        &mut conn,
+        batch,
+        &hlc,
+        &mut SignatureApplyPolicy::new(&AcceptAll),
+    )
+    .unwrap();
 
     let sigs_json: String = conn
         .query_row(
@@ -211,7 +229,7 @@ fn accepted_sig_lands_in_column_sigs_json_map() {
             json!("unsigned-new-value"),
         )],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
     let sigs_json: String = conn

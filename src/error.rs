@@ -104,6 +104,20 @@ pub enum Error {
     #[error("crdt already installed on `{table}`")]
     CrdtAlreadyInstalled { table: String },
 
+    /// `apply_remote_changes`'s transaction committed successfully, but the
+    /// post-commit local-clock advance separately failed. Distinct from
+    /// every other apply failure mode: the merge already landed, and
+    /// `outcome` names exactly what did. This can happen for reasons
+    /// unrelated to remote clock drift (an uninitialized or poisoned
+    /// `HlcService`, or an HLC that slipped past the numeric LWW comparator
+    /// but not `uhlc`'s own parser) — the batch itself is not at fault.
+    #[error("apply_remote_changes committed but the post-commit clock advance failed: {source}")]
+    PostCommitClockAdvance {
+        outcome: Box<crate::crdt::apply::ApplyOutcome>,
+        #[source]
+        source: crate::crdt::hlc::HlcError,
+    },
+
     // ---- catch-all -----------------------------------------------------------
     #[error("{0}")]
     Message(String),
