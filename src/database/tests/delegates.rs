@@ -27,7 +27,7 @@ fn store_apply_remote_changes_uses_the_configured_signature_provider() {
         sig: None,
     }];
     let report = db.apply_remote_changes(changes).unwrap();
-    assert_eq!(report.applied, 1);
+    assert_eq!(report.report.applied, 1);
 }
 
 #[test]

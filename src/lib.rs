@@ -39,7 +39,9 @@ pub use signature::{AuthorId, NoopSignatureProvider, RemoteChanges, SignaturePro
 
 pub use crdt::apply::{
     apply_remote_changes, column_sig_preimage, column_sig_preimage_from_parts,
-    delete_shadows_insert, should_propagate_delete, ApplyReport,
+    delete_shadows_insert, should_propagate_delete, ApplyOutcome, ApplyPolicy, ApplyReport,
+    ColumnDecision, ConstraintDecision, IndexedChange, RowDecision, RowInput, RowWrite,
+    SignatureApplyPolicy, SignatureWrite, SkipReason, SkippedChange, WrittenColumn,
 };
 pub use crdt::cleanup::{
     cleanup_deleted_rows, compute_cutoff, get_crdt_stats, with_fk_disabled, CleanupResult,

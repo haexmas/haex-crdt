@@ -1,39 +1,110 @@
-//! The two SQL writers the apply loop ends in, plus the signature-map
-//! helpers they need.
+//! The two SQL writers the apply loop ends in, wrapped in a savepoint so a
+//! NOT NULL / UNIQUE INSERT failure can be recovered per-row, plus the
+//! signature-map helpers `SignatureApplyPolicy` uses to reproduce today's
+//! flat `[column]` replace-or-remove shape.
 //!
 //! Split out of `engine.rs` to keep both files inside the repo's file-size
 //! cap. Note the column ordering in [`write_insert`]: the staged remote
 //! columns precede the crate's own, and SQLite takes the first value for a
-//! column named twice — which is why `engine`'s write loop must filter the
-//! crate's own column names out of remote input before staging them.
+//! column named twice — which is why the row loop must filter the crate's
+//! own column names out of remote input before staging them.
 
 use rusqlite::types::Value as SqlValue;
 use rusqlite::Transaction;
-use serde_json::Value as JsonValue;
 
+use crate::crdt::apply::policy_types::SignatureWrite;
+use crate::crdt::apply::row::StagedColumn;
 use crate::crdt::columns::{COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN, HLC_TIMESTAMP_COLUMN};
 use crate::crdt::trigger::ColumnInfo;
 use crate::db::core::ValueConverter;
 use crate::db::error::DatabaseError;
 
+/// A row's INSERT/UPDATE either landed, or failed with a raw `rusqlite`
+/// error the caller must classify (only an INSERT's NOT NULL / UNIQUE
+/// failure is recoverable — see [`classify_insert_constraint`]).
+pub(super) enum WriteOutcome {
+    Written,
+    SqlFailure(rusqlite::Error),
+}
+
+const ROW_SAVEPOINT: &str = "haex_apply_row";
+
+/// Wrap `write_fn` in a SQLite savepoint: on success, release it; on
+/// failure, return the raw error for the caller to classify (constraint
+/// failures are handled by the caller rolling back the savepoint itself,
+/// since only an INSERT's NOT NULL/UNIQUE failure is recoverable and the
+/// caller is the one that knows which statement kind this was).
+pub(super) fn in_row_savepoint(
+    tx: &Transaction<'_>,
+    write_fn: impl FnOnce() -> rusqlite::Result<usize>,
+) -> Result<WriteOutcome, DatabaseError> {
+    tx.execute_batch(&format!("SAVEPOINT {ROW_SAVEPOINT}"))?;
+    match write_fn() {
+        Ok(1) => {
+            tx.execute_batch(&format!("RELEASE SAVEPOINT {ROW_SAVEPOINT}"))?;
+            Ok(WriteOutcome::Written)
+        }
+        // Conflict IGNORE clauses and RAISE(IGNORE) triggers may succeed
+        // without writing anything. Never report winners or run after_row
+        // unless exactly the intended row was written.
+        Ok(changed) => Ok(WriteOutcome::SqlFailure(
+            rusqlite::Error::StatementChangedRows(changed),
+        )),
+        Err(e) => Ok(WriteOutcome::SqlFailure(e)),
+    }
+}
+
+/// Roll back and release the row savepoint after a classified INSERT
+/// constraint failure, before the policy's `on_insert_constraint` hook runs.
+pub(super) fn rollback_row_savepoint(tx: &Transaction<'_>) -> Result<(), DatabaseError> {
+    tx.execute_batch(&format!(
+        "ROLLBACK TO SAVEPOINT {ROW_SAVEPOINT}; RELEASE SAVEPOINT {ROW_SAVEPOINT}"
+    ))?;
+    Ok(())
+}
+
+/// Classify a SQL error from an INSERT statement as a recoverable NOT NULL /
+/// UNIQUE constraint violation, or `None` for anything else (which always
+/// aborts the batch regardless of any policy hook).
+pub(super) fn classify_insert_constraint(
+    err: &rusqlite::Error,
+) -> Option<super::report::SkipReason> {
+    use super::report::SkipReason;
+    if let rusqlite::Error::SqliteFailure(ffi_err, _) = err {
+        if ffi_err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_NOTNULL {
+            return Some(SkipReason::InsertNotNull);
+        }
+        if ffi_err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE {
+            return Some(SkipReason::InsertUnique);
+        }
+    }
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn write_update(
     tx: &Transaction<'_>,
     table_name: &str,
-    staged: &[(String, SqlValue, String, Option<JsonValue>)],
+    staged: &[StagedColumn<'_>],
     column_hlcs_json: &str,
     max_hlc_for_row: &str,
     where_clause: &str,
-    pk_values: &[JsonValue],
+    pk_values: &[serde_json::Value],
     has_sigs_column: bool,
-) -> std::result::Result<(), DatabaseError> {
+) -> Result<WriteOutcome, DatabaseError> {
+    // Keep permits policy-owned metadata with an opaque encoding. Avoid
+    // reading or rewriting that column unless a winner requests Replace.
+    let write_sigs = has_sigs_column
+        && staged
+            .iter()
+            .any(|s| matches!(s.signature, SignatureWrite::Replace(_)));
     let mut set_parts: Vec<String> = staged
         .iter()
-        .map(|(col, _, _, _)| format!("\"{col}\" = ?"))
+        .map(|s| format!("\"{}\" = ?", s.change.column_name))
         .collect();
     set_parts.push(format!("{COLUMN_HLCS_COLUMN} = ?"));
     set_parts.push(format!("{HLC_TIMESTAMP_COLUMN} = ?"));
-    if has_sigs_column {
+    if write_sigs {
         set_parts.push(format!("{COLUMN_SIGS_COLUMN} = ?"));
     }
     let sql = format!(
@@ -42,12 +113,12 @@ pub(super) fn write_update(
     );
 
     let mut params: Vec<SqlValue> = Vec::with_capacity(staged.len() + 3 + pk_values.len());
-    for (_, val, _, _) in staged {
-        params.push(val.clone());
+    for s in staged {
+        params.push(s.value.clone());
     }
     params.push(SqlValue::Text(column_hlcs_json.to_string()));
     params.push(SqlValue::Text(max_hlc_for_row.to_string()));
-    if has_sigs_column {
+    if write_sigs {
         params.push(SqlValue::Text(merge_sigs_json(
             tx,
             table_name,
@@ -62,8 +133,7 @@ pub(super) fn write_update(
 
     let param_refs: Vec<&dyn rusqlite::ToSql> =
         params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
-    tx.execute(&sql, &*param_refs)?;
-    Ok(())
+    in_row_savepoint(tx, || tx.execute(&sql, &*param_refs))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -71,17 +141,17 @@ pub(super) fn write_insert(
     tx: &Transaction<'_>,
     table_name: &str,
     schema: &[ColumnInfo],
-    row_pks: &serde_json::Map<String, JsonValue>,
-    staged: &[(String, SqlValue, String, Option<JsonValue>)],
+    row_pks: &serde_json::Map<String, serde_json::Value>,
+    staged: &[StagedColumn<'_>],
     column_hlcs_json: &str,
     max_hlc_for_row: &str,
     has_sigs_column: bool,
-) -> std::result::Result<(), DatabaseError> {
+) -> Result<WriteOutcome, DatabaseError> {
     let mut columns: Vec<String> = Vec::new();
     let mut values: Vec<SqlValue> = Vec::new();
 
     let pk_columns: Vec<&ColumnInfo> = schema.iter().filter(|c| c.is_pk).collect();
-    let pk_json_values: Vec<JsonValue> = pk_columns
+    let pk_json_values: Vec<serde_json::Value> = pk_columns
         .iter()
         .map(|c| row_pks[&c.name].clone())
         .collect();
@@ -92,9 +162,9 @@ pub(super) fn write_insert(
         columns.push(c.name.clone());
         values.push(v);
     }
-    for (col, val, _, _) in staged {
-        columns.push(col.clone());
-        values.push(val.clone());
+    for s in staged {
+        columns.push(s.change.column_name.clone());
+        values.push(s.value.clone());
     }
     columns.push(COLUMN_HLCS_COLUMN.to_string());
     columns.push(HLC_TIMESTAMP_COLUMN.to_string());
@@ -114,33 +184,33 @@ pub(super) fn write_insert(
     );
     let param_refs: Vec<&dyn rusqlite::ToSql> =
         values.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
-    tx.execute(&sql, &*param_refs)?;
-    Ok(())
+    in_row_savepoint(tx, || tx.execute(&sql, &*param_refs))
 }
 
-/// Serialise the column-signature JSON map for a fresh INSERT — only the
-/// staged columns that carry a `sig` land in the map.
-fn build_sigs_json_for_insert(staged: &[(String, SqlValue, String, Option<JsonValue>)]) -> String {
+/// Serialise the column-signature JSON map for a fresh INSERT — only staged
+/// columns whose [`SignatureWrite`] is `Replace(Some(_))` land in the map;
+/// `Keep` and `Replace(None)` both contribute nothing, since a fresh row has
+/// no prior entry to keep.
+fn build_sigs_json_for_insert(staged: &[StagedColumn<'_>]) -> String {
     let mut map = serde_json::Map::new();
-    for (col, _, _, sig) in staged {
-        if let Some(s) = sig {
-            map.insert(col.clone(), s.clone());
+    for s in staged {
+        if let SignatureWrite::Replace(Some(sig)) = &s.signature {
+            map.insert(s.change.column_name.clone(), sig.clone());
         }
     }
     serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string())
 }
 
 /// Merge staged sigs into the row's existing column-signature JSON for an
-/// UPDATE. A signed value replaces the column's previous signature; an
-/// unsigned value removes it because the old signature no longer describes
-/// the current column value.
+/// UPDATE, per column: `Replace(Some(_))` inserts, `Replace(None)` removes,
+/// `Keep` leaves that column's existing entry untouched.
 fn merge_sigs_json(
     tx: &Transaction<'_>,
     table_name: &str,
     where_clause: &str,
-    pk_values: &[JsonValue],
-    staged: &[(String, SqlValue, String, Option<JsonValue>)],
-) -> std::result::Result<String, DatabaseError> {
+    pk_values: &[serde_json::Value],
+    staged: &[StagedColumn<'_>],
+) -> Result<String, DatabaseError> {
     let sql = format!("SELECT {COLUMN_SIGS_COLUMN} FROM \"{table_name}\" WHERE {where_clause}");
     let sql_params = ValueConverter::convert_params(pk_values)?;
     let param_refs: Vec<&dyn rusqlite::ToSql> = sql_params
@@ -151,16 +221,17 @@ fn merge_sigs_json(
     let existing: String = stmt
         .query_row(&*param_refs, |r| r.get::<_, String>(0))
         .unwrap_or_else(|_| "{}".to_string());
-    let mut map: serde_json::Map<String, JsonValue> =
+    let mut map: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str(&existing).unwrap_or_default();
-    for (col, _, _, sig) in staged {
-        match sig {
-            Some(s) => {
-                map.insert(col.clone(), s.clone());
+    for s in staged {
+        match &s.signature {
+            SignatureWrite::Replace(Some(sig)) => {
+                map.insert(s.change.column_name.clone(), sig.clone());
             }
-            None => {
-                map.remove(col);
+            SignatureWrite::Replace(None) => {
+                map.remove(&s.change.column_name);
             }
+            SignatureWrite::Keep => {}
         }
     }
     Ok(serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string()))

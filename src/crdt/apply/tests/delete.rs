@@ -8,7 +8,7 @@
 use serde_json::json;
 
 use super::{change, create_crdt_table, make_fixture};
-use crate::crdt::apply::apply_remote_changes;
+use crate::crdt::apply::{apply_remote_changes, SignatureApplyPolicy};
 use crate::crdt::columns::{COLUMN_HLCS_COLUMN, DELETED_ROWS_TABLE, HLC_TIMESTAMP_COLUMN};
 use crate::signature::NoopSignatureProvider;
 
@@ -21,7 +21,7 @@ fn insert_target(conn: &mut rusqlite::Connection, hlc: &crate::crdt::hlc::HlcSer
         conn,
         vec![change("items", "r1", "body", HLC1, json!("original"))],
         hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
 }
@@ -70,7 +70,7 @@ fn delete_log_entry_fans_out_to_target_row() {
         &mut conn,
         delete_log_batch("del-1", "items", "r1", HLC2),
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
 
@@ -105,7 +105,7 @@ fn delete_log_does_not_propagate_when_target_row_is_strictly_newer() {
         &mut conn,
         vec![change("items", "r1", "body", HLC3, json!("kept"))],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
 
@@ -114,10 +114,10 @@ fn delete_log_does_not_propagate_when_target_row_is_strictly_newer() {
         &mut conn,
         delete_log_batch("del-1", "items", "r1", HLC2),
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
-    assert_eq!(report.skipped_delete_target_newer, 1);
+    assert_eq!(report.report.skipped_delete_target_newer, 1);
 
     let items: i64 = conn
         .query_row("SELECT COUNT(*) FROM items WHERE id = 'r1'", [], |r| {
@@ -140,7 +140,7 @@ fn insert_shadowed_by_prior_delete_is_suppressed_and_counted() {
         &mut conn,
         delete_log_batch("del-1", "items", "r1", HLC2),
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
 
@@ -149,11 +149,14 @@ fn insert_shadowed_by_prior_delete_is_suppressed_and_counted() {
         &mut conn,
         vec![change("items", "r1", "body", HLC1, json!("resurrected"))],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
-    assert_eq!(report.applied, 0, "resurrection insert must be suppressed");
-    assert_eq!(report.skipped_shadowed_by_delete, 1);
+    assert_eq!(
+        report.report.applied, 0,
+        "resurrection insert must be suppressed"
+    );
+    assert_eq!(report.report.skipped_shadowed_by_delete, 1);
 
     let items: i64 = conn
         .query_row("SELECT COUNT(*) FROM items WHERE id = 'r1'", [], |r| {
@@ -174,7 +177,7 @@ fn insert_strictly_newer_than_all_deletes_wins_and_lands() {
         &mut conn,
         delete_log_batch("del-1", "items", "r1", HLC1),
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
 
@@ -182,11 +185,11 @@ fn insert_strictly_newer_than_all_deletes_wins_and_lands() {
         &mut conn,
         vec![change("items", "r1", "body", HLC3, json!("legit-repost"))],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
-    assert_eq!(report.applied, 1);
-    assert_eq!(report.skipped_shadowed_by_delete, 0);
+    assert_eq!(report.report.applied, 1);
+    assert_eq!(report.report.skipped_shadowed_by_delete, 0);
 
     let body: String = conn
         .query_row("SELECT body FROM items WHERE id = 'r1'", [], |r| r.get(0))
@@ -220,10 +223,10 @@ fn null_delete_hlc_is_skipped_without_aborting_apply() {
             json!("ignored"),
         )],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
-    assert_eq!(report.skipped_unknown_column, 1);
+    assert_eq!(report.report.skipped_unknown_column, 1);
 
     let items: i64 = conn
         .query_row("SELECT COUNT(*) FROM items WHERE id = 'r1'", [], |r| {
@@ -251,7 +254,7 @@ fn target_delete_error_rolls_back_the_delete_log_apply() {
         &mut conn,
         delete_log_batch("del-rollback", "items", "r1", HLC2),
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .is_err());
 
@@ -287,7 +290,7 @@ fn delete_target_without_crdt_metadata_is_skipped() {
         &mut conn,
         delete_log_batch("del-plain", "plain_items", "r1", HLC2),
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
 

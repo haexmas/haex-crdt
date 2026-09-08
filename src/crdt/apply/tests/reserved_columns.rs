@@ -17,7 +17,7 @@ use std::time::Duration;
 use serde_json::json;
 
 use super::{change, create_crdt_table, hlc_ahead_of_now, make_fixture};
-use crate::crdt::apply::apply_remote_changes;
+use crate::crdt::apply::{apply_remote_changes, SignatureApplyPolicy};
 use crate::crdt::columns::{COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN, HLC_TIMESTAMP_COLUMN};
 use crate::crdt::hlc::hlc_is_newer;
 use crate::signature::NoopSignatureProvider;
@@ -80,15 +80,21 @@ fn insert_keeps_the_computed_row_hlc_over_a_remote_one() {
             json!(HLC_ATTACKER),
         ),
     ];
-    let report = apply_remote_changes(&mut conn, changes, &hlc, &NoopSignatureProvider).unwrap();
+    let report = apply_remote_changes(
+        &mut conn,
+        changes,
+        &hlc,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
+    )
+    .unwrap();
 
     assert_eq!(
         row_hlc(&conn, "r1"),
         HLC2,
         "the row HLC must be the crate's computed value, not the peer's"
     );
-    assert_eq!(report.applied, 1, "only the body change may apply");
-    assert_eq!(report.skipped_reserved_column, 1);
+    assert_eq!(report.report.applied, 1, "only the body change may apply");
+    assert_eq!(report.report.skipped_reserved_column, 1);
 }
 
 #[test]
@@ -106,7 +112,13 @@ fn insert_keeps_the_computed_column_hlc_map_over_a_remote_one() {
             json!(format!("{{\"body\":\"{HLC_ATTACKER}\"}}")),
         ),
     ];
-    let report = apply_remote_changes(&mut conn, changes, &hlc, &NoopSignatureProvider).unwrap();
+    let report = apply_remote_changes(
+        &mut conn,
+        changes,
+        &hlc,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
+    )
+    .unwrap();
 
     let map = column_hlcs(&conn, "r1");
     assert!(
@@ -117,7 +129,7 @@ fn insert_keeps_the_computed_column_hlc_map_over_a_remote_one() {
         !map.contains(COLUMN_HLCS_COLUMN),
         "no per-column HLC entry may be created for a metadata column: {map}"
     );
-    assert_eq!(report.skipped_reserved_column, 1);
+    assert_eq!(report.report.skipped_reserved_column, 1);
 }
 
 #[test]
@@ -139,14 +151,20 @@ fn insert_rejects_a_remote_signature_map() {
             json!(forged),
         ),
     ];
-    let report = apply_remote_changes(&mut conn, changes, &hlc, &NoopSignatureProvider).unwrap();
+    let report = apply_remote_changes(
+        &mut conn,
+        changes,
+        &hlc,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
+    )
+    .unwrap();
 
     let sigs = column_sigs(&conn, "r1");
     assert!(
         !sigs.contains("forged-signature"),
         "a peer must not be able to populate the signature map: {sigs}"
     );
-    assert_eq!(report.skipped_reserved_column, 1);
+    assert_eq!(report.report.skipped_reserved_column, 1);
 }
 
 #[test]
@@ -158,7 +176,13 @@ fn insert_ignores_a_remote_primary_key_column() {
         change("items", "r1", "body", HLC2, json!("hello")),
         change("items", "r1", "id", HLC3, json!("hijacked")),
     ];
-    let report = apply_remote_changes(&mut conn, changes, &hlc, &NoopSignatureProvider).unwrap();
+    let report = apply_remote_changes(
+        &mut conn,
+        changes,
+        &hlc,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
+    )
+    .unwrap();
 
     let ids: Vec<String> = conn
         .prepare("SELECT id FROM items")
@@ -172,7 +196,7 @@ fn insert_ignores_a_remote_primary_key_column() {
         vec!["r1".to_string()],
         "row identity comes from row_pks; a change naming a PK must not set it"
     );
-    assert_eq!(report.skipped_reserved_column, 1);
+    assert_eq!(report.report.skipped_reserved_column, 1);
 }
 
 // -----------------------------------------------------------------------
@@ -187,7 +211,7 @@ fn update_ignores_remote_metadata_columns() {
         &mut conn,
         vec![change("items", "r1", "body", HLC2, json!("v2"))],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
 
@@ -209,7 +233,7 @@ fn update_ignores_remote_metadata_columns() {
             ),
         ],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
 
@@ -219,7 +243,7 @@ fn update_ignores_remote_metadata_columns() {
         !map.contains(HLC_TIMESTAMP_COLUMN) && !map.contains(HLC_ATTACKER),
         "the peer's metadata change must leave no trace: {map}"
     );
-    assert_eq!(report.skipped_reserved_column, 1);
+    assert_eq!(report.report.skipped_reserved_column, 1);
 }
 
 #[test]
@@ -230,7 +254,7 @@ fn update_ignores_a_remote_primary_key_column() {
         &mut conn,
         vec![change("items", "r1", "body", HLC2, json!("v2"))],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
 
@@ -240,7 +264,7 @@ fn update_ignores_a_remote_primary_key_column() {
         &mut conn,
         vec![change("items", "r1", "id", HLC3, json!("hijacked"))],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
 
@@ -256,7 +280,7 @@ fn update_ignores_a_remote_primary_key_column() {
         vec!["r1".to_string()],
         "a remote PK assignment must not rewrite row identity"
     );
-    assert_eq!(report.skipped_reserved_column, 1);
+    assert_eq!(report.report.skipped_reserved_column, 1);
 }
 
 // -----------------------------------------------------------------------
@@ -284,7 +308,7 @@ fn remote_no_sync_column_is_skipped_while_the_rest_of_the_batch_applies() {
             change("items", "r1", "body", HLC2, json!("hello")),
         ],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
 
@@ -300,10 +324,10 @@ fn remote_no_sync_column_is_skipped_while_the_rest_of_the_batch_applies() {
         )
         .unwrap();
     assert_eq!(cursor, None, "this device's cursor must not be clobbered");
-    assert_eq!(report.applied, 1);
-    assert_eq!(report.skipped_no_sync_column, 1);
+    assert_eq!(report.report.applied, 1);
+    assert_eq!(report.report.skipped_no_sync_column, 1);
     assert_eq!(
-        report.skipped_reserved_column, 0,
+        report.report.skipped_reserved_column, 0,
         "a consumer column must not be counted as a crate-reserved one"
     );
 }
@@ -320,12 +344,12 @@ fn unknown_column_still_counts_as_unknown() {
         &mut conn,
         vec![change("items", "r1", "gone_no_sync", HLC2, json!("x"))],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
 
-    assert_eq!(report.skipped_unknown_column, 1);
-    assert_eq!(report.skipped_no_sync_column, 0);
+    assert_eq!(report.report.skipped_unknown_column, 1);
+    assert_eq!(report.report.skipped_no_sync_column, 0);
 }
 
 #[test]
@@ -361,12 +385,12 @@ fn a_dropped_change_does_not_drag_the_local_clock_forward() {
             ),
         ],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .expect("a change apply dropped must not fail the batch");
 
-    assert_eq!(report.applied, 1);
-    assert_eq!(report.skipped_reserved_column, 1);
+    assert_eq!(report.report.applied, 1);
+    assert_eq!(report.report.skipped_reserved_column, 1);
     let body: String = conn
         .query_row("SELECT body FROM items WHERE id = 'r1'", [], |r| r.get(0))
         .unwrap();
@@ -406,16 +430,16 @@ fn reserved_metadata_outranks_the_no_sync_suffix() {
                 change("items", &row, reserved, HLC_ATTACKER, json!("mine")),
             ],
             &hlc,
-            &NoopSignatureProvider,
+            &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
         )
         .unwrap();
 
         assert_eq!(
-            report.skipped_reserved_column, 1,
+            report.report.skipped_reserved_column, 1,
             "{reserved} must count as reserved, not as `_no_sync`"
         );
         assert_eq!(
-            report.skipped_no_sync_column, 0,
+            report.report.skipped_no_sync_column, 0,
             "{reserved} must not be swallowed by the suffix check: order is \
              the only thing keeping the two counters apart"
         );

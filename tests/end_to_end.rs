@@ -241,10 +241,10 @@ fn two_devices_sync_backfilled_and_fresh_writes_end_to_end() {
         .apply_remote_changes(all_local.clone())
         .expect("apply_remote_changes on device_b");
     assert!(
-        report.applied > 0,
+        report.report.applied > 0,
         "apply must land at least one change; report={report:?}",
     );
-    assert_eq!(report.skipped_stale, 0);
+    assert_eq!(report.report.skipped_stale, 0);
 
     // Readback from B — the fresh row must be present with A's payload and
     // A's HLC. A raw query bypasses LWW filtering so we see exactly what

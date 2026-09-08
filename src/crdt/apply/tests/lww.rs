@@ -4,7 +4,7 @@
 use serde_json::json;
 
 use super::{change, create_crdt_table, make_fixture};
-use crate::crdt::apply::apply_remote_changes;
+use crate::crdt::apply::{apply_remote_changes, SignatureApplyPolicy};
 use crate::crdt::columns::{COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN, HLC_TIMESTAMP_COLUMN};
 use crate::crdt::scanner::ColumnChange;
 use crate::signature::NoopSignatureProvider;
@@ -19,9 +19,15 @@ fn insert_creates_a_new_row_with_incoming_hlc() {
     create_crdt_table(&conn, "items", "body TEXT");
 
     let changes = vec![change("items", "r1", "body", HLC2, json!("hello"))];
-    let report = apply_remote_changes(&mut conn, changes, &hlc, &NoopSignatureProvider).unwrap();
+    let report = apply_remote_changes(
+        &mut conn,
+        changes,
+        &hlc,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
+    )
+    .unwrap();
 
-    assert_eq!(report.applied, 1);
+    assert_eq!(report.report.applied, 1);
     let body: String = conn
         .query_row("SELECT body FROM items WHERE id = 'r1'", [], |r| r.get(0))
         .unwrap();
@@ -46,7 +52,7 @@ fn lww_winner_overwrites_older_value_and_loser_is_dropped() {
         &mut conn,
         vec![change("items", "r1", "body", HLC2, json!("v2"))],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
 
@@ -55,10 +61,10 @@ fn lww_winner_overwrites_older_value_and_loser_is_dropped() {
         &mut conn,
         vec![change("items", "r1", "body", HLC3, json!("v3"))],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
-    assert_eq!(report.applied, 1);
+    assert_eq!(report.report.applied, 1);
     let body: String = conn
         .query_row("SELECT body FROM items WHERE id = 'r1'", [], |r| r.get(0))
         .unwrap();
@@ -69,11 +75,11 @@ fn lww_winner_overwrites_older_value_and_loser_is_dropped() {
         &mut conn,
         vec![change("items", "r1", "body", HLC1, json!("v1"))],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
-    assert_eq!(report.applied, 0);
-    assert_eq!(report.skipped_stale, 1);
+    assert_eq!(report.report.applied, 0);
+    assert_eq!(report.report.skipped_stale, 1);
     let body: String = conn
         .query_row("SELECT body FROM items WHERE id = 'r1'", [], |r| r.get(0))
         .unwrap();
@@ -94,7 +100,7 @@ fn per_column_lww_lets_older_and_newer_updates_coexist_within_one_row() {
             change("items", "r1", "title", HLC2, json!("title-v2")),
         ],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
 
@@ -106,11 +112,11 @@ fn per_column_lww_lets_older_and_newer_updates_coexist_within_one_row() {
             change("items", "r1", "title", HLC3, json!("title-v3")),
         ],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
-    assert_eq!(report.applied, 1);
-    assert_eq!(report.skipped_stale, 1);
+    assert_eq!(report.report.applied, 1);
+    assert_eq!(report.report.skipped_stale, 1);
 
     let (body, title): (String, String) = conn
         .query_row("SELECT body, title FROM items WHERE id = 'r1'", [], |r| {
@@ -135,11 +141,11 @@ fn unknown_column_is_counted_and_does_not_abort_the_batch() {
             change("items", "r1", "future_field", HLC2, json!("v")),
         ],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
-    assert_eq!(report.applied, 1);
-    assert_eq!(report.skipped_unknown_column, 1);
+    assert_eq!(report.report.applied, 1);
+    assert_eq!(report.report.skipped_unknown_column, 1);
     let body: String = conn
         .query_row("SELECT body FROM items WHERE id = 'r1'", [], |r| r.get(0))
         .unwrap();
@@ -156,11 +162,11 @@ fn unknown_table_counts_every_incoming_column_change_as_skipped() {
             change("not_installed", "r1", "b", HLC2, json!("y")),
         ],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
-    assert_eq!(report.applied, 0);
-    assert_eq!(report.skipped_unknown_table, 2);
+    assert_eq!(report.report.applied, 0);
+    assert_eq!(report.report.skipped_unknown_table, 2);
 }
 
 #[test]
@@ -174,7 +180,7 @@ fn hlc_service_advances_past_the_highest_received_timestamp() {
         &mut conn,
         vec![change("items", "r1", "body", HLC3, json!("v"))],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
     let next = hlc.new_timestamp().unwrap().to_string();
@@ -200,7 +206,7 @@ fn incoming_write_does_not_regress_row_hlc_when_older_than_stored() {
             change("items", "r1", "title", HLC1, json!("title-1")),
         ],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
 
@@ -227,11 +233,11 @@ fn newer_duplicate_column_change_replaces_older_staged_value() {
             change("items", "r1", "body", HLC3, json!("new")),
         ],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
 
-    assert_eq!(report.applied, 1);
+    assert_eq!(report.report.applied, 1);
     let (body, column_hlcs): (String, String) = conn
         .query_row(
             &format!("SELECT body, {COLUMN_HLCS_COLUMN} FROM items WHERE id = 'r1'"),
@@ -278,11 +284,11 @@ fn nullable_column_hlcs_are_treated_as_empty_on_update() {
         &mut conn,
         vec![change("items", "r1", "body", HLC2, json!("new"))],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
 
-    assert_eq!(report.applied, 1);
+    assert_eq!(report.report.applied, 1);
     let body: String = conn
         .query_row("SELECT body FROM items WHERE id = 'r1'", [], |r| r.get(0))
         .unwrap();
@@ -317,9 +323,14 @@ fn composite_primary_keys_are_validated_and_bound_by_name() {
         device_id: String::new(),
         sig: None,
     };
-    let report =
-        apply_remote_changes(&mut conn, vec![valid], &hlc, &NoopSignatureProvider).unwrap();
-    assert_eq!(report.applied, 1);
+    let report = apply_remote_changes(
+        &mut conn,
+        vec![valid],
+        &hlc,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
+    )
+    .unwrap();
+    assert_eq!(report.report.applied, 1);
 
     let body: String = conn
         .query_row(
@@ -344,9 +355,9 @@ fn composite_primary_keys_are_validated_and_bound_by_name() {
         &mut conn,
         vec![incomplete, extra],
         &hlc,
-        &NoopSignatureProvider,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
-    assert_eq!(report.applied, 0);
-    assert_eq!(report.skipped_unknown_table, 2);
+    assert_eq!(report.report.applied, 0);
+    assert_eq!(report.report.skipped_unknown_table, 2);
 }

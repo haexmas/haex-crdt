@@ -5,6 +5,13 @@
 //! shadow inserts, unknown tables or columns from schema-version skew — each
 //! has its own counter so consumers can log the shape of a sync round and
 //! tell "5 rows moved" apart from "5 rows dropped for schema drift".
+//!
+//! [`ApplyOutcome`] wraps [`ApplyReport`] with per-change detail: every
+//! skipped [`crate::ColumnChange`] is named by its index in the original,
+//! unfiltered batch, plus why it was skipped. The counters stay the
+//! log-friendly aggregate; `skipped` is the new indexed detail a consumer
+//! needs to correlate a skip back to its own bookkeeping (e.g. a recovery
+//! marker keyed by row identity).
 
 /// Per-call apply outcome. All fields count individual `ColumnChange` records
 /// unless noted otherwise.
@@ -41,4 +48,72 @@ pub struct ApplyReport {
     /// Delete-log entries whose target row is newer locally (resurrection
     /// check) and therefore NOT propagated into a DELETE.
     pub skipped_delete_target_newer: usize,
+    /// Row- or column-level skip decided by the [`super::ApplyPolicy`]:
+    /// [`super::RowDecision::Skip`] (whole row, every still-eligible column)
+    /// or [`super::ColumnDecision::Skip`] (one column).
+    pub skipped_policy: usize,
+    /// INSERT failed on a NOT NULL or UNIQUE constraint and the policy's
+    /// [`super::ApplyPolicy::on_insert_constraint`] returned
+    /// [`super::ConstraintDecision::SkipRow`]. See [`SkipReason::InsertNotNull`]
+    /// / [`SkipReason::InsertUnique`] in `skipped` for which kind.
+    pub skipped_insert_constraint: usize,
+    /// A column-accepting decision lost to a *later* change on the same
+    /// column within the same call (last-in-HLC-order wins). Distinct from
+    /// [`Self::skipped_stale`], which counts a loss against the value already
+    /// persisted from a previous call.
+    pub skipped_superseded_in_batch: usize,
+}
+
+/// [`ApplyReport`] plus the indexed detail a consumer needs to correlate a
+/// skip back to its own bookkeeping. Additive over the plain counters, not a
+/// replacement — `report` is unchanged from what `apply_remote_changes`
+/// returned before this type existed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ApplyOutcome {
+    pub report: ApplyReport,
+    pub skipped: Vec<SkippedChange>,
+}
+
+/// One skipped `ColumnChange`, named by its position in the original,
+/// unfiltered batch passed to `apply_remote_changes` — not the position
+/// after any internal reordering or filtering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkippedChange {
+    pub input_index: usize,
+    pub reason: SkipReason,
+}
+
+/// Why one `ColumnChange` did not land. See [`ApplyReport`]'s fields for the
+/// aggregate counter each reason folds into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReason {
+    /// The table does not exist locally.
+    MissingTable,
+    /// The table exists but does not carry both CRDT metadata columns.
+    MissingCrdtMetadata,
+    /// The row's PK map failed to parse, or did not name exactly the
+    /// table's PK columns.
+    InvalidRowIdentity,
+    /// The column is not present in the local table's schema.
+    UnknownColumn,
+    /// The column is one the crate owns the value of (metadata column or a
+    /// PK) and a peer may never set directly.
+    ReservedColumn,
+    /// The column carries a `_no_sync` name, which never ships.
+    NoSyncColumn,
+    /// Lost LWW against the value already persisted from a previous call.
+    Stale,
+    /// Lost LWW against a later change to the same column within this call.
+    SupersededInBatch,
+    /// An insert was shadowed by a delete-log entry at the same or newer
+    /// HLC.
+    ShadowedByDelete,
+    /// The [`super::ApplyPolicy`] skipped this row or column.
+    Policy,
+    /// INSERT failed a NOT NULL constraint and the policy chose to skip the
+    /// row rather than abort the batch.
+    InsertNotNull,
+    /// INSERT failed a UNIQUE constraint and the policy chose to skip the
+    /// row rather than abort the batch.
+    InsertUnique,
 }
