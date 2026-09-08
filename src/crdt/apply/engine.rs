@@ -162,6 +162,8 @@ fn collect_inbound_delete_log_ids(changes: &[ColumnChange]) -> HashSet<String> {
     ids
 }
 
+/// Filter and apply one row's remote changes, folding the HLCs that reach
+/// local state into the batch's maximum accepted timestamp.
 fn apply_row(
     tx: &Transaction<'_>,
     row_pks_str: &str,
