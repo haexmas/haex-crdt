@@ -60,7 +60,9 @@ pub(super) fn rollback_row_savepoint(tx: &Transaction<'_>) -> Result<(), Databas
 /// Classify a SQL error from an INSERT statement as a recoverable NOT NULL /
 /// UNIQUE constraint violation, or `None` for anything else (which always
 /// aborts the batch regardless of any policy hook).
-pub(super) fn classify_insert_constraint(err: &rusqlite::Error) -> Option<super::report::SkipReason> {
+pub(super) fn classify_insert_constraint(
+    err: &rusqlite::Error,
+) -> Option<super::report::SkipReason> {
     use super::report::SkipReason;
     if let rusqlite::Error::SqliteFailure(ffi_err, _) = err {
         if ffi_err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_NOTNULL {
@@ -73,6 +75,7 @@ pub(super) fn classify_insert_constraint(err: &rusqlite::Error) -> Option<super:
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn write_update(
     tx: &Transaction<'_>,
     table_name: &str,
@@ -121,6 +124,7 @@ pub(super) fn write_update(
     in_row_savepoint(tx, || tx.execute(&sql, &*param_refs).map(|_| ()))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn write_insert(
     tx: &Transaction<'_>,
     table_name: &str,

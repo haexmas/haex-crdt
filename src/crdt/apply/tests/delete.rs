@@ -152,7 +152,10 @@ fn insert_shadowed_by_prior_delete_is_suppressed_and_counted() {
         &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
     )
     .unwrap();
-    assert_eq!(report.report.applied, 0, "resurrection insert must be suppressed");
+    assert_eq!(
+        report.report.applied, 0,
+        "resurrection insert must be suppressed"
+    );
     assert_eq!(report.report.skipped_shadowed_by_delete, 1);
 
     let items: i64 = conn

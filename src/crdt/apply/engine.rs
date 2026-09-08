@@ -437,4 +437,3 @@ fn fold_max_accepted_hlc(max_accepted_hlc: &mut Option<String>, hlc: &str) {
         *max_accepted_hlc = Some(hlc.to_string());
     }
 }
-

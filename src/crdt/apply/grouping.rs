@@ -63,8 +63,8 @@ pub fn group_by_row_key_hlc_ordered<T>(
     }
     let mut entries: Vec<((String, String), Vec<T>)> = map.into_iter().collect();
     entries.sort_by(|a, b| {
-        let a_min = hlc_min(a.1.iter().map(|t| hlc_of(t)));
-        let b_min = hlc_min(b.1.iter().map(|t| hlc_of(t)));
+        let a_min = hlc_min(a.1.iter().map(&hlc_of));
+        let b_min = hlc_min(b.1.iter().map(&hlc_of));
         let primary = match (a_min, b_min) {
             (Some(am), Some(bm)) => compare_hlc_strings(am, bm),
             (Some(_), None) => std::cmp::Ordering::Less,
