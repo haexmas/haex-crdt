@@ -6,10 +6,11 @@
 //! database under column-level LWW.
 //!
 //! Public entry point: [`apply_remote_changes`]. Its contract is spelled out
-//! on [`crate::SignatureProvider`] — all-or-nothing, with every check that
-//! can refuse the batch completing before a transaction is opened. The
-//! `preflight` module owns that phase and documents what a refusal
-//! guarantees; `engine` owns the write loop that follows it.
+//! on [`crate::SignatureProvider`] — preflight refusals are no-write results,
+//! and transaction write failures roll back as a unit. The HLC advancement
+//! after commit may still return an error after the batch has landed. The
+//! `preflight` module owns the no-write phase; `engine` owns the write loop
+//! that follows it.
 //!
 //! Sub-modules are internal-only helpers; the public surface stays flat.
 

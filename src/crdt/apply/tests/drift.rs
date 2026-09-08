@@ -174,6 +174,39 @@ fn a_malformed_timestamp_is_not_a_drift_refusal() {
 }
 
 #[test]
+fn a_malformed_full_timestamp_is_refused_before_anything_is_written() {
+    let (mut conn, hlc, _dev) = make_fixture();
+    create_crdt_table(&conn, "items", "body TEXT");
+
+    let err = apply_remote_changes(
+        &mut conn,
+        vec![
+            change("items", "r1", "body", HLC2, json!("valid sibling")),
+            change(
+                "items",
+                "r2",
+                "body",
+                "18446744073709551615/0abc",
+                json!("malformed"),
+            ),
+        ],
+        &hlc,
+        &NoopSignatureProvider,
+    )
+    .expect_err("a malformed full HLC must be refused before the transaction");
+
+    assert!(
+        matches!(err, Error::Hlc(ref message) if message.contains("18446744073709551615/0abc")),
+        "expected a malformed-HLC error, got: {err:?}"
+    );
+    assert_eq!(
+        row_count(&conn),
+        0,
+        "a refused batch must leave no row behind, not even its valid sibling"
+    );
+}
+
+#[test]
 fn an_over_drift_change_the_write_loop_would_drop_still_fails_the_batch() {
     let (mut conn, hlc, _dev) = make_fixture();
     create_crdt_table(&conn, "items", "body TEXT");

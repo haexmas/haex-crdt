@@ -1,6 +1,8 @@
 //! Apply-remote-changes entry point (plan §4.2).
 //!
-//! One `apply_remote_changes` call is one all-or-nothing sync round:
+//! One `apply_remote_changes` call has a preflight phase and one atomic write
+//! transaction. The HLC advance happens after that transaction commits and
+//! may therefore return an error after the batch has landed:
 //!
 //! ```text
 //! preflight_batch(&changes, provider)?      // no transaction open yet
@@ -21,10 +23,12 @@
 //! Every skip goes into an [`ApplyReport`] counter — no silent drops.
 
 use std::collections::HashSet;
+use std::str::FromStr;
 
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, Transaction};
 use serde_json::Value as JsonValue;
+use uhlc::Timestamp;
 
 use crate::crdt::apply::delete_propagation::{
     insert_suppressed_by_deletes, load_delete_shadow_map, propagate_deleted_rows_to_target_tables,
@@ -315,8 +319,14 @@ fn apply_row(
     // and if it was dropped for schema drift it will arrive again once the
     // consumer installs the missing table or column.
     for (_, _, hlc, _) in &staged {
+        let incoming =
+            Timestamp::from_str(hlc).expect("preflight must reject malformed full HLC timestamps");
         let is_newer = match max_accepted_hlc.as_deref() {
-            Some(current) => hlc_is_newer(hlc, current),
+            Some(current) => {
+                let current = Timestamp::from_str(current)
+                    .expect("max_accepted_hlc must contain a valid HLC timestamp");
+                incoming > current
+            }
             None => true,
         };
         if is_newer {

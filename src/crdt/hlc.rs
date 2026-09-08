@@ -79,9 +79,10 @@ fn build_hlc(node_id: Option<ID>) -> HLC {
 /// performs after committing cannot fail for drift.
 ///
 /// A malformed `hlc` returns `None` rather than an error: drift is undefined
-/// for a string that is not a timestamp, and malformed HLCs already have a
-/// path through the pipeline — [`compare_hlc_strings`] reads them as ancient,
-/// so they lose LWW instead of being applied.
+/// for a string that is not a timestamp. The apply preflight validates
+/// complete `<time>/<node>` timestamps separately; strings without that full
+/// shape still reach [`compare_hlc_strings`], which reads them as ancient so
+/// they lose LWW instead of being applied.
 pub fn remote_hlc_drift(hlc: &str) -> Option<Duration> {
     let remote = *Timestamp::from_str(hlc).ok()?.get_time();
     // uhlc masks off the logical-counter bits of its physical reading before
@@ -363,8 +364,10 @@ impl Default for HlcService {
 /// paths, so it intentionally does **NOT** log. An earlier version
 /// `eprintln!`-ed on every parse failure, which produced one log line *per
 /// comparison* and flooded the logs whenever a single corrupt row (empty
-/// row-level HLC) was present. Malformed/empty HLCs are detected and kept
-/// off the wire at the ingestion boundary in the scanner instead.
+/// row-level HLC) was present. Complete malformed timestamps are rejected by
+/// apply preflight before this comparator can influence a write; malformed or
+/// empty strings that reach other comparator call sites retain the ancient
+/// fallback.
 pub fn compare_hlc_strings(a: &str, b: &str) -> std::cmp::Ordering {
     fn parse(s: &str) -> (u64, u128) {
         let (time_str, node_str) = match s.split_once('/') {

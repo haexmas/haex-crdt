@@ -7,8 +7,9 @@
 //! 1. **Identifier safety** — every change's `table_name` and `column_name`
 //!    must be a safe SQL identifier, so everything downstream may build SQL
 //!    without re-checking.
-//! 2. **Clock drift** — no change may carry an HLC further than
-//!    [`MAX_REMOTE_HLC_DRIFT`] beyond local now.
+//! 2. **HLC validity and clock drift** — a complete HLC must parse, and no
+//!    change may carry an HLC further than [`MAX_REMOTE_HLC_DRIFT`] beyond
+//!    local now.
 //! 3. **Consumer batch veto** — [`SignatureProvider::on_before_apply`], the
 //!    consumer's own batch-level policy hook (authorization, quota, space
 //!    membership). Deliberately ahead of step 4: it is the cheap
@@ -51,6 +52,8 @@ use crate::crdt::trigger::is_safe_identifier;
 use crate::db::error::DatabaseError;
 use crate::error::{Error, Result};
 use crate::signature::{RemoteChanges, SignatureProvider};
+use std::str::FromStr;
+use uhlc::Timestamp;
 
 /// Run the whole pre-transaction phase over `changes`, returning the first
 /// refusal. See the module docs for the phases and for what an `Err` from
@@ -62,8 +65,8 @@ pub fn preflight_batch(changes: &RemoteChanges, provider: &dyn SignatureProvider
     Ok(())
 }
 
-/// Phases 1 and 2: refuse identifier-unsafe and clock-implausible input at
-/// the crate boundary, per change, in batch order.
+/// Phases 1 and 2: refuse identifier-unsafe, malformed, and
+/// clock-implausible input at the crate boundary, per change, in batch order.
 ///
 /// The two identifier checks come first, ahead of the drift check, because
 /// they decide whether the change is even well-formed enough to be talked
@@ -89,6 +92,20 @@ fn check_identifiers_and_drift(changes: &[ColumnChange]) -> Result<()> {
             }
             .into());
         }
+        // A complete HLC must pass uhlc's parser before it can reach the
+        // write loop. The numeric comparator intentionally has a forgiving
+        // fallback for malformed strings, but that fallback can rank a
+        // malformed full timestamp as newest while `advance_past_remote`
+        // rejects it after the transaction commits.
+        if change.hlc_timestamp.contains('/') {
+            Timestamp::from_str(&change.hlc_timestamp).map_err(|error| {
+                Error::Hlc(format!(
+                    "Invalid remote HLC timestamp '{}': {error:?}",
+                    change.hlc_timestamp
+                ))
+            })?;
+        }
+
         // Clock-drift gate. Beyond the tolerance an HLC is not a reading of
         // anybody's clock, so the batch's LWW ordering is meaningless and
         // there is nothing in it worth salvaging — refuse the whole call
@@ -98,10 +115,10 @@ fn check_identifiers_and_drift(changes: &[ColumnChange]) -> Result<()> {
         // every HLC that reaches it has already cleared this gate against
         // the same clock.
         //
-        // Malformed timestamps are deliberately NOT refused here. Drift is
-        // undefined for a string that is not a timestamp, and such a change
-        // already has a path: `compare_hlc_strings` reads it as ancient, so
-        // it loses LWW and lands in `skipped_stale`.
+        // Strings without the full `<time>/<node>` shape are deliberately not
+        // refused here. Drift is undefined for them, and
+        // `compare_hlc_strings` reads them as ancient so they lose LWW and
+        // land in `skipped_stale`.
         if let Some(drift) = remote_hlc_drift(&change.hlc_timestamp) {
             if drift > MAX_REMOTE_HLC_DRIFT {
                 return Err(Error::RemoteHlcDriftTooLarge {

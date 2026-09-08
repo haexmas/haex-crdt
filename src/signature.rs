@@ -35,13 +35,15 @@ pub type RemoteChanges = Vec<ColumnChange>;
 ///
 /// # Trust contract (plan §4.2)
 ///
-/// - `apply_remote_changes` is all-or-nothing, in two stages. First a
+/// - `apply_remote_changes` has a two-stage apply path. First a
 ///   pre-transaction preflight — identifier safety, clock drift, this
 ///   trait's [`on_before_apply`] hook, then per-column signature
 ///   verification — runs to completion with **no transaction open**; an
 ///   `Err` from any of it means nothing was written, with no rollback
 ///   involved. Only then are the writes applied, inside a single
 ///   `IMMEDIATE` transaction that rolls back as a unit if a write fails.
+///   A later HLC-advance error can occur after that transaction commits; in
+///   that case the returned `Err` does not mean that the batch was not applied.
 /// - This crate does not decide whether an empty (or absent) signature is
 ///   acceptable. That is the provider's policy.
 /// - The `sig` argument to [`verify_column`] is the **raw JSON** the change

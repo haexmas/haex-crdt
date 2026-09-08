@@ -325,9 +325,9 @@ fn remote_hlc_drift_is_none_for_a_malformed_timestamp() {
     assert_eq!(remote_hlc_drift("not-a-timestamp"), None);
     assert_eq!(remote_hlc_drift(""), None, "the empty HLC is not a drift");
     // A parseable *time* part does not make a timestamp: uhlc rejects a node
-    // id with a leading zero. Drift stays undefined for it, so the apply
-    // gate lets it through to `compare_hlc_strings`, which reads it as
-    // ancient — that comparator, not this function, governs such a change.
+    // id with a leading zero. Drift stays undefined for it; the apply
+    // preflight separately rejects the malformed full timestamp before the
+    // comparator can select it as newest.
     assert_eq!(
         remote_hlc_drift("18446744073709551615/0abc"),
         None,
