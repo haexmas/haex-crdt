@@ -1,3 +1,4 @@
+use std::time::Duration;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -47,6 +48,30 @@ pub enum Error {
     /// upgrade to a real provider before applying.
     #[error("unexpected non-empty signature under NoopSignatureProvider")]
     UnexpectedSignatureUnderNoop,
+
+    // ---- remote clock drift contract (plan §4.2) -----------------------------
+    /// A change in an `apply_remote_changes` batch carried an HLC timestamp
+    /// more than [`crate::MAX_REMOTE_HLC_DRIFT`] beyond local now. A
+    /// timestamp that far ahead is not a clock reading, so the whole batch
+    /// is refused — refused *before* the transaction opens, so no part of it
+    /// landed and the caller may retry or quarantine it wholesale.
+    ///
+    /// Whole-batch rather than per-change on purpose: partial application
+    /// would leave the caller unable to say what its local state now
+    /// contains. It therefore outranks the write loop's skip-don't-reject
+    /// rule, which keeps a single unusable *column* from costing a batch —
+    /// an unusable *clock* invalidates the batch's entire LWW ordering, not
+    /// one column of it.
+    ///
+    /// `hlc` names the offending timestamp and `drift` how far beyond
+    /// `limit` it lay, so a consumer can quarantine the batch and tell the
+    /// user which peer's clock to look at.
+    #[error("remote HLC `{hlc}` lies {drift:?} beyond local now, past the {limit:?} tolerance; the batch was refused before any write")]
+    RemoteHlcDriftTooLarge {
+        hlc: String,
+        drift: Duration,
+        limit: Duration,
+    },
 
     // ---- migration contract (plan §4.3) --------------------------------------
     /// A migration named in the journal is not returned by the current

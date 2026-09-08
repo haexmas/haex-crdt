@@ -3,6 +3,7 @@
 //! One `apply_remote_changes` call is one all-or-nothing sync round:
 //!
 //! ```text
+//! reject the batch on an unsafe identifier or an over-drift HLC
 //! with_fk_disabled(conn):
 //!     IMMEDIATE tx {
 //!         provider.on_before_apply(&changes)?
@@ -40,12 +41,12 @@ use crate::crdt::cleanup::with_fk_disabled;
 use crate::crdt::columns::{
     COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN, DELETED_ROWS_TABLE, HLC_TIMESTAMP_COLUMN,
 };
-use crate::crdt::hlc::{hlc_is_newer, HlcService};
+use crate::crdt::hlc::{hlc_is_newer, remote_hlc_drift, HlcService, MAX_REMOTE_HLC_DRIFT};
 use crate::crdt::scanner::ColumnChange;
 use crate::crdt::trigger::{get_table_schema, is_safe_identifier};
 use crate::db::core::ValueConverter;
 use crate::db::error::DatabaseError;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::signature::{RemoteChanges, SignatureProvider};
 use crate::table_names::TABLE_CRDT_CONFIGS;
 
@@ -57,8 +58,9 @@ pub fn apply_remote_changes(
     hlc_service: &HlcService,
     provider: &dyn SignatureProvider,
 ) -> Result<ApplyReport> {
-    // Pre-tx sanity: refuse identifier-unsafe input at the boundary so the
-    // rest of the code can build SQL without re-checking.
+    // Pre-tx sanity: refuse identifier-unsafe and clock-implausible input at
+    // the boundary so the rest of the code can build SQL without re-checking
+    // and can treat every surviving HLC as a clock reading.
     for change in &changes {
         if !is_safe_identifier(&change.table_name) {
             return Err(DatabaseError::ValidationError {
@@ -77,6 +79,28 @@ pub fn apply_remote_changes(
                 ),
             }
             .into());
+        }
+        // Clock-drift gate. Beyond the tolerance an HLC is not a reading of
+        // anybody's clock, so the batch's LWW ordering is meaningless and
+        // there is nothing in it worth salvaging — refuse the whole call
+        // rather than skip the change, and refuse it here, before the
+        // transaction is opened, so a refusal provably wrote nothing. That
+        // placement is also what stops the post-commit `advance_past_remote`
+        // below from being a drift risk: every HLC that reaches it has
+        // already cleared this gate against the same clock.
+        //
+        // Malformed timestamps are deliberately NOT refused here. Drift is
+        // undefined for a string that is not a timestamp, and such a change
+        // already has a path: `compare_hlc_strings` reads it as ancient, so
+        // it loses LWW and lands in `skipped_stale`.
+        if let Some(drift) = remote_hlc_drift(&change.hlc_timestamp) {
+            if drift > MAX_REMOTE_HLC_DRIFT {
+                return Err(Error::RemoteHlcDriftTooLarge {
+                    hlc: change.hlc_timestamp.clone(),
+                    drift,
+                    limit: MAX_REMOTE_HLC_DRIFT,
+                });
+            }
         }
     }
 
@@ -120,6 +144,14 @@ pub fn apply_remote_changes(
         Ok(())
     })?;
 
+    // Runs after the commit, so an `Err` here does not mean nothing landed.
+    // Drift is no longer a way to reach that state — every HLC in `staged`
+    // cleared the pre-tx gate — but an unusable *clock service* still is:
+    // an uninitialized or poisoned `HlcService`, or an HLC that
+    // `compare_hlc_strings` ranked as newest yet `uhlc` will not parse (a
+    // decimal time part with a node id it rejects). Left as-is: those are
+    // local-service faults and parser input the ingestion boundary is
+    // supposed to keep off the wire, not remote clock skew.
     if let Some(hlc) = max_accepted_hlc {
         hlc_service
             .advance_past_remote(&hlc)

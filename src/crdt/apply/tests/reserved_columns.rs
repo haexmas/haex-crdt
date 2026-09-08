@@ -8,32 +8,25 @@
 //! duplicated column, so an unfiltered remote metadata column wins over
 //! the crate's computed one.
 
+use std::time::Duration;
+
 use serde_json::json;
 
-use super::{change, create_crdt_table, make_fixture};
+use super::{change, create_crdt_table, hlc_ahead_of_now, make_fixture};
 use crate::crdt::apply::apply_remote_changes;
 use crate::crdt::columns::{COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN, HLC_TIMESTAMP_COLUMN};
-use crate::crdt::hlc::HlcService;
+use crate::crdt::hlc::hlc_is_newer;
 use crate::signature::NoopSignatureProvider;
 
 const HLC2: &str = "0000000000000002/abcdef0000000000000000000000";
 const HLC3: &str = "0000000000000003/abcdef0000000000000000000000";
 /// Newer than every legitimate HLC in these tests, which is all they
-/// compare it against. Deliberately NOT out of uhlc's drift tolerance: the
-/// time part parses as decimal NTP64 units, so this is decades in the
-/// *past*, and `advance_past_remote` accepts it. See
-/// [`far_future_hlc`] for a genuinely out-of-tolerance value.
+/// compare it against. Deliberately NOT out of the crate's drift tolerance:
+/// the time part parses as decimal NTP64 units, so this is decades in the
+/// *past*, which the drift gate always accepts — these tests are about the
+/// reserved-column filter, and must not be refused at the boundary before
+/// reaching it. See `drift.rs` for out-of-tolerance values.
 const HLC_ATTACKER: &str = "9999999999999999/dead000000000000000000000000";
-
-/// An HLC an hour beyond the local clock — past uhlc's drift tolerance, so
-/// `advance_past_remote` refuses it. Derived from the live clock rather
-/// than hardcoded so the test cannot rot into tolerance.
-fn far_future_hlc(hlc: &HlcService) -> String {
-    let ts = hlc.new_timestamp().unwrap();
-    // NTP64 counts 2^32 units per second.
-    let future = ts.get_time().as_u64() + 3600 * (1u64 << 32);
-    format!("{future}/{}", ts.get_id())
-}
 
 fn row_hlc(conn: &rusqlite::Connection, id: &str) -> String {
     conn.query_row(
@@ -332,17 +325,25 @@ fn unknown_column_still_counts_as_unknown() {
 }
 
 #[test]
-fn a_dropped_change_with_an_out_of_tolerance_hlc_does_not_fail_the_batch() {
+fn a_dropped_change_does_not_drag_the_local_clock_forward() {
     let (mut conn, hlc, _dev) = make_fixture();
     create_crdt_table(&conn, "items", "body TEXT");
 
-    // End-to-end anti-DoS: the clock advance must cover what apply
-    // accepted, not what it received. Advancing past the received maximum
-    // lets a peer attach an out-of-tolerance HLC to a change this guard
-    // drops and poison the whole call — the exact denial-of-service the
-    // skip-don't-reject rule exists to deny, reachable through the very
-    // changes we drop.
-    let poisoned = far_future_hlc(&hlc);
+    // End-to-end anti-DoS: the clock advance must cover what apply accepted,
+    // not what it received. A change this guard drops left no local state to
+    // protect, so it has no business moving the clock — and moving it would
+    // hand a peer a way to park this device hours in its own future through
+    // the very changes we discard.
+    //
+    // The poisoned HLC sits *inside* the drift tolerance on purpose. It used
+    // to sit outside it, so the property showed up as the whole call
+    // failing; the pre-transaction drift gate now refuses such a batch
+    // outright (see `drift.rs`), which would mask the behaviour under test.
+    // Measuring the clock directly is the sharper assertion anyway: if apply
+    // regressed to advancing past the received maximum, the advance would
+    // *succeed* here and the damage would be a silently wrong clock.
+    let far_ahead = Duration::from_secs(6 * 60 * 60);
+    let poisoned = hlc_ahead_of_now(&hlc, far_ahead);
     let report = apply_remote_changes(
         &mut conn,
         vec![
@@ -369,7 +370,13 @@ fn a_dropped_change_with_an_out_of_tolerance_hlc_does_not_fail_the_batch() {
     assert_eq!(
         row_hlc(&conn, "r1"),
         HLC2,
-        "the dropped change must leave no trace, in the row or in the clock"
+        "the dropped change must leave no trace in the row"
+    );
+    let next = hlc.new_timestamp().expect("timestamp").to_string();
+    assert!(
+        hlc_is_newer(&poisoned, &next),
+        "the dropped change must leave no trace in the clock either: \
+         local now advanced to {next}, past the dropped {poisoned}"
     );
 }
 
