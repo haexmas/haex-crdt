@@ -157,9 +157,7 @@ fn scan_returns_empty_for_missing_table() {
         "no_such",
         None,
         &dev.to_string(),
-        None,
-        None,
-        None
+        ScanFilters::default()
     )
     .unwrap()
     .is_empty());
@@ -177,8 +175,9 @@ fn scan_rejects_table_without_primary_key() {
         [],
     )
     .unwrap();
-    let err = scan_table_for_local_changes(&conn, "t", None, &dev.to_string(), None, None, None)
-        .unwrap_err();
+    let err =
+        scan_table_for_local_changes(&conn, "t", None, &dev.to_string(), ScanFilters::default())
+            .unwrap_err();
     assert!(matches!(err, DatabaseError::ExecutionError { .. }));
 }
 
@@ -191,8 +190,9 @@ fn scan_rejects_table_without_required_crdt_metadata() {
     )
     .unwrap();
 
-    let err = scan_table_for_local_changes(&conn, "t", None, &dev.to_string(), None, None, None)
-        .unwrap_err();
+    let err =
+        scan_table_for_local_changes(&conn, "t", None, &dev.to_string(), ScanFilters::default())
+            .unwrap_err();
     match err {
         DatabaseError::ExecutionError { reason, table, .. } => {
             assert_eq!(table.as_deref(), Some("t"));
@@ -213,9 +213,14 @@ fn scan_emits_one_change_per_data_column_after_insert() {
         "INSERT INTO items (id, name, body) VALUES ('i1', 'a', 'b')",
     );
 
-    let changes =
-        scan_table_for_local_changes(&conn, "items", None, &dev.to_string(), None, None, None)
-            .unwrap();
+    let changes = scan_table_for_local_changes(
+        &conn,
+        "items",
+        None,
+        &dev.to_string(),
+        ScanFilters::default(),
+    )
+    .unwrap();
     // Two data columns: name + body.
     let cols: HashSet<&str> = changes.iter().map(|c| c.column_name.as_str()).collect();
     assert_eq!(cols.len(), 2);
@@ -239,9 +244,14 @@ fn scan_excludes_pks_and_crdt_meta_from_emitted_columns() {
         "INSERT INTO items (id, name) VALUES ('i1', 'a')",
     );
 
-    let changes =
-        scan_table_for_local_changes(&conn, "items", None, &dev.to_string(), None, None, None)
-            .unwrap();
+    let changes = scan_table_for_local_changes(
+        &conn,
+        "items",
+        None,
+        &dev.to_string(),
+        ScanFilters::default(),
+    )
+    .unwrap();
     for c in &changes {
         assert_ne!(c.column_name, "id", "PK must not emit");
         assert_ne!(c.column_name, HLC_TIMESTAMP_COLUMN);
@@ -265,9 +275,14 @@ fn scan_skips_consumer_no_trigger_suffixed_columns() {
         "INSERT INTO items (id, name, updated_at_no_trigger) VALUES ('i1', 'a', '2026-01-01')",
     );
 
-    let changes =
-        scan_table_for_local_changes(&conn, "items", None, &dev.to_string(), None, None, None)
-            .unwrap();
+    let changes = scan_table_for_local_changes(
+        &conn,
+        "items",
+        None,
+        &dev.to_string(),
+        ScanFilters::default(),
+    )
+    .unwrap();
     let cols: Vec<&str> = changes.iter().map(|c| c.column_name.as_str()).collect();
     assert_eq!(
         cols,
@@ -298,9 +313,7 @@ fn scan_with_cursor_only_emits_columns_newer_than_it() {
         "items",
         Some(&t1),
         &dev.to_string(),
-        None,
-        None,
-        None,
+        ScanFilters::default(),
     )
     .unwrap();
     // Only the body-column change is newer than t1; the name column's HLC
@@ -323,9 +336,14 @@ fn sig_is_none_when_column_sigs_are_absent() {
         &hlc,
         "INSERT INTO items (id, name) VALUES ('i1', 'a')",
     );
-    let changes =
-        scan_table_for_local_changes(&conn, "items", None, &dev.to_string(), None, None, None)
-            .unwrap();
+    let changes = scan_table_for_local_changes(
+        &conn,
+        "items",
+        None,
+        &dev.to_string(),
+        ScanFilters::default(),
+    )
+    .unwrap();
     assert!(changes.iter().all(|c| c.sig.is_none()));
 }
 
@@ -347,9 +365,14 @@ fn sig_passes_through_as_raw_json_when_present() {
         [r#"{"name": "sig-bytes-b64", "phantom": {"space_a": "nested"}}"#],
     )
     .unwrap();
-    let changes =
-        scan_table_for_local_changes(&conn, "items", None, &dev.to_string(), None, None, None)
-            .unwrap();
+    let changes = scan_table_for_local_changes(
+        &conn,
+        "items",
+        None,
+        &dev.to_string(),
+        ScanFilters::default(),
+    )
+    .unwrap();
     let for_name = changes.iter().find(|c| c.column_name == "name").unwrap();
     assert_eq!(for_name.sig, Some(json!("sig-bytes-b64")));
 }

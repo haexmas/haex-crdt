@@ -37,9 +37,10 @@ fn origin_node_filter_emits_only_this_nodes_writes() {
         "items",
         None,
         &dev.to_string(),
-        Some(our_node),
-        None,
-        None,
+        ScanFilters {
+            origin_node: Some(our_node),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -81,9 +82,10 @@ fn row_pks_filter_restricts_scan_to_allow_listed_rows() {
         "items",
         None,
         &dev.to_string(),
-        None,
-        Some(&wanted),
-        None,
+        ScanFilters {
+            row_pks: Some(&wanted),
+            ..Default::default()
+        },
     )
     .unwrap();
     let pks: HashSet<&str> = changes.iter().map(|c| c.row_pks.as_str()).collect();
@@ -131,9 +133,17 @@ fn row_pks_filter_composite_pk_matches_schema_declaration_order() {
     // `{"col_b":"yy","col_a":"xx"}` matches.
     let mut wrong = HashSet::new();
     wrong.insert(r#"{"col_a":"xx","col_b":"yy"}"#.to_string());
-    let changes =
-        scan_table_for_local_changes(&conn, "composites", None, dev, None, Some(&wrong), None)
-            .unwrap();
+    let changes = scan_table_for_local_changes(
+        &conn,
+        "composites",
+        None,
+        dev,
+        ScanFilters {
+            row_pks: Some(&wrong),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert!(
         changes.is_empty(),
         "alphabetical-order key encoding must not match; got: {changes:?}"
@@ -141,9 +151,17 @@ fn row_pks_filter_composite_pk_matches_schema_declaration_order() {
 
     let mut right = HashSet::new();
     right.insert(r#"{"col_b":"yy","col_a":"xx"}"#.to_string());
-    let changes =
-        scan_table_for_local_changes(&conn, "composites", None, dev, None, Some(&right), None)
-            .unwrap();
+    let changes = scan_table_for_local_changes(
+        &conn,
+        "composites",
+        None,
+        dev,
+        ScanFilters {
+            row_pks: Some(&right),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert!(!changes.is_empty(), "schema-declaration form must match");
     for c in &changes {
         assert_eq!(c.row_pks, r#"{"col_b":"yy","col_a":"xx"}"#);
@@ -174,9 +192,10 @@ fn column_eq_filter_restricts_scan_to_matching_rows() {
         "items",
         None,
         &dev.to_string(),
-        None,
-        None,
-        Some(("bucket", "b1")),
+        ScanFilters {
+            column_eq: Some(("bucket", "b1")),
+            ..Default::default()
+        },
     )
     .unwrap();
     let pks: HashSet<&str> = changes.iter().map(|c| c.row_pks.as_str()).collect();
@@ -201,9 +220,10 @@ fn column_eq_filter_naming_an_absent_column_yields_no_rows() {
         "items",
         None,
         &dev.to_string(),
-        None,
-        None,
-        Some(("no_such_column", "whatever")),
+        ScanFilters {
+            column_eq: Some(("no_such_column", "whatever")),
+            ..Default::default()
+        },
     )
     .unwrap();
     assert!(changes.is_empty(), "must fail closed, got: {changes:?}");
@@ -236,9 +256,10 @@ fn column_eq_filter_composes_with_after_hlc_cursor() {
         "items",
         Some(&t1),
         &dev.to_string(),
-        None,
-        None,
-        Some(("bucket", "b1")),
+        ScanFilters {
+            column_eq: Some(("bucket", "b1")),
+            ..Default::default()
+        },
     )
     .unwrap();
     let cols: Vec<(&str, &JsonValue)> = changes
@@ -275,9 +296,10 @@ fn column_eq_filter_value_with_sql_metacharacters_matches_literally() {
         "items",
         None,
         &dev.to_string(),
-        None,
-        None,
-        Some(("bucket", "o'brien_%")),
+        ScanFilters {
+            column_eq: Some(("bucket", "o'brien_%")),
+            ..Default::default()
+        },
     )
     .unwrap();
     let pks: HashSet<&str> = changes.iter().map(|c| c.row_pks.as_str()).collect();
@@ -319,9 +341,10 @@ fn column_eq_filter_rejects_an_identifier_unsafe_column_name() {
         "items",
         None,
         &dev.to_string(),
-        None,
-        None,
-        Some((r#"bucket" OR 1=1 OR "bucket_no_trigger"#, "matches-nothing")),
+        ScanFilters {
+            column_eq: Some((r#"bucket" OR 1=1 OR "bucket_no_trigger"#, "matches-nothing")),
+            ..Default::default()
+        },
     )
     .unwrap_err();
     assert!(
@@ -349,9 +372,10 @@ fn missing_crdt_metadata_outranks_an_absent_filter_column() {
         "t",
         None,
         &dev.to_string(),
-        None,
-        None,
-        Some(("no_such_column", "x")),
+        ScanFilters {
+            column_eq: Some(("no_such_column", "x")),
+            ..Default::default()
+        },
     )
     .unwrap_err();
     assert!(

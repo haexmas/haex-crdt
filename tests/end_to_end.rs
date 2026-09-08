@@ -35,8 +35,8 @@ use haex_crdt::crdt::columns::HLC_TIMESTAMP_COLUMN;
 use haex_crdt::rusqlite::params;
 use haex_crdt::{
     device_uuid_to_hlc_node, hlc_is_from_node, Database, DatabaseConfig, DeviceIdProvider,
-    InstallCrdtOptions, MigrationName, NoopSignatureProvider, SqlCipherKey, StaticDeviceId,
-    StaticMigrationSource, DEFAULT_TRIGGER_VERSION,
+    InstallCrdtOptions, MigrationName, NoopSignatureProvider, ScanFilters, SqlCipherKey,
+    StaticDeviceId, StaticMigrationSource, DEFAULT_TRIGGER_VERSION,
 };
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -180,7 +180,7 @@ fn two_devices_sync_backfilled_and_fresh_writes_end_to_end() {
     // Backfill contract: scanner now returns one change per (legacy row ×
     // data column). Two rows × one data column (`body`) = two changes.
     let backfilled = db_a
-        .scan_table_for_local_changes("toy_no_sync", None, None, None)
+        .scan_table_for_local_changes("toy_no_sync", None, ScanFilters::default())
         .expect("scan backfilled changes on device_a");
     assert_eq!(
         backfilled.len(),
@@ -216,7 +216,7 @@ fn two_devices_sync_backfilled_and_fresh_writes_end_to_end() {
 
     // Scan A again — must include the fresh row alongside the backfilled ones.
     let all_local = db_a
-        .scan_table_for_local_changes("toy_no_sync", None, None, None)
+        .scan_table_for_local_changes("toy_no_sync", None, ScanFilters::default())
         .expect("scan after fresh write");
     let fresh_change = all_local
         .iter()

@@ -54,7 +54,7 @@ fn store_scan_after_apply_returns_the_applied_change() {
     .unwrap();
 
     let changes = db
-        .scan_table_for_local_changes("items", None, None, None)
+        .scan_table_for_local_changes("items", None, ScanFilters::default())
         .unwrap();
     assert!(
         changes.iter().any(|c| c.column_name == "body"),
@@ -64,7 +64,14 @@ fn store_scan_after_apply_returns_the_applied_change() {
     // (author was the foreign node) — proves the filter is wired.
     let node = device_uuid_to_hlc_node(&fx.device.to_string()).unwrap();
     let self_only = db
-        .scan_table_for_local_changes("items", None, Some(node), None)
+        .scan_table_for_local_changes(
+            "items",
+            None,
+            ScanFilters {
+                origin_node: Some(node),
+                ..Default::default()
+            },
+        )
         .unwrap();
     assert!(
         self_only.is_empty(),

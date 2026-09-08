@@ -51,7 +51,7 @@ pub use crdt::hlc::{
 };
 pub use crdt::scanner::{
     paginate_changes, scan_dirty_tables, scan_table_for_local_changes, ColumnChange, Paginable,
-    PULL_PAGE_BUDGET,
+    ScanFilters, PULL_PAGE_BUDGET,
 };
 pub use crdt::trigger::{
     drop_triggers_for_table, ensure_crdt_columns, ensure_crdt_columns_and_triggers,

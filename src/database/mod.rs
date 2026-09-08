@@ -44,7 +44,6 @@ mod install;
 
 pub use config::{DatabaseConfig, InstallCrdtOptions, SqlCipherKey, DEFAULT_TRIGGER_VERSION};
 
-use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -53,7 +52,9 @@ use uuid::Uuid;
 use crate::crdt::apply::{apply_remote_changes, ApplyReport};
 use crate::crdt::cleanup::{cleanup_deleted_rows, CleanupResult, RetentionPolicy};
 use crate::crdt::hlc::HlcService;
-use crate::crdt::scanner::{scan_dirty_tables, scan_table_for_local_changes, ColumnChange};
+use crate::crdt::scanner::{
+    scan_dirty_tables, scan_table_for_local_changes, ColumnChange, ScanFilters,
+};
 use crate::db::connection_context::ConnectionContext;
 use crate::db::core::open_and_init_db;
 use crate::db::error::DatabaseError;
@@ -192,30 +193,21 @@ impl Database {
     }
 
     /// Scan one table for local changes newer than `after_hlc`. See
-    /// [`scan_table_for_local_changes`] for the filter semantics; this method
-    /// injects the store's device id automatically so scanner-side authoring
-    /// attribution matches what the apply pipeline will see on the receiver.
-    /// The scanner's column-equality filter is not surfaced here; callers
-    /// that need it use the free function with their own connection.
+    /// [`scan_table_for_local_changes`] and [`ScanFilters`] for the filter
+    /// semantics; this method injects the store's device id automatically so
+    /// scanner-side authoring attribution matches what the apply pipeline
+    /// will see on the receiver. Pass [`ScanFilters::default()`] for an
+    /// unfiltered scan.
     pub fn scan_table_for_local_changes(
         &self,
         table_name: &str,
         after_hlc: Option<&str>,
-        origin_node_filter: Option<u128>,
-        row_pks_filter: Option<&HashSet<String>>,
+        filters: ScanFilters<'_>,
     ) -> Result<Vec<ColumnChange>> {
         let device_str = self.inner.device_uuid.to_string();
         self.with_locked_conn(|conn| {
-            scan_table_for_local_changes(
-                conn,
-                table_name,
-                after_hlc,
-                &device_str,
-                origin_node_filter,
-                row_pks_filter,
-                None,
-            )
-            .map_err(Error::from)
+            scan_table_for_local_changes(conn, table_name, after_hlc, &device_str, filters)
+                .map_err(Error::from)
         })
     }
 
