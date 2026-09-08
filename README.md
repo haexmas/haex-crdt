@@ -2,7 +2,7 @@
 
 SQLite + SQLCipher storage with column-level LWW CRDT sync (uhlc-based Hybrid Logical Clocks). Extracted from `haex-vault` so both `haex-vault` and `holzi` can consume it as a Rust crate dependency.
 
-**Status**: `v0.2.0`. Trait foundation, HLC service, SQL transformers, trigger installer, scanner, cleanup, migration engine, apply pipeline, public `Database` facade, cross-process file locking, and the plan §8 end-to-end acceptance test all land. Dual-licensed **MIT OR Apache-2.0**. Consume via `haex-crdt = { git = "https://github.com/haexmas/haex-crdt", tag = "v0.2.0" }`.
+**Status**: `v0.3.0`. Trait foundation, HLC service, SQL transformers, trigger installer, scanner, cleanup, migration engine, apply pipeline, public `Database` facade, cross-process file locking, and the plan §8 end-to-end acceptance test all land. Dual-licensed **MIT OR Apache-2.0**. Consume via `haex-crdt = { git = "https://github.com/haexmas/haex-crdt", tag = "v0.3.0" }`.
 
 **Ownership**: source lived in `haex-vault`. This repository is the extraction target. Both `haex-vault` and `holzi` will depend on tagged releases here.
 
@@ -15,7 +15,7 @@ Provided by this crate:
 - HLC service (uhlc-based Hybrid Logical Clocks with SQLite-persisted state).
 - Column-level LWW CRDT infrastructure: schema transformer, trigger installer, scanner, apply pipeline.
 - Cleanup / retention utilities for deleted-row logs.
-- Pluggable [`DeviceIdProvider`](src/device_id.rs) — consumers supply the durable device UUID.
+- Pluggable [`DeviceIdProvider`](src/device_id.rs) — consumers supply the UUID for each logical replica. The provider is authoritative on every open and must return a stable UUID when the same replica reopens the same DB file.
 - Pluggable [`SignatureProvider`](src/signature.rs) — consumers add per-column signing without this crate depending on any identity system. `NoopSignatureProvider` is bundled for consumers that already have an authenticated transport (e.g. an MLS group or an attested iroh channel).
 - Pluggable [`MigrationSource`](src/migration.rs) — consumers control where schema migration SQL comes from.
 
@@ -50,7 +50,7 @@ Extracted from [plan §5](../holzi/docs/plans/2026-09-04-haex-crdt-extraction-pl
 - [x] **Batch E** — apply pipeline with all-or-nothing signature preflight per plan §4.2.
 - [x] **Batch F** — public `Database` facade (`src/database/`) tying `DeviceIdProvider`, `SignatureProvider`, `MigrationSource` and the SQLCipher key together, with `install_crdt` backfill contract per plan §6.
 - [x] **Batch F.5** — port haex-vault's `vault_lock.rs` to `src/db/lock.rs`; wired into `Database::open` as the first step so cross-process (and in-process concurrent) opens fail fast with `VaultAlreadyOpenElsewhere`.
-- [x] **Batch G** — plan §8 end-to-end acceptance test in `tests/end_to_end.rs`: two `Database`s on two SQLCipher files, backfill on A, plain install on B, local write → scan → apply → readback with device-id contract enforced. Gated behind `raw-connection` since the local write goes through `with_connection`. The true "consumable from a tagged git commit" check lands with the `v0.1.0` tag in Batch H.
+- [x] **Batch G** — plan §8 end-to-end acceptance test in `tests/end_to_end.rs`: two `Database`s on two SQLCipher files, backfill on A, plain install on B, local write → scan → apply → readback. It also verifies provider-authoritative device IDs by reopening each file with the other replica's provider. Gated behind `raw-connection` since the local write goes through `with_connection`. The true "consumable from a tagged git commit" check lands with the `v0.1.0` tag in Batch H.
 - [x] **Batch H** — dual-licensed MIT OR Apache-2.0, CI on GitHub Actions (fmt + clippy + tests on base and `raw-connection` feature configs, plus the plan §8 acceptance test), `v0.1.0` tag on the merge commit.
 
 ## Sequence deviation from plan §7

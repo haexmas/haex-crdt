@@ -2,19 +2,31 @@
 //! serialized by the fs2 vault lock), non-UTF-8 path rejection, migration
 //! idempotence.
 
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 
 use uuid::Uuid;
 
 use super::super::*;
 use super::{assert_already_open, source, Fixture};
-use crate::device_id::StaticDeviceId;
+use crate::device_id::{DeviceIdProvider, StaticDeviceId};
+use crate::table_names::TABLE_CRDT_CONFIGS;
+
+struct OneShotDeviceId(Mutex<Option<Uuid>>);
+
+impl DeviceIdProvider for OneShotDeviceId {
+    fn device_id(&self) -> crate::Result<Uuid> {
+        self.0.lock().unwrap().take().ok_or_else(|| {
+            crate::Error::Hlc("device id provider called more than once".to_string())
+        })
+    }
+}
 
 #[test]
-fn open_fresh_returns_provider_uuid() {
-    let fx = Fixture::new();
-    let db = Database::open(fx.config.clone()).unwrap();
+fn open_reads_provider_once_and_returns_its_uuid() {
+    let mut fx = Fixture::new();
+    fx.config.device_id = Arc::new(OneShotDeviceId(Mutex::new(Some(fx.device))));
+    let db = Database::open(fx.config).unwrap();
     assert_eq!(db.device_id(), fx.device);
 }
 
@@ -38,7 +50,18 @@ fn reopen_with_different_provider_returns_that_providers_uuid() {
     // returns exactly what the provider gave. Uniqueness per (DB × replica)
     // is the consumer's job.
     let fx = Fixture::new();
-    Database::open(fx.config.clone()).unwrap();
+    let db = Database::open(fx.config.clone()).unwrap();
+    db.with_locked_conn(|conn| {
+        conn.execute(
+            &format!(
+                "INSERT INTO {TABLE_CRDT_CONFIGS} (key, type, value) VALUES ('device_id', 'system', ?1)"
+            ),
+            [fx.device.to_string()],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    drop(db);
 
     let other = Uuid::new_v4();
     let mut cfg = fx.config.clone();

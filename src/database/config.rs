@@ -61,8 +61,8 @@ pub struct DatabaseConfig {
     /// missing files fail with `DatabaseError::ConnectionFailed` — matches
     /// the SQLCipher/rusqlite semantics of `OpenFlags::SQLITE_OPEN_CREATE`.
     pub create_if_missing: bool,
-    /// Supplies the persistent device UUID that scopes this store's HLC
-    /// state. See [`DeviceIdProvider`] for the durability contract.
+    /// Supplies the UUID that scopes this logical replica's HLC state for an
+    /// open. See [`DeviceIdProvider`] for the stability contract.
     pub device_id: Arc<dyn DeviceIdProvider>,
     /// Provider called during the apply-pipeline preflight and (later) any
     /// local sign-on-write path a consumer builds on top. See

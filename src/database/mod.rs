@@ -33,7 +33,7 @@
 //!    migrations (see [`crate::run_migrations`]).
 //! 3. Initialize the HLC service from the persisted timestamp in
 //!    `haex_crdt_configs_no_sync` — or seed it on first open — using the
-//!    UUID returned by the consumer's [`DeviceIdProvider`]. The crate no
+//!    UUID returned by the consumer's [`crate::DeviceIdProvider`]. The crate no
 //!    longer stores or arbitrates the device UUID: the provider is
 //!    authoritative on every open, so a consumer that legitimately serves
 //!    different UUIDs to the same DB file (a per-installation UUID lookup,
@@ -62,6 +62,7 @@ use crate::db::error::DatabaseError;
 use crate::db::init::ensure_triggers_initialized;
 use crate::db::lock::{DatabaseLock, DatabaseLockError};
 use crate::db::migrations::{run_migrations, MigrationReport};
+use crate::device_id::StaticDeviceId;
 use crate::error::{Error, Result};
 use crate::signature::{RemoteChanges, SignatureProvider};
 
@@ -105,8 +106,7 @@ impl Database {
 
         // Acquire the advisory file lock BEFORE opening SQLite so a
         // second process racing us gets a clean `VaultAlreadyOpenElsewhere`
-        // instead of colliding on the WAL pragma or the device-id
-        // arbitration write.
+        // instead of colliding on the WAL pragma or migration writes.
         let lock = DatabaseLock::try_acquire(&config.path).map_err(map_lock_error)?;
 
         let hlc = HlcService::new();
@@ -121,14 +121,17 @@ impl Database {
 
         run_migrations(&mut conn, config.migration_source.as_ref())?;
 
-        hlc.initialize_in_place(&conn, config.device_id.as_ref())
-            .map_err(|e| DatabaseError::HlcError {
-                reason: e.to_string(),
-            })?;
-
+        // Read the provider exactly once so the HLC node id, scanner
+        // attribution, and `Database::device_id()` all use the same UUID for
+        // this handle. A provider may perform I/O, and even a faulty provider
+        // must not be able to supply two identities to one open operation.
         let device_uuid = config
             .device_id
             .device_id()
+            .map_err(|e| DatabaseError::HlcError {
+                reason: e.to_string(),
+            })?;
+        hlc.initialize_in_place(&conn, &StaticDeviceId(device_uuid))
             .map_err(|e| DatabaseError::HlcError {
                 reason: e.to_string(),
             })?;
