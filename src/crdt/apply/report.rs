@@ -23,22 +23,17 @@ pub struct ApplyReport {
     /// consumer hasn't installed yet).
     pub skipped_unknown_table: usize,
     /// Column not present in the local table's schema (rolling upgrade where
-    /// a newer peer's schema has extra columns).
+    /// a newer peer's schema has extra columns). Checked before the two
+    /// counters below, so a `_no_sync` or reserved name that is absent
+    /// locally is counted here rather than there.
     pub skipped_unknown_column: usize,
-    /// Column carried a `_no_sync` name, which the local scanner would
-    /// never ship. A non-zero count means the sender shipped one anyway:
-    /// a misconfigured peer, or one running a build from before the
-    /// column-level `_no_sync` rule. The change is dropped, not the batch
-    /// — rejecting would let one poisoned change per batch stop sync
-    /// entirely, which is worse than the write it prevents.
+    /// Column carried a `_no_sync` name, which the local scanner would never
+    /// ship (a misconfigured peer, or one predating the column-level rule).
     pub skipped_no_sync_column: usize,
     /// Column named something the crate owns the value of: one of its three
-    /// structural metadata columns, or a primary-key column (row identity
-    /// comes from `row_pks`). No scanner in this crate emits either, so a
-    /// non-zero count means a badly broken peer or a deliberate attempt to
-    /// set the CRDT's own bookkeeping. Counted apart from
-    /// [`Self::skipped_no_sync_column`] because that one suggests
-    /// misconfiguration while this one warrants investigation.
+    /// structural metadata columns, or a primary key (row identity comes
+    /// from `row_pks`). Unlike [`Self::skipped_no_sync_column`] this points
+    /// at a badly broken peer or an attack, not at misconfiguration.
     pub skipped_reserved_column: usize,
     /// Delete-log entries whose target row is newer locally (resurrection
     /// check) and therefore NOT propagated into a DELETE.
