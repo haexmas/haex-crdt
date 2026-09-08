@@ -73,7 +73,9 @@ pub enum SignatureWrite {
     /// Preserve the column's existing signature-map entry unchanged (empty
     /// on a fresh INSERT, since there is nothing to keep). A policy that
     /// owns a different metadata shape entirely uses this and writes its own
-    /// storage itself, e.g. in `after_row`.
+    /// storage itself, e.g. in `after_row`. When all winning columns use
+    /// `Keep`, an UPDATE leaves the signature column's bytes and SQLite
+    /// storage type untouched.
     Keep,
     /// `Some` replaces the column's entry; `None` removes it.
     Replace(Option<JsonValue>),

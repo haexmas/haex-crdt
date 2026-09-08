@@ -105,7 +105,6 @@ pub fn apply_remote_changes(
         toggle_triggers(&tx, "0")?;
         policy.begin(&tx, &changes)?;
         let shadow = load_delete_shadow_map(&tx)?;
-        let inbound_delete_ids = collect_inbound_delete_log_ids(&changes);
 
         for ((table_name, row_pks_str), group) in row_groups {
             process_row_group(
@@ -120,6 +119,7 @@ pub fn apply_remote_changes(
             )?;
         }
 
+        let inbound_delete_ids = collect_inbound_delete_log_ids(&changes, &outcome);
         propagate_deleted_rows_to_target_tables(&tx, &inbound_delete_ids, &mut outcome.report)?;
         policy.before_commit(&tx, &changes, &outcome)?;
         toggle_triggers(&tx, "1")?;
@@ -154,14 +154,27 @@ fn toggle_triggers(tx: &Transaction<'_>, value: &str) -> Result<()> {
 }
 
 /// Delete-log rows arrive as ordinary column changes into
-/// [`DELETED_ROWS_TABLE`]; collect their `id`s from the *original* batch so
-/// the post-loop propagation pass knows which target rows to fan out to,
-/// including replays whose own incoming columns lost LWW to something
-/// already stored.
-fn collect_inbound_delete_log_ids(changes: &[ColumnChange]) -> HashSet<String> {
+/// [`DELETED_ROWS_TABLE`]; collect their `id`s after admission and writing.
+/// Admitted replays that lost LWW still propagate the stored tombstone, but
+/// changes rejected by the policy or core must not cause a target DELETE.
+fn collect_inbound_delete_log_ids(
+    changes: &[ColumnChange],
+    outcome: &ApplyOutcome,
+) -> HashSet<String> {
+    let rejected: HashSet<usize> = outcome
+        .skipped
+        .iter()
+        .filter(|skipped| {
+            !matches!(
+                skipped.reason,
+                SkipReason::Stale | SkipReason::SupersededInBatch
+            )
+        })
+        .map(|skipped| skipped.input_index)
+        .collect();
     let mut ids: HashSet<String> = HashSet::new();
-    for change in changes {
-        if change.table_name != DELETED_ROWS_TABLE {
+    for (input_index, change) in changes.iter().enumerate() {
+        if change.table_name != DELETED_ROWS_TABLE || rejected.contains(&input_index) {
             continue;
         }
         if let Ok(map) = serde_json::from_str::<serde_json::Map<String, JsonValue>>(&change.row_pks)

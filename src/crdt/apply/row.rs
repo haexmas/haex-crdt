@@ -84,7 +84,11 @@ pub(super) fn select_staged_columns<'a>(
                     .to_string()
             });
 
-        if !hlc_is_newer(&change.hlc_timestamp, &running_hlc) {
+        // Preflight leaves incomplete timestamps to the skip path. A
+        // numeric-only string can beat an empty stored HLC in the tolerant
+        // comparator, but cannot be folded into the clock after writing.
+        if !change.hlc_timestamp.contains('/') || !hlc_is_newer(&change.hlc_timestamp, &running_hlc)
+        {
             let has_batch_competitor = staged
                 .iter()
                 .any(|s| s.change.column_name == change.column_name);

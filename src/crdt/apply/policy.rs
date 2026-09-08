@@ -109,6 +109,8 @@ pub trait ApplyPolicy {
     /// staged) — the place to merge the winning columns into a policy's own
     /// signature-metadata storage, using only the columns genuinely
     /// written, never ones only proposed in `prepare_row`.
+    /// Statements that silently affect zero rows (e.g. `ON CONFLICT IGNORE`)
+    /// abort the batch before this hook is called.
     ///
     /// Default: no-op.
     fn after_row(&mut self, tx: &Transaction<'_>, written: RowWrite<'_>) -> Result<()> {

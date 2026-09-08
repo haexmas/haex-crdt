@@ -36,14 +36,20 @@ const ROW_SAVEPOINT: &str = "haex_apply_row";
 /// caller is the one that knows which statement kind this was).
 pub(super) fn in_row_savepoint(
     tx: &Transaction<'_>,
-    write_fn: impl FnOnce() -> rusqlite::Result<()>,
+    write_fn: impl FnOnce() -> rusqlite::Result<usize>,
 ) -> Result<WriteOutcome, DatabaseError> {
     tx.execute_batch(&format!("SAVEPOINT {ROW_SAVEPOINT}"))?;
     match write_fn() {
-        Ok(()) => {
+        Ok(1) => {
             tx.execute_batch(&format!("RELEASE SAVEPOINT {ROW_SAVEPOINT}"))?;
             Ok(WriteOutcome::Written)
         }
+        // Conflict IGNORE clauses and RAISE(IGNORE) triggers may succeed
+        // without writing anything. Never report winners or run after_row
+        // unless exactly the intended row was written.
+        Ok(changed) => Ok(WriteOutcome::SqlFailure(
+            rusqlite::Error::StatementChangedRows(changed),
+        )),
         Err(e) => Ok(WriteOutcome::SqlFailure(e)),
     }
 }
@@ -86,13 +92,19 @@ pub(super) fn write_update(
     pk_values: &[serde_json::Value],
     has_sigs_column: bool,
 ) -> Result<WriteOutcome, DatabaseError> {
+    // Keep permits policy-owned metadata with an opaque encoding. Avoid
+    // reading or rewriting that column unless a winner requests Replace.
+    let write_sigs = has_sigs_column
+        && staged
+            .iter()
+            .any(|s| matches!(s.signature, SignatureWrite::Replace(_)));
     let mut set_parts: Vec<String> = staged
         .iter()
         .map(|s| format!("\"{}\" = ?", s.change.column_name))
         .collect();
     set_parts.push(format!("{COLUMN_HLCS_COLUMN} = ?"));
     set_parts.push(format!("{HLC_TIMESTAMP_COLUMN} = ?"));
-    if has_sigs_column {
+    if write_sigs {
         set_parts.push(format!("{COLUMN_SIGS_COLUMN} = ?"));
     }
     let sql = format!(
@@ -106,7 +118,7 @@ pub(super) fn write_update(
     }
     params.push(SqlValue::Text(column_hlcs_json.to_string()));
     params.push(SqlValue::Text(max_hlc_for_row.to_string()));
-    if has_sigs_column {
+    if write_sigs {
         params.push(SqlValue::Text(merge_sigs_json(
             tx,
             table_name,
@@ -121,7 +133,7 @@ pub(super) fn write_update(
 
     let param_refs: Vec<&dyn rusqlite::ToSql> =
         params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
-    in_row_savepoint(tx, || tx.execute(&sql, &*param_refs).map(|_| ()))
+    in_row_savepoint(tx, || tx.execute(&sql, &*param_refs))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -172,7 +184,7 @@ pub(super) fn write_insert(
     );
     let param_refs: Vec<&dyn rusqlite::ToSql> =
         values.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
-    in_row_savepoint(tx, || tx.execute(&sql, &*param_refs).map(|_| ()))
+    in_row_savepoint(tx, || tx.execute(&sql, &*param_refs))
 }
 
 /// Serialise the column-signature JSON map for a fresh INSERT — only staged

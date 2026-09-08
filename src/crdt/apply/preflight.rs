@@ -116,9 +116,8 @@ fn check_identifiers_and_drift(changes: &[ColumnChange]) -> Result<()> {
         // the same clock.
         //
         // Strings without the full `<time>/<node>` shape are deliberately not
-        // refused here. Drift is undefined for them, and
-        // `compare_hlc_strings` reads them as ancient so they lose LWW and
-        // land in `skipped_stale`.
+        // refused here. Drift is undefined for them; row selection treats
+        // them as ancient and skips them before the clock-folding path.
         if let Some(drift) = remote_hlc_drift(&change.hlc_timestamp) {
             if drift > MAX_REMOTE_HLC_DRIFT {
                 return Err(Error::RemoteHlcDriftTooLarge {

@@ -27,6 +27,8 @@ use crate::error::{Error, Result};
 use crate::signature::RemoteChanges;
 use crate::table_names::TABLE_CRDT_CONFIGS;
 
+mod regressions;
+
 const HLC1: &str = "0000000000000001/abcdef0000000000000000000000";
 const HLC2: &str = "0000000000000002/abcdef0000000000000000000000";
 
