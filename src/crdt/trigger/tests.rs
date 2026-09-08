@@ -5,6 +5,8 @@
 //! against an in-memory SQLite database with test UDFs registered for
 //! `gen_uuid` and `current_hlc`.
 
+mod no_sync;
+
 use super::*;
 use rusqlite::functions::FunctionFlags;
 use rusqlite::Connection;

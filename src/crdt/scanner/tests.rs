@@ -305,6 +305,44 @@ fn scan_emits_no_trigger_columns_under_the_row_hlc() {
     );
 }
 
+#[test]
+fn scan_skips_no_sync_columns_but_not_no_trigger_ones() {
+    let (conn, hlc, dev) = make_fixture();
+    // One table carrying both suffixes, because they answer different
+    // questions and a future change must not collapse them again:
+    // `updated_at_no_trigger` drives no sync but still ships under the row
+    // HLC, while `last_pull_cursor_no_sync` never ships at all. The latter
+    // is a per-device cursor — shipping it to another device of the same
+    // user would clobber that device's own cursor.
+    create_crdt_table(
+        &conn,
+        "items",
+        "name TEXT, updated_at_no_trigger TEXT, last_pull_cursor_no_sync TEXT",
+    );
+    insert_row_via_transformer(
+        &conn,
+        &hlc,
+        "INSERT INTO items (id, name, updated_at_no_trigger, last_pull_cursor_no_sync) \
+         VALUES ('i1', 'a', '2026-01-01', 'cursor-1')",
+    );
+
+    let changes = scan_table_for_local_changes(
+        &conn,
+        "items",
+        None,
+        &dev.to_string(),
+        ScanFilters::default(),
+    )
+    .unwrap();
+    let mut cols: Vec<&str> = changes.iter().map(|c| c.column_name.as_str()).collect();
+    cols.sort_unstable();
+    assert_eq!(
+        cols,
+        vec!["name", "updated_at_no_trigger"],
+        "`_no_sync` is withheld, `_no_trigger` ships: {changes:?}"
+    );
+}
+
 // -----------------------------------------------------------------------
 // after_hlc cursor
 // -----------------------------------------------------------------------

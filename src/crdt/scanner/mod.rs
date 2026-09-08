@@ -411,30 +411,30 @@ pub fn paginate_changes<T: Paginable>(changes: Vec<T>, page_budget: usize) -> (V
 
 /// Splits a table schema into PK columns and syncable data columns.
 ///
-/// Data columns exclude PKs and the crate's own three structural metadata
-/// columns ([`HLC_TIMESTAMP_COLUMN`], [`COLUMN_HLCS_COLUMN`],
-/// [`COLUMN_SIGS_COLUMN`]) — those carry the CRDT's own bookkeeping, so
-/// shipping them as data changes would be meaningless. Naming them here is
-/// the crate describing its own internals, not a consumer exception list.
+/// Data columns exclude three things:
 ///
-/// Everything else is emitted, **including `_no_trigger` columns**. The two
-/// suffixes govern different questions and must not be conflated:
+/// - PKs, which identify the row rather than carrying its state.
+/// - The crate's own three structural metadata columns
+///   ([`HLC_TIMESTAMP_COLUMN`], [`COLUMN_HLCS_COLUMN`],
+///   [`COLUMN_SIGS_COLUMN`]), withheld by explicit name — that is the
+///   crate describing its own internals, not a consumer exception list.
+///   See [`crate::crdt::columns`] for why they are not `_no_sync`-named.
+/// - Any column whose name ends in `_no_sync`: the consumer's "never ship
+///   this" rule, for state that must stay on this device.
 ///
-/// - `_no_trigger` decides what fires a trigger, i.e. what *drives* sync. A
-///   `_no_trigger` column has no entry in the per-column HLC map, so it
-///   never causes a row to be scanned — but when the row's tracked columns
-///   do sync, the column's current value rides along under the row-level
-///   HLC. That is the intended semantics, not a leak.
-/// - `_no_sync` decides what participates in sync at all, and is a
-///   *table*-level suffix (see [`crate::db::init`]). There is deliberately
-///   no column-level equivalent yet: a consumer that must keep a column off
-///   the wire filters it out of the returned changes.
+/// `_no_trigger` columns are **still emitted**. That suffix governs what
+/// fires a trigger, i.e. what *drives* sync, not what ships: such a column
+/// has no entry in the per-column HLC map so it never causes a row to be
+/// scanned, but once a tracked sibling does, its current value rides along
+/// under the row-level HLC. Both rules are defined together in
+/// [`crate::crdt::columns`]; do not collapse them.
 fn partition_columns(schema: &[ColumnInfo]) -> (Vec<&ColumnInfo>, Vec<&ColumnInfo>) {
     let pk_columns: Vec<&ColumnInfo> = schema.iter().filter(|c| c.is_pk).collect();
     let data_columns: Vec<&ColumnInfo> = schema
         .iter()
         .filter(|c| {
             !c.is_pk
+                && !c.name.ends_with("_no_sync")
                 && c.name != HLC_TIMESTAMP_COLUMN
                 && c.name != COLUMN_HLCS_COLUMN
                 && c.name != COLUMN_SIGS_COLUMN

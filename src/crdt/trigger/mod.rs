@@ -102,21 +102,25 @@ pub fn is_safe_identifier(name: &str) -> bool {
 /// The table must already carry the three CRDT metadata columns (see
 /// [`ensure_crdt_columns`]) and have at least one primary-key column.
 ///
-/// # Column skip rule (D-4, revised)
+/// # Column skip rules (D-4, revised)
 ///
-/// One rule: any column whose name ends in `_no_trigger` is skipped —
-/// sync-system bookkeeping and app-local metadata that must not participate
-/// in per-column HLC tracking (`updated_at_no_trigger`,
-/// `local_meta_no_trigger`, …). This is symmetric with the `_no_sync`
-/// suffix that marks whole tables non-syncing.
+/// Two suffixes, defined together in [`crate::crdt::columns`]:
 ///
-/// The three structural CRDT metadata columns ([`HLC_TIMESTAMP_COLUMN`],
-/// [`COLUMN_HLCS_COLUMN`], [`COLUMN_SIGS_COLUMN`]) all end in
-/// `_no_trigger` too, so the same rule catches them — no separate
-/// hardcoded exemption.
+/// - `_no_trigger` — sync-system bookkeeping and app-local metadata that
+///   must not participate in per-column HLC tracking
+///   (`updated_at_no_trigger`, `local_meta_no_trigger`, …). Such a column
+///   still ships; it just does not drive sync. The three structural CRDT
+///   metadata columns ([`HLC_TIMESTAMP_COLUMN`], [`COLUMN_HLCS_COLUMN`],
+///   [`COLUMN_SIGS_COLUMN`]) all end in `_no_trigger` too, so the same rule
+///   catches them — no separate hardcoded exemption.
+/// - `_no_sync` — never shipped, and therefore not tracked either: a column
+///   that cannot travel must not advance the row's CRDT bookkeeping, or a
+///   write to it would mark the row dirty and queue a sync round for a
+///   change that can never leave. `_no_sync` thus implies `_no_trigger`'s
+///   effect.
 ///
 /// Primary-key columns are also skipped. Consumers who want a column tracked
-/// simply do not name it with the `_no_trigger` suffix.
+/// simply do not name it with either suffix.
 ///
 /// The BEFORE-DELETE trigger records the delete as an event row in
 /// [`DELETED_ROWS_TABLE`] on every hard-delete; that table itself is exempt
@@ -151,12 +155,14 @@ pub fn setup_triggers_for_table(
         });
     }
 
-    // D-4 (revised): one rule — skip PKs and any column whose name ends in
-    // `_no_trigger`. The three structural CRDT metadata columns all end in
-    // `_no_trigger` too, so this catches them without a separate exemption.
+    // D-4 (revised): skip PKs, `_no_trigger` columns (the three structural
+    // CRDT metadata columns carry that suffix too, so this catches them
+    // without a separate exemption), and `_no_sync` columns — a column that
+    // never ships must not advance the row's bookkeeping either, or writing
+    // it would mark the row dirty for a change that can never travel.
     let cols_to_track: Vec<String> = columns
         .iter()
-        .filter(|c| !c.is_pk && !c.name.ends_with("_no_trigger"))
+        .filter(|c| !c.is_pk && !c.name.ends_with("_no_trigger") && !c.name.ends_with("_no_sync"))
         .map(|c| c.name.clone())
         .collect();
 
@@ -306,8 +312,8 @@ fn generate_update_trigger_sql(
     // D-4: constrain the trigger to only fire when at least one *tracked*
     // column is UPDATE'd. `AFTER UPDATE OF <cols>` is SQLite's built-in
     // column-scoped trigger form; an UPDATE that touches only skipped
-    // columns (`_no_trigger`-suffixed, structural metadata, or PKs) then
-    // does not fire the trigger at all.
+    // columns (`_no_trigger`- or `_no_sync`-suffixed, structural metadata,
+    // or PKs) then does not fire the trigger at all.
     //
     // Empty tracked list is degenerate — the trigger body is inert anyway
     // (the SELECT ... WHERE (0) guard) — so fall back to bare `AFTER UPDATE
