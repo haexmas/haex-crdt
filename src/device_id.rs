@@ -47,6 +47,7 @@ use crate::error::Result;
 ///   haex-vault and holzi) are directly supported: the crate does not
 ///   store or arbitrate the device UUID.
 pub trait DatabaseBootstrap: Send + Sync {
+    /// Performs consumer-owned initialization and returns this open's device UUID.
     fn bootstrap(&self, tx: &Transaction<'_>) -> Result<Uuid>;
 }
 
@@ -67,6 +68,7 @@ mod tests {
     use rusqlite::Connection;
     use std::sync::Arc;
 
+    /// Opens the in-memory database used by bootstrap contract tests.
     fn open_conn() -> Connection {
         Connection::open_in_memory().unwrap()
     }
