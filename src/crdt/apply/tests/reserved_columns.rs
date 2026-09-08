@@ -13,13 +13,27 @@ use serde_json::json;
 use super::{change, create_crdt_table, make_fixture};
 use crate::crdt::apply::apply_remote_changes;
 use crate::crdt::columns::{COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN, HLC_TIMESTAMP_COLUMN};
+use crate::crdt::hlc::HlcService;
 use crate::signature::NoopSignatureProvider;
 
 const HLC2: &str = "0000000000000002/abcdef0000000000000000000000";
 const HLC3: &str = "0000000000000003/abcdef0000000000000000000000";
-/// A far-future HLC an attacker would pick to freeze the row against every
-/// future legitimate write.
+/// Newer than every legitimate HLC in these tests, which is all they
+/// compare it against. Deliberately NOT out of uhlc's drift tolerance: the
+/// time part parses as decimal NTP64 units, so this is decades in the
+/// *past*, and `advance_past_remote` accepts it. See
+/// [`far_future_hlc`] for a genuinely out-of-tolerance value.
 const HLC_ATTACKER: &str = "9999999999999999/dead000000000000000000000000";
+
+/// An HLC an hour beyond the local clock — past uhlc's drift tolerance, so
+/// `advance_past_remote` refuses it. Derived from the live clock rather
+/// than hardcoded so the test cannot rot into tolerance.
+fn far_future_hlc(hlc: &HlcService) -> String {
+    let ts = hlc.new_timestamp().unwrap();
+    // NTP64 counts 2^32 units per second.
+    let future = ts.get_time().as_u64() + 3600 * (1u64 << 32);
+    format!("{future}/{}", ts.get_id())
+}
 
 fn row_hlc(conn: &rusqlite::Connection, id: &str) -> String {
     conn.query_row(
@@ -315,4 +329,87 @@ fn unknown_column_still_counts_as_unknown() {
 
     assert_eq!(report.skipped_unknown_column, 1);
     assert_eq!(report.skipped_no_sync_column, 0);
+}
+
+#[test]
+fn a_dropped_change_with_an_out_of_tolerance_hlc_does_not_fail_the_batch() {
+    let (mut conn, hlc, _dev) = make_fixture();
+    create_crdt_table(&conn, "items", "body TEXT");
+
+    // End-to-end anti-DoS: the clock advance must cover what apply
+    // accepted, not what it received. Advancing past the received maximum
+    // lets a peer attach an out-of-tolerance HLC to a change this guard
+    // drops and poison the whole call — the exact denial-of-service the
+    // skip-don't-reject rule exists to deny, reachable through the very
+    // changes we drop.
+    let poisoned = far_future_hlc(&hlc);
+    let report = apply_remote_changes(
+        &mut conn,
+        vec![
+            change("items", "r1", "body", HLC2, json!("hello")),
+            change(
+                "items",
+                "r1",
+                HLC_TIMESTAMP_COLUMN,
+                &poisoned,
+                json!("whatever"),
+            ),
+        ],
+        &hlc,
+        &NoopSignatureProvider,
+    )
+    .expect("a change apply dropped must not fail the batch");
+
+    assert_eq!(report.applied, 1);
+    assert_eq!(report.skipped_reserved_column, 1);
+    let body: String = conn
+        .query_row("SELECT body FROM items WHERE id = 'r1'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(body, "hello", "the sibling change must still land");
+    assert_eq!(
+        row_hlc(&conn, "r1"),
+        HLC2,
+        "the dropped change must leave no trace, in the row or in the clock"
+    );
+}
+
+#[test]
+fn remote_no_trigger_column_is_accepted() {
+    let (mut conn, hlc, _dev) = make_fixture();
+    create_crdt_table(&conn, "items", "body TEXT, updated_at_no_trigger TEXT");
+
+    // The "must accept" half of the mirror. `_no_trigger` governs what
+    // fires a trigger, `_no_sync` what participates in sync at all: the
+    // scanner ships `_no_trigger` columns under the row HLC, so apply must
+    // take them. Collapsing the guard into
+    // `ends_with("_no_sync") || ends_with("_no_trigger")` would break every
+    // consumer's bookkeeping sync with an otherwise green suite.
+    let report = apply_remote_changes(
+        &mut conn,
+        vec![
+            change("items", "r1", "body", HLC2, json!("hello")),
+            change(
+                "items",
+                "r1",
+                "updated_at_no_trigger",
+                HLC2,
+                json!("2026-01-01"),
+            ),
+        ],
+        &hlc,
+        &NoopSignatureProvider,
+    )
+    .unwrap();
+
+    let stored: String = conn
+        .query_row(
+            "SELECT updated_at_no_trigger FROM items WHERE id = 'r1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, "2026-01-01");
+    assert_eq!(report.applied, 2);
+    assert_eq!(report.skipped_no_sync_column, 0);
+    assert_eq!(report.skipped_reserved_column, 0);
 }

@@ -16,7 +16,7 @@
 //!         enable triggers
 //!         commit
 //!     }
-//!     hlc_service.advance_past_remote(max_hlc)
+//!     hlc_service.advance_past_remote(max_accepted_hlc)
 //! ```
 //!
 //! Every skip goes into an [`ApplyReport`] counter — no silent drops.
@@ -89,9 +89,13 @@ pub fn apply_remote_changes(
         .into_iter()
         .flat_map(|(_hlc, group)| group.into_iter())
         .collect();
-    let max_hlc: Option<String> = ordered.last().map(|c| c.hlc_timestamp.clone());
-
     let mut report = ApplyReport::default();
+    // The clock must cover what landed, not what arrived — a change apply
+    // dropped is not in local state. Advancing past the inbound maximum
+    // instead would let a peer attach an out-of-tolerance HLC to a change
+    // the write loop discards and fail the whole call, which is the
+    // denial-of-service the skip-don't-reject rule below exists to deny.
+    let mut max_accepted_hlc: Option<String> = None;
     with_fk_disabled(conn, |conn| -> std::result::Result<(), DatabaseError> {
         let tx = conn.transaction()?;
         toggle_triggers(&tx, "0")?;
@@ -100,7 +104,14 @@ pub fn apply_remote_changes(
 
         for ((_table, row_pks_str), row_changes) in group_row_changes_in_hlc_order(ordered.clone())
         {
-            apply_row(&tx, &row_pks_str, row_changes, &shadow, &mut report)?;
+            apply_row(
+                &tx,
+                &row_pks_str,
+                row_changes,
+                &shadow,
+                &mut report,
+                &mut max_accepted_hlc,
+            )?;
         }
 
         propagate_deleted_rows_to_target_tables(&tx, &inbound_delete_ids, &mut report)?;
@@ -109,7 +120,7 @@ pub fn apply_remote_changes(
         Ok(())
     })?;
 
-    if let Some(hlc) = max_hlc {
+    if let Some(hlc) = max_accepted_hlc {
         hlc_service
             .advance_past_remote(&hlc)
             .map_err(|e| DatabaseError::HlcError {
@@ -151,12 +162,15 @@ fn collect_inbound_delete_log_ids(changes: &[ColumnChange]) -> HashSet<String> {
     ids
 }
 
+/// Filter and apply one row's remote changes, folding the HLCs that reach
+/// local state into the batch's maximum accepted timestamp.
 fn apply_row(
     tx: &Transaction<'_>,
     row_pks_str: &str,
     row_changes: Vec<ColumnChange>,
     shadow: &crate::crdt::apply::delete_propagation::DeleteShadowMap,
     report: &mut ApplyReport,
+    max_accepted_hlc: &mut Option<String>,
 ) -> std::result::Result<(), DatabaseError> {
     let first = &row_changes[0];
     let table_name = first.table_name.clone();
@@ -224,6 +238,12 @@ fn apply_row(
             report.skipped_unknown_column += 1;
             continue;
         }
+        // Both guards below run AFTER the unknown-column check, and must:
+        // `expected_pks.contains` is only meaningful for a column that
+        // exists locally, and schema drift has to keep reporting as drift.
+        // The cost is that a reserved-looking name absent from the local
+        // table is counted as unknown rather than reserved.
+        //
         // Inbound mirror of the scanner's `partition_columns`: the set of
         // columns apply accepts from a peer is exactly the set the scanner
         // is willing to ship. That identity is the invariant — when the two
@@ -297,6 +317,24 @@ fn apply_row(
         if insert_suppressed_by_deletes(&row_pks, &max_hlc_for_row, candidates) {
             report.skipped_shadowed_by_delete += staged.len();
             return Ok(());
+        }
+    }
+
+    // Everything still staged here is about to be written, so this is the
+    // point where a remote HLC enters local state and the clock has to
+    // start covering it (see `HlcService::advance_past_remote`). Folding it
+    // in here rather than from the inbound batch is what keeps a change we
+    // dropped — unknown column, reserved name, LWW loser, delete-shadowed —
+    // from reaching the clock at all: it left no local state to protect,
+    // and if it was dropped for schema drift it will arrive again once the
+    // consumer installs the missing table or column.
+    for (_, _, hlc, _) in &staged {
+        let is_newer = match max_accepted_hlc.as_deref() {
+            Some(current) => hlc_is_newer(hlc, current),
+            None => true,
+        };
+        if is_newer {
+            *max_accepted_hlc = Some(hlc.clone());
         }
     }
 
