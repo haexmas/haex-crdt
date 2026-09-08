@@ -1,7 +1,7 @@
 //! Database configuration types (see plan §6).
 //!
 //! [`DatabaseConfig`] is the single input to [`super::Database::open`]. It ties
-//! together the four consumer-owned traits — `DeviceIdProvider`,
+//! together the four consumer-owned traits — `DatabaseBootstrap`,
 //! `SignatureProvider`, `MigrationSource`, and (implicitly, via
 //! `SqlCipherKey`) the encryption key — and the crate-owned parameters that
 //! affect open semantics (path, create-flag, trigger-schema version).
@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::device_id::DeviceIdProvider;
+use crate::device_id::DatabaseBootstrap;
 use crate::migration::MigrationSource;
 use crate::signature::SignatureProvider;
 
@@ -61,9 +61,12 @@ pub struct DatabaseConfig {
     /// missing files fail with `DatabaseError::ConnectionFailed` — matches
     /// the SQLCipher/rusqlite semantics of `OpenFlags::SQLITE_OPEN_CREATE`.
     pub create_if_missing: bool,
-    /// Supplies the UUID that scopes this logical replica's HLC state for an
-    /// open. See [`DeviceIdProvider`] for the stability contract.
-    pub device_id: Arc<dyn DeviceIdProvider>,
+    /// Consumer bootstrap hook. Runs after migrations, before HLC init, in a
+    /// transaction the crate commits on `Ok` or rolls back on `Err`. Returns
+    /// the UUID that scopes this logical replica's HLC state for this open,
+    /// and may write consumer-owned rows in the same atomic step. See
+    /// [`DatabaseBootstrap`] for the full contract.
+    pub bootstrap: Arc<dyn DatabaseBootstrap>,
     /// Provider called during the apply-pipeline preflight and (later) any
     /// local sign-on-write path a consumer builds on top. See
     /// [`SignatureProvider`] for the trust contract.
@@ -104,7 +107,7 @@ mod tests {
             path: PathBuf::from(":memory:"),
             key: SqlCipherKey::new("test"),
             create_if_missing: true,
-            device_id: Arc::new(StaticDeviceId(Uuid::new_v4())),
+            bootstrap: Arc::new(StaticDeviceId(Uuid::new_v4())),
             signature_provider: Arc::new(NoopSignatureProvider),
             migration_source: Arc::new(StaticMigrationSource(BTreeMap::new())),
             trigger_version: DEFAULT_TRIGGER_VERSION,
@@ -129,7 +132,7 @@ mod tests {
         // the manual Clone impl compiles + preserves the pointer identities.
         let c1 = dummy_config();
         let c2 = c1.clone();
-        assert!(Arc::ptr_eq(&c1.device_id, &c2.device_id));
+        assert!(Arc::ptr_eq(&c1.bootstrap, &c2.bootstrap));
         assert!(Arc::ptr_eq(&c1.signature_provider, &c2.signature_provider));
         assert!(Arc::ptr_eq(&c1.migration_source, &c2.migration_source));
     }

@@ -32,7 +32,7 @@ pub use sqlparser;
 /// Re-export used by [`WriteContext`] consumers to inspect transaction HLCs.
 pub use uhlc;
 
-pub use device_id::{DeviceIdProvider, StaticDeviceId};
+pub use device_id::{DatabaseBootstrap, StaticDeviceId};
 pub use error::{Error, MigrationJournal, Result};
 pub use migration::{MigrationName, MigrationSource, StaticMigrationSource};
 pub use signature::{AuthorId, NoopSignatureProvider, RemoteChanges, SignatureProvider};

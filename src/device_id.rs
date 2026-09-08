@@ -1,33 +1,62 @@
+use rusqlite::Transaction;
 use uuid::Uuid;
 
 use crate::error::Result;
 
-/// Supplies the device UUID used as this open's HLC node id.
+/// Runs the consumer's bootstrap phase for one `Database::open` and returns
+/// the device UUID that will be used as this open's HLC node id.
 ///
-/// # Contract
+/// # When it runs
 ///
-/// - The returned `Uuid` scopes HLC causality for the current `Database::open`
-///   call and every operation on the resulting handle. `uhlc::ID` uniqueness
-///   invariants apply for the lifetime of that handle.
+/// [`crate::Database::open`] calls [`bootstrap`](Self::bootstrap) **after**
+/// crate-owned and consumer-owned migrations have been applied, and
+/// **before** HLC initialization or CRDT trigger installation. It hands the
+/// implementation a fresh transaction; the crate commits it on `Ok`, or
+/// rolls it back on `Err`. Anything the hook writes lands in the same
+/// atomic step that decides the device UUID.
+///
+/// # What the hook may do
+///
+/// - Read from the consumer's own tables (freshly migrated).
+/// - Insert or update consumer-owned rows — for example, look up a
+///   per-installation device row in a consumer registry table, or insert a
+///   fresh one on first open.
+/// - Perform side-effecting I/O outside the DB (read a file that pins an
+///   installation-scoped UUID, mint one, and fsync it). The crate does not
+///   observe that I/O; it only observes the returned UUID and any writes
+///   committed inside the transaction.
+///
+/// # What the hook MUST NOT do
+///
+/// - Commit or roll back `tx`. Ownership stays with `Database::open`.
+/// - Touch CRDT bookkeeping tables (`haex_crdt_*_no_sync`) or CRDT-tracked
+///   tables that carry `_no_trigger` metadata columns; those are populated
+///   only after HLC and trigger initialization run. The bootstrap phase is
+///   for unsigned, non-CRDT setup only.
+/// - Rely on `crate::current_hlc()` or any HLC-derived value; HLC is not
+///   initialized yet.
+///
+/// # Invariants
+///
 /// - Across opens of the *same* DB file by the *same* logical replica, the
-///   consumer MUST return the same `Uuid` — otherwise HLC causality on that
-///   replica is broken.
-/// - Consumers that legitimately serve different UUIDs to the same DB file
-///   for different logical replicas (e.g. a per-installation UUID lookup, as
-///   in haex-vault) are directly supported: `Database::open` no longer stores
-///   or arbitrates the device UUID and simply uses what the provider returns.
-///   Enforcing uniqueness per (DB file × replica) is the consumer's job.
-pub trait DeviceIdProvider: Send + Sync {
-    fn device_id(&self) -> Result<Uuid>;
+///   implementation MUST return the same `Uuid` — otherwise HLC causality
+///   on that replica is broken.
+/// - Enforcing uniqueness per (DB file × replica) is the consumer's job.
+///   Consumers that legitimately serve different UUIDs to the same DB file
+///   for different logical replicas (per-installation UUID lookup, as in
+///   haex-vault and holzi) are directly supported: the crate does not
+///   store or arbitrate the device UUID.
+pub trait DatabaseBootstrap: Send + Sync {
+    fn bootstrap(&self, tx: &Transaction<'_>) -> Result<Uuid>;
 }
 
-/// Test / simple-consumer implementation. Consumers with real device-id
-/// persistence (a keystore lookup, a Tauri store lookup, etc.) implement the
-/// trait themselves.
+/// Test / simple-consumer implementation. Returns a fixed UUID and does not
+/// touch the transaction. Consumers with real per-installation lookup
+/// (haex-vault, holzi) implement the trait themselves.
 pub struct StaticDeviceId(pub Uuid);
 
-impl DeviceIdProvider for StaticDeviceId {
-    fn device_id(&self) -> Result<Uuid> {
+impl DatabaseBootstrap for StaticDeviceId {
+    fn bootstrap(&self, _tx: &Transaction<'_>) -> Result<Uuid> {
         Ok(self.0)
     }
 }
@@ -35,33 +64,42 @@ impl DeviceIdProvider for StaticDeviceId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::Connection;
     use std::sync::Arc;
+
+    fn open_conn() -> Connection {
+        Connection::open_in_memory().unwrap()
+    }
 
     #[test]
     fn static_device_id_returns_wrapped_uuid() {
         let uuid = Uuid::new_v4();
-        let provider = StaticDeviceId(uuid);
-        assert_eq!(provider.device_id().unwrap(), uuid);
+        let hook = StaticDeviceId(uuid);
+        let mut conn = open_conn();
+        let tx = conn.transaction().unwrap();
+        assert_eq!(hook.bootstrap(&tx).unwrap(), uuid);
     }
 
     #[test]
     fn static_device_id_is_stable_across_multiple_calls() {
-        // The trait contract forbids returning a fresh UUID per call.
         let uuid = Uuid::new_v4();
-        let provider = StaticDeviceId(uuid);
-        let first = provider.device_id().unwrap();
-        let second = provider.device_id().unwrap();
-        let third = provider.device_id().unwrap();
-        assert_eq!(first, second);
-        assert_eq!(second, third);
+        let hook = StaticDeviceId(uuid);
+        let mut conn = open_conn();
+        for _ in 0..3 {
+            let tx = conn.transaction().unwrap();
+            assert_eq!(hook.bootstrap(&tx).unwrap(), uuid);
+            tx.commit().unwrap();
+        }
     }
 
     #[test]
-    fn device_id_provider_is_object_safe_via_dyn_dispatch() {
+    fn database_bootstrap_is_object_safe_via_dyn_dispatch() {
         // Ensures the trait can be stored behind Arc<dyn ...> as
-        // `DatabaseConfig::device_id` requires (plan §6).
+        // `DatabaseConfig::bootstrap` requires.
         let uuid = Uuid::new_v4();
-        let provider: Arc<dyn DeviceIdProvider> = Arc::new(StaticDeviceId(uuid));
-        assert_eq!(provider.device_id().unwrap(), uuid);
+        let hook: Arc<dyn DatabaseBootstrap> = Arc::new(StaticDeviceId(uuid));
+        let mut conn = open_conn();
+        let tx = conn.transaction().unwrap();
+        assert_eq!(hook.bootstrap(&tx).unwrap(), uuid);
     }
 }

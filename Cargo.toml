@@ -1,6 +1,6 @@
 [package]
 name = "haex-crdt"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "SQLite + SQLCipher storage with column-level LWW CRDT sync (uhlc-based HLC). Extracted from haex-vault."
 authors = ["Haex"]

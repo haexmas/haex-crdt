@@ -1,7 +1,7 @@
 //! End-to-end acceptance test per extraction plan §8.
 //!
 //! Opens **two independent [`Database`]s** on **two separate SQLCipher files**
-//! in one `tempdir`, each with its own durable `DeviceIdProvider`, and walks
+//! in one `tempdir`, each with its own durable `DatabaseBootstrap`, and walks
 //! through the sequence the plan defines:
 //!
 //! - (a) `Database::open` succeeds on both fresh files
@@ -36,7 +36,7 @@ use std::sync::Arc;
 use haex_crdt::crdt::columns::HLC_TIMESTAMP_COLUMN;
 use haex_crdt::rusqlite::params;
 use haex_crdt::{
-    device_uuid_to_hlc_node, hlc_is_from_node, Database, DatabaseConfig, DeviceIdProvider,
+    device_uuid_to_hlc_node, hlc_is_from_node, Database, DatabaseConfig, DatabaseBootstrap,
     InstallCrdtOptions, MigrationName, NoopSignatureProvider, ScanFilters, SqlCipherKey,
     StaticDeviceId, StaticMigrationSource, DEFAULT_TRIGGER_VERSION,
 };
@@ -60,14 +60,14 @@ fn migration_source() -> Arc<StaticMigrationSource> {
 /// Builds the database configuration shared by both acceptance-test stores.
 fn config(
     path: PathBuf,
-    device_id: Arc<dyn DeviceIdProvider>,
+    bootstrap: Arc<dyn DatabaseBootstrap>,
     source: Arc<dyn haex_crdt::MigrationSource>,
 ) -> DatabaseConfig {
     DatabaseConfig {
         path,
         key: SqlCipherKey::new("acceptance-test-key"),
         create_if_missing: true,
-        device_id,
+        bootstrap,
         signature_provider: Arc::new(NoopSignatureProvider),
         migration_source: source,
         trigger_version: DEFAULT_TRIGGER_VERSION,
@@ -101,8 +101,8 @@ fn two_devices_sync_backfilled_and_fresh_writes_end_to_end() {
     assert_ne!(device_a, device_b);
     let source = migration_source();
 
-    let provider_a: Arc<dyn DeviceIdProvider> = Arc::new(StaticDeviceId(device_a));
-    let provider_b: Arc<dyn DeviceIdProvider> = Arc::new(StaticDeviceId(device_b));
+    let provider_a: Arc<dyn DatabaseBootstrap> = Arc::new(StaticDeviceId(device_a));
+    let provider_b: Arc<dyn DatabaseBootstrap> = Arc::new(StaticDeviceId(device_b));
 
     // ---------- (a) open succeeds on both --------------------------------
 
@@ -283,7 +283,7 @@ fn two_devices_sync_backfilled_and_fresh_writes_end_to_end() {
     // The crate no longer arbitrates device IDs on the same DB file. A
     // reopen with a different provider is accepted and returns exactly
     // that provider's UUID. Enforcing uniqueness per (DB × replica) is
-    // the consumer's job — see the DeviceIdProvider contract docs.
+    // the consumer's job — see the DatabaseBootstrap contract docs.
     drop(db_a);
     drop(db_b);
 

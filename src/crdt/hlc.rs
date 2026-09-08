@@ -2,12 +2,11 @@
 //! persists the latest timestamp in `haex_crdt_configs_no_sync`, and exposes
 //! helpers used by the scanner and apply pipeline.
 //!
-//! The HLC node UUID comes from the consumer-supplied [`DeviceIdProvider`].
-//! Consumers may use different UUIDs for different logical replicas opening
-//! the same DB file; the provider remains responsible for returning a stable
-//! UUID when the same replica reopens it.
+//! The HLC node UUID is supplied verbatim by the caller (in production, the
+//! consumer's [`crate::DatabaseBootstrap`] hook resolves it before
+//! `Database::open` calls into this module). The HLC service itself does
+//! not fetch or validate the UUID — one open, one UUID.
 
-use crate::device_id::DeviceIdProvider;
 use crate::table_names::TABLE_CRDT_CONFIGS;
 use rusqlite::{params, Connection, Transaction};
 use std::{
@@ -197,9 +196,9 @@ impl HlcService {
     pub fn initialize_in_place(
         &self,
         conn: &Connection,
-        device_id: &dyn DeviceIdProvider,
+        device_uuid: Uuid,
     ) -> Result<(), HlcError> {
-        let hlc = Self::build_hlc_from_db(conn, device_id)?;
+        let hlc = Self::build_hlc_from_db(conn, device_uuid)?;
 
         let mut slot = self.hlc.lock().map_err(|_| HlcError::MutexPoisoned)?;
         *slot = Some(hlc);
@@ -207,32 +206,21 @@ impl HlcService {
     }
 
     /// Factory: create and initialize a fresh HLC service from an already
-    /// open DB connection and a device-id provider. Preferred entry point
-    /// for consumers that don't need to reuse an existing `HlcService`
-    /// slot.
-    pub fn try_initialize(
-        conn: &Connection,
-        device_id: &dyn DeviceIdProvider,
-    ) -> Result<Self, HlcError> {
-        let hlc = Self::build_hlc_from_db(conn, device_id)?;
+    /// open DB connection and a device UUID. Preferred entry point for
+    /// consumers that don't need to reuse an existing `HlcService` slot.
+    pub fn try_initialize(conn: &Connection, device_uuid: Uuid) -> Result<Self, HlcError> {
+        let hlc = Self::build_hlc_from_db(conn, device_uuid)?;
 
         Ok(HlcService {
             hlc: Arc::new(Mutex::new(Some(hlc))),
         })
     }
 
-    /// Build an HLC for the provider's logical replica and fold in the latest
+    /// Build an HLC for the given device UUID and fold in the latest
     /// timestamp persisted in this DB, so a restart cannot hand out timestamps
     /// already used in this file. Distinct from the module-level [`build_hlc`],
     /// which owns only the `uhlc` configuration.
-    fn build_hlc_from_db(
-        conn: &Connection,
-        device_id: &dyn DeviceIdProvider,
-    ) -> Result<HLC, HlcError> {
-        let uuid = device_id
-            .device_id()
-            .map_err(|e| HlcError::DeviceStore(e.to_string()))?;
-
+    fn build_hlc_from_db(conn: &Connection, uuid: Uuid) -> Result<HLC, HlcError> {
         let node_id = ID::try_from(*uuid.as_bytes()).map_err(|e| {
             HlcError::ParseNodeId(format!("Invalid node ID format from device store: {e:?}"))
         })?;

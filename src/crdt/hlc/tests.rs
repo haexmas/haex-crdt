@@ -5,7 +5,6 @@
 //! can never pin a drift tolerance other than [`super::MAX_REMOTE_HLC_DRIFT`].
 
 use super::*;
-use crate::device_id::StaticDeviceId;
 use rusqlite::Connection;
 use std::str::FromStr;
 use uhlc::NTP64;
@@ -131,8 +130,7 @@ fn try_initialize_from_provider_reads_persisted_timestamp() {
     }
 
     let uuid = Uuid::from_bytes([7u8; 16]);
-    let provider = StaticDeviceId(uuid);
-    let svc = HlcService::try_initialize(&conn, &provider).expect("init");
+    let svc = HlcService::try_initialize(&conn, uuid).expect("init");
     let next = svc.new_timestamp().expect("timestamp");
 
     assert!(
@@ -285,8 +283,7 @@ fn new_with_uuid_carries_the_crate_drift_tolerance() {
 fn try_initialize_carries_the_crate_drift_tolerance() {
     let conn = Connection::open_in_memory().expect("open");
     fresh_configs_table(&conn);
-    let provider = StaticDeviceId(Uuid::from_bytes([12u8; 16]));
-    let svc = HlcService::try_initialize(&conn, &provider).expect("init");
+    let svc = HlcService::try_initialize(&conn, Uuid::from_bytes([12u8; 16])).expect("init");
 
     svc.advance_past_remote(&hlc_ahead_of_now(&svc, MAX_REMOTE_HLC_DRIFT - MARGIN))
         .expect("an hour inside the tolerance must be accepted");
