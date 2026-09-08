@@ -143,10 +143,10 @@ pub struct ScanFilters<'a> {
     /// cursor via `AND`.
     ///
     /// Any column the table actually has is a legal target — including a
-    /// PK, a `_no_trigger` column, and a CRDT metadata column. Which
-    /// columns may be *filtered on* is deliberately independent of which
-    /// ones get emitted, so a consumer can scope a scan by bookkeeping
-    /// that is itself opted out of change tracking.
+    /// PK, a `_no_sync` column, and a CRDT metadata column. Which columns
+    /// may be *filtered on* is deliberately independent of which ones get
+    /// emitted, so a consumer can scope a scan by bookkeeping that never
+    /// travels.
     ///
     /// This cannot be a post-filter on the returned changes: if a row's
     /// filter-column HLC is at or below the cursor, no change is emitted
@@ -174,10 +174,10 @@ pub struct ScanFilters<'a> {
 /// Reads per-column changes since `after_hlc` from `table_name`, returning
 /// one [`ColumnChange`] per (row, changed column) pair.
 ///
-/// Primary-key columns and the crate's three structural metadata columns
-/// are never emitted. Every other column is, `_no_trigger` ones included —
-/// that suffix governs what fires a trigger, not what ships. See
-/// [`partition_columns`] for why the two are distinct.
+/// Primary-key columns and `_no_sync` columns are never emitted; the
+/// crate's three structural metadata columns carry that suffix, so the same
+/// rule covers them. Every other column is emitted. See
+/// [`partition_columns`].
 ///
 /// # Filters
 ///
@@ -210,9 +210,9 @@ pub fn scan_table_for_local_changes(
     // no schema, and the name is interpolated into the WHERE clause below.
     //
     // Schema membership is NOT this gate: SQLite happily reports a column
-    // named `bucket" OR 1=1 OR "bucket_no_trigger`, and a `_no_trigger`
-    // name reaches this filter without passing any other check in the crate
-    // — `partition_columns` keeps it out of the SELECT list, and the trigger
+    // named `bucket" OR 1=1 OR "bucket_no_sync`, and a `_no_sync` name
+    // reaches this filter without passing any other check in the crate —
+    // `partition_columns` keeps it out of the SELECT list, and the trigger
     // installer strips the suffix before its own identifier check.
     // Interpolated, such a name turns the restriction into a tautology and
     // ships every row for a value that matches none.
@@ -411,23 +411,19 @@ pub fn paginate_changes<T: Paginable>(changes: Vec<T>, page_budget: usize) -> (V
 
 /// Splits a table schema into PK columns and syncable data columns.
 ///
-/// Data columns exclude three things:
+/// Data columns exclude two things:
 ///
 /// - PKs, which identify the row rather than carrying its state.
-/// - The crate's own three structural metadata columns
-///   ([`HLC_TIMESTAMP_COLUMN`], [`COLUMN_HLCS_COLUMN`],
-///   [`COLUMN_SIGS_COLUMN`]), withheld by explicit name — that is the
-///   crate describing its own internals, not a consumer exception list.
-///   See [`crate::crdt::columns`] for why they are not `_no_sync`-named.
-/// - Any column whose name ends in `_no_sync`: the consumer's "never ship
-///   this" rule, for state that must stay on this device.
+/// - Any column whose name ends in `_no_sync`: the single rule for "not
+///   part of CRDT sync at all", covering both consumer state that must
+///   stay on this device and the crate's own three structural metadata
+///   columns ([`HLC_TIMESTAMP_COLUMN`], [`COLUMN_HLCS_COLUMN`],
+///   [`COLUMN_SIGS_COLUMN`]), whose names carry the suffix. No exception
+///   list — see [`crate::crdt::columns`].
 ///
-/// `_no_trigger` columns are **still emitted**. That suffix governs what
-/// fires a trigger, i.e. what *drives* sync, not what ships: such a column
-/// has no entry in the per-column HLC map so it never causes a row to be
-/// scanned, but once a tracked sibling does, its current value rides along
-/// under the row-level HLC. Both rules are defined together in
-/// [`crate::crdt::columns`]; do not collapse them.
+/// This is the same predicate the trigger installer applies to pick its
+/// tracked columns, so what fires a trigger and what ships cannot drift
+/// apart.
 ///
 /// [`crate::crdt::apply::apply_remote_changes`] refuses this same set on
 /// the way in. The two sets must stay identical: if apply accepted what
@@ -437,13 +433,7 @@ fn partition_columns(schema: &[ColumnInfo]) -> (Vec<&ColumnInfo>, Vec<&ColumnInf
     let pk_columns: Vec<&ColumnInfo> = schema.iter().filter(|c| c.is_pk).collect();
     let data_columns: Vec<&ColumnInfo> = schema
         .iter()
-        .filter(|c| {
-            !c.is_pk
-                && !c.name.ends_with("_no_sync")
-                && c.name != HLC_TIMESTAMP_COLUMN
-                && c.name != COLUMN_HLCS_COLUMN
-                && c.name != COLUMN_SIGS_COLUMN
-        })
+        .filter(|c| !c.is_pk && !c.name.ends_with("_no_sync"))
         .collect();
     (pk_columns, data_columns)
 }

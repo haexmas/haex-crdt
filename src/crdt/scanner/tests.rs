@@ -261,22 +261,24 @@ fn scan_excludes_pks_and_crdt_meta_from_emitted_columns() {
 }
 
 #[test]
-fn scan_emits_no_trigger_columns_under_the_row_hlc() {
+fn scan_emits_a_column_with_no_per_column_hlc_under_the_row_hlc() {
     let (conn, hlc, dev) = make_fixture();
-    // A consumer bookkeeping column opted out of *change tracking* by the
-    // `_no_trigger` suffix. The installer never tracks it, so it has no
-    // entry in the per-column HLC map and can never itself cause the row
-    // to be scanned — but once a tracked sibling does, the per-column loop
-    // falls back to the row-level HLC and the column's current value rides
-    // along. `_no_trigger` governs what fires a trigger, not what ships;
-    // keeping a column off the wire is `_no_sync`'s job, and that suffix
-    // is table-level.
-    create_crdt_table(&conn, "items", "name TEXT, updated_at_no_trigger TEXT");
+    // A column with no entry in the per-column HLC map still ships: the
+    // per-column loop falls back to the row-level HLC, so the column's
+    // current value rides along whenever a tracked sibling causes the row
+    // to be scanned. Reproduced the way it happens in practice — a column
+    // added after the triggers were installed, so no trigger writes an
+    // entry for it.
+    create_crdt_table(&conn, "items", "name TEXT");
     insert_row_via_transformer(
         &conn,
         &hlc,
-        "INSERT INTO items (id, name, updated_at_no_trigger) VALUES ('i1', 'a', '2026-01-01')",
+        "INSERT INTO items (id, name) VALUES ('i1', 'a')",
     );
+    conn.execute("ALTER TABLE items ADD COLUMN late TEXT", [])
+        .unwrap();
+    conn.execute("UPDATE items SET late = '2026-01-01'", [])
+        .unwrap();
 
     let changes = scan_table_for_local_changes(
         &conn,
@@ -290,40 +292,34 @@ fn scan_emits_no_trigger_columns_under_the_row_hlc() {
     cols.sort_unstable();
     assert_eq!(
         cols,
-        vec!["name", "updated_at_no_trigger"],
-        "a `_no_trigger` column still ships under the row HLC; only the \
-         crate's own metadata columns are withheld"
+        vec!["late", "name"],
+        "an untracked column ships under the row HLC; only PKs and \
+         `_no_sync` columns are withheld"
     );
-    let meta = changes
+    let late = changes
         .iter()
-        .find(|c| c.column_name == "updated_at_no_trigger")
+        .find(|c| c.column_name == "late")
         .expect("the untracked column must be present");
     assert_eq!(
-        meta.value,
+        late.value,
         serde_json::json!("2026-01-01"),
         "it ships its current value, not a tracked history"
     );
 }
 
 #[test]
-fn scan_skips_no_sync_columns_but_not_no_trigger_ones() {
+fn scan_skips_no_sync_columns() {
     let (conn, hlc, dev) = make_fixture();
-    // One table carrying both suffixes, because they answer different
-    // questions and a future change must not collapse them again:
-    // `updated_at_no_trigger` drives no sync but still ships under the row
-    // HLC, while `last_pull_cursor_no_sync` never ships at all. The latter
-    // is a per-device cursor — shipping it to another device of the same
-    // user would clobber that device's own cursor.
-    create_crdt_table(
-        &conn,
-        "items",
-        "name TEXT, updated_at_no_trigger TEXT, last_pull_cursor_no_sync TEXT",
-    );
+    // `last_pull_cursor_no_sync` never ships: it is a per-device cursor,
+    // and shipping it to another device of the same user would clobber that
+    // device's own cursor. Its plain sibling `name` ships, so this pins the
+    // suffix rule rather than "the scanner emitted nothing".
+    create_crdt_table(&conn, "items", "name TEXT, last_pull_cursor_no_sync TEXT");
     insert_row_via_transformer(
         &conn,
         &hlc,
-        "INSERT INTO items (id, name, updated_at_no_trigger, last_pull_cursor_no_sync) \
-         VALUES ('i1', 'a', '2026-01-01', 'cursor-1')",
+        "INSERT INTO items (id, name, last_pull_cursor_no_sync) \
+         VALUES ('i1', 'a', 'cursor-1')",
     );
 
     let changes = scan_table_for_local_changes(
@@ -334,12 +330,11 @@ fn scan_skips_no_sync_columns_but_not_no_trigger_ones() {
         ScanFilters::default(),
     )
     .unwrap();
-    let mut cols: Vec<&str> = changes.iter().map(|c| c.column_name.as_str()).collect();
-    cols.sort_unstable();
+    let cols: Vec<&str> = changes.iter().map(|c| c.column_name.as_str()).collect();
     assert_eq!(
         cols,
-        vec!["name", "updated_at_no_trigger"],
-        "`_no_sync` is withheld, `_no_trigger` ships: {changes:?}"
+        vec!["name"],
+        "`_no_sync` is withheld, a plain column ships: {changes:?}"
     );
 }
 

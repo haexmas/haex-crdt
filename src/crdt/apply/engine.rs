@@ -246,10 +246,14 @@ fn apply_row(
         // worse than the single write it prevents. Skipping degrades to
         // "that column never travels", which is what the rule promises
         // anyway, and the counters keep a broken peer diagnosable.
-        if change.column_name.ends_with("_no_sync") {
-            report.skipped_no_sync_column += 1;
-            continue;
-        }
+        //
+        // Reserved goes FIRST, and the order is load-bearing: the three
+        // metadata columns end in `_no_sync` too, so checking the suffix
+        // first would swallow them into `skipped_no_sync_column` and lose
+        // the diagnostic split. The two counters mean different things — a
+        // `_no_sync` column suggests a misconfigured or stale peer, a
+        // reserved one a badly broken or hostile peer.
+        //
         // Columns whose value the crate itself owns. Load-bearing, not
         // cosmetic: `write_insert` pushes the staged remote columns BEFORE
         // the crate's own, and SQLite takes the FIRST value for a column
@@ -264,6 +268,10 @@ fn apply_row(
             || expected_pks.contains(change.column_name.as_str())
         {
             report.skipped_reserved_column += 1;
+            continue;
+        }
+        if change.column_name.ends_with("_no_sync") {
+            report.skipped_no_sync_column += 1;
             continue;
         }
         let current_col_hlc = column_hlcs

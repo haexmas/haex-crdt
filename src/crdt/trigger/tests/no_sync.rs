@@ -1,12 +1,13 @@
-//! The column-level `_no_sync` rule: a column that never ships must not be
-//! tracked either. Kept in its own file because `tests.rs` is already well
-//! past the repo's file-size cap.
+//! The column-level `_no_sync` rule on a consumer column: a column that
+//! never ships must not be tracked either. Kept in its own file because
+//! `tests.rs` is already well past the repo's file-size cap.
 
 use super::*;
 
-/// Fixture carrying one tracked column and one of each suffix, so the two
-/// rules are pinned against each other rather than one at a time.
-fn setup_both_suffixes() -> Connection {
+/// Fixture carrying two plain columns and one `_no_sync` column, so the
+/// rule is pinned as "skip exactly the suffixed one" rather than "skip
+/// something".
+fn setup_no_sync_column() -> Connection {
     let conn = Connection::open_in_memory().expect("open in-memory db");
     register_test_udfs(&conn);
     setup_crdt_bookkeeping(&conn);
@@ -14,7 +15,7 @@ fn setup_both_suffixes() -> Connection {
         "CREATE TABLE items (
              id TEXT PRIMARY KEY NOT NULL,
              value TEXT,
-             local_meta_no_trigger TEXT,
+             local_meta TEXT,
              last_pull_cursor_no_sync TEXT,
              {HLC_TIMESTAMP_COLUMN} TEXT,
              {COLUMN_HLCS_COLUMN} TEXT NOT NULL DEFAULT '{{}}',
@@ -30,20 +31,21 @@ fn setup_both_suffixes() -> Connection {
 
 #[test]
 fn no_sync_suffixed_column_is_not_tracked() {
-    let conn = setup_both_suffixes();
+    let conn = setup_no_sync_column();
     let tracked = tracked_columns_of(&update_trigger_ddl(&conn, "items"));
     // A column that can never ship must not advance the row's CRDT
-    // bookkeeping either, so `_no_sync` implies `_no_trigger`'s effect.
+    // bookkeeping either — a write to it would mark the row dirty and queue
+    // a sync round for a change that can never leave.
     assert_eq!(
         tracked,
-        vec!["\"value\"".to_string()],
-        "only the plain column may be tracked"
+        vec!["\"value\"".to_string(), "\"local_meta\"".to_string()],
+        "only the plain columns may be tracked"
     );
 }
 
 #[test]
 fn update_of_no_sync_suffixed_column_does_not_mark_dirty() {
-    let conn = setup_both_suffixes();
+    let conn = setup_no_sync_column();
     conn.execute(
         &format!(
             "INSERT INTO items (id, value, last_pull_cursor_no_sync, {HLC_TIMESTAMP_COLUMN})

@@ -102,25 +102,22 @@ pub fn is_safe_identifier(name: &str) -> bool {
 /// The table must already carry the three CRDT metadata columns (see
 /// [`ensure_crdt_columns`]) and have at least one primary-key column.
 ///
-/// # Column skip rules (D-4, revised)
+/// # Column skip rule (D-4, revised)
 ///
-/// Two suffixes, defined together in [`crate::crdt::columns`]:
+/// One suffix, defined in [`crate::crdt::columns`]: `_no_sync` — never
+/// shipped, and therefore not tracked either. A column that cannot travel
+/// must not advance the row's CRDT bookkeeping, or a write to it would mark
+/// the row dirty and queue a sync round for a change that can never leave.
+/// Consumers who want a column tracked simply do not name it with the
+/// suffix.
 ///
-/// - `_no_trigger` — sync-system bookkeeping and app-local metadata that
-///   must not participate in per-column HLC tracking
-///   (`updated_at_no_trigger`, `local_meta_no_trigger`, …). Such a column
-///   still ships; it just does not drive sync. The three structural CRDT
-///   metadata columns ([`HLC_TIMESTAMP_COLUMN`], [`COLUMN_HLCS_COLUMN`],
-///   [`COLUMN_SIGS_COLUMN`]) all end in `_no_trigger` too, so the same rule
-///   catches them — no separate hardcoded exemption.
-/// - `_no_sync` — never shipped, and therefore not tracked either: a column
-///   that cannot travel must not advance the row's CRDT bookkeeping, or a
-///   write to it would mark the row dirty and queue a sync round for a
-///   change that can never leave. `_no_sync` thus implies `_no_trigger`'s
-///   effect.
+/// The three structural CRDT metadata columns ([`HLC_TIMESTAMP_COLUMN`],
+/// [`COLUMN_HLCS_COLUMN`], [`COLUMN_SIGS_COLUMN`]) carry the suffix too, so
+/// the same rule catches them — no hardcoded exemption here, and none in
+/// [`crate::crdt::scanner::scan_table_for_local_changes`] either, which
+/// applies the identical predicate to decide what ships.
 ///
-/// Primary-key columns are also skipped. Consumers who want a column tracked
-/// simply do not name it with either suffix.
+/// Primary-key columns are also skipped.
 ///
 /// The BEFORE-DELETE trigger records the delete as an event row in
 /// [`DELETED_ROWS_TABLE`] on every hard-delete; that table itself is exempt
@@ -155,14 +152,16 @@ pub fn setup_triggers_for_table(
         });
     }
 
-    // D-4 (revised): skip PKs, `_no_trigger` columns (the three structural
-    // CRDT metadata columns carry that suffix too, so this catches them
-    // without a separate exemption), and `_no_sync` columns — a column that
-    // never ships must not advance the row's bookkeeping either, or writing
-    // it would mark the row dirty for a change that can never travel.
+    // D-4 (revised): skip PKs and `_no_sync` columns — a column that never
+    // ships must not advance the row's bookkeeping either, or writing it
+    // would mark the row dirty for a change that can never travel. The three
+    // structural CRDT metadata columns carry the suffix, so this catches
+    // them without a separate exemption. Same predicate as the scanner's
+    // `partition_columns`, deliberately: what fires a trigger and what ships
+    // are now one question.
     let cols_to_track: Vec<String> = columns
         .iter()
-        .filter(|c| !c.is_pk && !c.name.ends_with("_no_trigger") && !c.name.ends_with("_no_sync"))
+        .filter(|c| !c.is_pk && !c.name.ends_with("_no_sync"))
         .map(|c| c.name.clone())
         .collect();
 
@@ -312,8 +311,8 @@ fn generate_update_trigger_sql(
     // D-4: constrain the trigger to only fire when at least one *tracked*
     // column is UPDATE'd. `AFTER UPDATE OF <cols>` is SQLite's built-in
     // column-scoped trigger form; an UPDATE that touches only skipped
-    // columns (`_no_trigger`- or `_no_sync`-suffixed, structural metadata,
-    // or PKs) then does not fire the trigger at all.
+    // columns (`_no_sync`-suffixed, structural metadata, or PKs) then does
+    // not fire the trigger at all.
     //
     // Empty tracked list is degenerate — the trigger body is inert anyway
     // (the SELECT ... WHERE (0) guard) — so fall back to bare `AFTER UPDATE

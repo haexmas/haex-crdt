@@ -146,13 +146,13 @@ impl InsertTransformer {
     }
 
     /// Appends the two metadata assignments to the DO UPDATE SET clause:
-    /// `haex_hlc_no_trigger = '<ts>'` and
-    /// `haex_column_hlcs_no_trigger = json_set(<column>, '$.<col1>', '<ts>', ...)`
+    /// `haex_hlc_no_sync = '<ts>'` and
+    /// `haex_column_hlcs_no_sync = json_set(<column>, '$.<col1>', '<ts>', ...)`
     /// so a conflict-resolution UPDATE also carries fresh HLC metadata and
     /// remains LWW-observable to peers even when the AFTER-UPDATE trigger
     /// is disabled (as it is on the apply path).
     ///
-    /// Signatures (`haex_column_sigs_no_trigger`) stay untouched — those
+    /// Signatures (`haex_column_sigs_no_sync`) stay untouched — those
     /// are the `SignatureProvider`'s business and get populated by the
     /// crate's post-write hook.
     fn augment_do_update(&self, do_update: &mut DoUpdate, timestamp: &Timestamp) {
@@ -170,14 +170,14 @@ impl InsertTransformer {
             .filter(|c| !self.is_owned_metadata_column(c))
             .collect();
 
-        // haex_hlc_no_trigger = '<ts>'
+        // haex_hlc_no_sync = '<ts>'
         do_update
             .assignments
             .push(create_hlc_assignment(self.hlc_timestamp_column, timestamp));
 
         let ts_str = timestamp.to_string();
 
-        // haex_column_hlcs_no_trigger = json_set(<column>, '$.<col1>', '<ts>', ...)
+        // haex_column_hlcs_no_sync = json_set(<column>, '$.<col1>', '<ts>', ...)
         do_update.assignments.push(Assignment {
             target: AssignmentTarget::ColumnName(ObjectName(vec![ObjectNamePart::Identifier(
                 Ident::new(self.column_hlcs_column),
@@ -224,9 +224,9 @@ impl InsertTransformer {
     ///
     /// `ON CONFLICT DO NOTHING` und `ON CONFLICT ... DO UPDATE SET ...` sind
     /// unterstützt: die INSERT-Spalten/-Werte bekommen weiterhin die
-    /// `haex_hlc_no_trigger`-Spalte, und die DO UPDATE SET-Zuweisungen
-    /// bekommen zusätzlich `haex_hlc_no_trigger = '<ts>'` sowie
-    /// `haex_column_hlcs_no_trigger = json_set(...)` angehängt, sodass auch
+    /// `haex_hlc_no_sync`-Spalte, und die DO UPDATE SET-Zuweisungen
+    /// bekommen zusätzlich `haex_hlc_no_sync = '<ts>'` sowie
+    /// `haex_column_hlcs_no_sync = json_set(...)` angehängt, sodass auch
     /// eine Konflikt-Auflösung frische HLC-Metadaten trägt.
     ///
     /// MySQL's `ON DUPLICATE KEY UPDATE` bleibt abgelehnt (kein SQLite-Feature).
@@ -515,7 +515,7 @@ mod tests {
         let err = transform_err(&sql);
         assert!(
             matches!(err, DatabaseError::UnsupportedStatement { .. }),
-            "caller-supplied haex_hlc_no_trigger must be rejected; got: {err:?}"
+            "caller-supplied haex_hlc_no_sync must be rejected; got: {err:?}"
         );
     }
 
@@ -562,7 +562,7 @@ mod tests {
     #[test]
     fn insert_without_on_conflict_still_transforms_unchanged() {
         // Regression lock: the plain INSERT-VALUES path is not affected by
-        // the new ON CONFLICT handling. A single haex_hlc_no_trigger column
+        // the new ON CONFLICT handling. A single haex_hlc_no_sync column
         // is appended, no DO UPDATE SET clause appears.
         let out = transform("INSERT INTO t (id, name) VALUES ('x', 'a')");
         assert!(

@@ -11,6 +11,18 @@
 //! migration, its SQL text is immutable — the engine's SHA-256 drift check
 //! aborts open on any post-hoc edit. New CRDT-bookkeeping work goes into a
 //! new migration name, never into an existing one.
+//!
+//! The bootstrap was already shipped and journaled under this name in
+//! **v0.1.0**. Its identifier renames are an explicit compatibility exception:
+//! `compat` renames the existing schema and converts only the exact released
+//! v0.1.0 digest to the current one. Other differing digests still abort open.
+//! Further schema changes must use new migrations.
+//!
+//! Verify released content with `git tag` and
+//! `git show <tag>:src/db/migrations/sql/<name>.sql`. An unreleased crate
+//! version does not make an already released migration editable. Databases
+//! from unreleased intermediate versions are expected to be deleted and
+//! recreated; their bootstrap digests have no compatibility conversion.
 
 /// The compiled-in list of crate-owned migrations, in apply order.
 ///
