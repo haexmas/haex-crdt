@@ -2,10 +2,13 @@
 //!
 //! Tests are split by concern so each file stays legible and under the
 //! 500-LoC cap: `lww` covers the write loop, `sig` covers the preflight
-//! contract, `delete` covers the delete-log fan-out + shadowing.
+//! contract, `delete` covers the delete-log fan-out + shadowing,
+//! `reserved_columns` covers the columns apply refuses to accept from a
+//! peer.
 
 mod delete;
 mod lww;
+mod reserved_columns;
 mod sig;
 
 use rusqlite::functions::FunctionFlags;

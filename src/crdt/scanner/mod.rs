@@ -13,8 +13,9 @@
 //! - [`scan_dirty_tables`] — list tables the trigger installer marked
 //!   dirty.
 //! - [`scan_table_for_local_changes`] — read per-column changes since a
-//!   cursor from one table, with optional origin-node and PK allow-list
-//!   filters (the two filters that are content-agnostic).
+//!   cursor from one table, restricted by a [`ScanFilters`] carrying the
+//!   optional origin-node, PK allow-list and single-column equality
+//!   filters (the filters that need no knowledge of what the data means).
 //! - [`paginate_changes`] — pack changes into transaction-HLC groups that
 //!   fit a byte budget without splitting a group across pages.
 //! - [`ColumnChange`] — the change record.
@@ -28,10 +29,11 @@
 //! scanner agnostic to haex-vault's per-space `{col: {space: sig}}`
 //! nesting vs a consumer that stores `{col: sig}` flat.
 
+mod emit;
+
 use crate::crdt::columns::{COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN, HLC_TIMESTAMP_COLUMN};
-use crate::crdt::hlc::{hlc_is_from_node, hlc_is_newer};
-use crate::crdt::trigger::{get_table_schema, ColumnInfo};
-use crate::db::core::convert_value_ref_to_json;
+use crate::crdt::scanner::emit::emit_row_changes;
+use crate::crdt::trigger::{get_table_schema, is_safe_identifier, ColumnInfo};
 use crate::db::core::execute::MAX_CRDT_TRANSACTION_BYTES;
 use crate::db::error::DatabaseError;
 use crate::table_names::TABLE_CRDT_DIRTY_TABLES;
@@ -41,9 +43,19 @@ use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
 
 /// The serve-side per-page byte budget for a paginated pull. Sized equal to
-/// [`MAX_CRDT_TRANSACTION_BYTES`] so a single page always has room for the
-/// largest legal transaction (the ≥1 rule in [`paginate_changes`] guarantees
-/// even an at-cap group is emitted).
+/// [`MAX_CRDT_TRANSACTION_BYTES`], the cap `execute_with_crdt` rejects one
+/// write's serialized parameters against, so a page is dimensioned for a
+/// transaction at that cap.
+///
+/// It is not a guarantee that any group fits, in three ways: a group of
+/// change records re-serializes more than the write's parameters did; the
+/// cap is enforced on the `execute_with_crdt` path only, so transactions
+/// arriving through `apply_remote_changes` or a raw-connection write using
+/// the `current_hlc()` UDF are never size-checked at all; and for a
+/// consumer's own [`Paginable`] type the crate has never seen the
+/// `Serialize` impl. What guarantees progress regardless is the ≥1 rule in
+/// [`paginate_changes`], which emits an over-budget group rather than
+/// stalling on it.
 pub const PULL_PAGE_BUDGET: usize = MAX_CRDT_TRANSACTION_BYTES;
 
 /// One column-level change ready for outbound transmission by a
@@ -69,6 +81,30 @@ pub struct ColumnChange {
     pub sig: Option<JsonValue>,
 }
 
+/// A change record [`paginate_changes`] can pack into pages: it exposes the
+/// HLC identifying the source transaction the change belongs to.
+///
+/// Pagination needs nothing else from a change record, so the trait keeps
+/// the algorithm's invariants — the ≥1 rule, never splitting a
+/// transaction-HLC group, ascending HLC order, and with it the HLC-only
+/// cursor — in one place. [`ColumnChange`] implements it; a consumer whose
+/// change type carries more than the crate's (a decoded signature, a
+/// routing key, …) implements it too instead of re-deriving those
+/// invariants.
+///
+/// [`Serialize`] is a supertrait because the packing rule measures the
+/// serialized size of each transaction group.
+pub trait Paginable: Serialize {
+    /// HLC of the transaction that produced this change.
+    fn transaction_hlc(&self) -> &str;
+}
+
+impl Paginable for ColumnChange {
+    fn transaction_hlc(&self) -> &str {
+        &self.hlc_timestamp
+    }
+}
+
 /// Lists tables the trigger installer has marked dirty (see
 /// [`crate::crdt::trigger::setup_triggers_for_table`]). Returns the names
 /// ordered by ascending `last_modified`, with `table_name` ascending as the
@@ -82,8 +118,66 @@ pub fn scan_dirty_tables(conn: &Connection) -> Result<Vec<String>, DatabaseError
     Ok(out)
 }
 
+/// The content-agnostic filters [`scan_table_for_local_changes`] applies.
+///
+/// All three default to "no restriction", so a full scan is
+/// `ScanFilters::default()` and a single restriction is
+/// `ScanFilters { column_eq: Some(("tenant_id", id)), ..Default::default() }`.
+///
+/// `Copy`, because [`scan_table_for_local_changes`] takes it by value and
+/// a consumer draining several tables passes the same filters to each.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScanFilters<'a> {
+    /// When `Some(node_id)`, emits only columns whose HLC's node-id
+    /// matches. Use to skip columns freshly applied from remote peers so
+    /// they are not pushed back (ping-pong prevention).
+    pub origin_node: Option<u128>,
+    /// When `Some(&set)`, emits only rows whose canonical PK JSON is in
+    /// the set. Applied BEFORE parsing the HLC/sig blobs so a large table
+    /// with few allow-listed rows pays deserialisation cost only on the
+    /// matches. See [`scan_table_for_local_changes`] for the PK JSON
+    /// encoding contract the set entries must follow.
+    pub row_pks: Option<&'a HashSet<String>>,
+    /// When `Some((column, value))`, restricts the scan to rows where
+    /// `column` equals `value`. Composes with the scan's `after_hlc`
+    /// cursor via `AND`.
+    ///
+    /// Any column the table actually has is a legal target — including a
+    /// PK, a `_no_trigger` column, and a CRDT metadata column. Which
+    /// columns may be *filtered on* is deliberately independent of which
+    /// ones get emitted, so a consumer can scope a scan by bookkeeping
+    /// that is itself opted out of change tracking.
+    ///
+    /// This cannot be a post-filter on the returned changes: if a row's
+    /// filter-column HLC is at or below the cursor, no change is emitted
+    /// for that column, so a caller inspecting the result set has nothing
+    /// to match the row on. The restriction has to reach the `WHERE`
+    /// clause.
+    ///
+    /// `value` is bound as a SQL parameter; it is never interpolated. The
+    /// column NAME is interpolated, so it must pass
+    /// [`is_safe_identifier`] — a name that does not is an `Err`, since
+    /// "this name cannot be filtered on" is not "no rows matched". If the
+    /// table has no column of that name the scan returns no rows at all:
+    /// fail closed, because a consumer whose filter target is missing must
+    /// not silently receive the whole table.
+    ///
+    /// The value always binds as TEXT, so matching relies on the column's
+    /// type affinity: an INTEGER-affinity column coerces `"5"` and matches
+    /// integer `5`, but a no-affinity column holding integer `5` does not
+    /// — that scan returns `Ok(vec![])`, indistinguishable from "no such
+    /// rows". A NULL filter value is not expressible (`= NULL` never
+    /// matches in SQL anyway).
+    pub column_eq: Option<(&'a str, &'a str)>,
+}
+
 /// Reads per-column changes since `after_hlc` from `table_name`, returning
 /// one [`ColumnChange`] per (row, changed column) pair.
+///
+/// Primary-key columns and the crate's three structural metadata columns
+/// are never emitted. Every other column is, `_no_trigger` ones included —
+/// that suffix governs what fires a trigger, not what ships. See
+/// [`partition_columns`] for why the two are distinct.
 ///
 /// # Filters
 ///
@@ -91,13 +185,8 @@ pub fn scan_dirty_tables(conn: &Connection) -> Result<Vec<String>, DatabaseError
 ///   emits every column with a usable HLC (fresh scan / full snapshot).
 ///   The row-level HLC is used as fallback when a column is missing
 ///   from the column-HLC map; empty-string HLCs are treated as absent.
-/// - `origin_node_filter` — when `Some(node_id)`, emits only columns
-///   whose HLC's node-id matches. Use to skip columns freshly applied
-///   from remote peers so they are not pushed back (ping-pong prevention).
-/// - `row_pks_filter` — when `Some(&set)`, emits only rows whose
-///   canonical PK JSON is in the set. Applied BEFORE parsing the HLC/sig
-///   blobs so a large table with few allow-listed rows pays deserialisation
-///   cost only on the matches.
+/// - `filters` — the three content-agnostic row/column restrictions; see
+///   [`ScanFilters`] and its fields for the semantics of each.
 ///
 /// # PK JSON encoding
 ///
@@ -113,9 +202,30 @@ pub fn scan_table_for_local_changes(
     table_name: &str,
     after_hlc: Option<&str>,
     device_id: &str,
-    origin_node_filter: Option<u128>,
-    row_pks_filter: Option<&HashSet<String>>,
+    filters: ScanFilters<'_>,
 ) -> Result<Vec<ColumnChange>, DatabaseError> {
+    // Pre-query sanity: refuse identifier-unsafe input at the boundary, so
+    // the error a caller sees for a bad filter name does not depend on the
+    // table's shape (same stance as `apply_remote_changes`). The gate needs
+    // no schema, and the name is interpolated into the WHERE clause below.
+    //
+    // Schema membership is NOT this gate: SQLite happily reports a column
+    // named `bucket" OR 1=1 OR "bucket_no_trigger`, and a `_no_trigger`
+    // name reaches this filter without passing any other check in the crate
+    // — `partition_columns` keeps it out of the SELECT list, and the trigger
+    // installer strips the suffix before its own identifier check.
+    // Interpolated, such a name turns the restriction into a tautology and
+    // ships every row for a value that matches none.
+    if let Some((filter_column, _)) = filters.column_eq {
+        if !is_safe_identifier(filter_column) {
+            return Err(DatabaseError::ValidationError {
+                reason: format!(
+                    "Unsafe filter column name '{filter_column}' for table '{table_name}'"
+                ),
+            });
+        }
+    }
+
     let schema = get_table_schema(conn, table_name)?;
     if schema.is_empty() {
         return Ok(Vec::new());
@@ -171,7 +281,12 @@ pub fn scan_table_for_local_changes(
         .collect::<Vec<_>>()
         .join(", ");
 
-    let (where_sql, params) = if let Some(hlc) = after_hlc {
+    // Predicates and their bound values are built together so the `?N`
+    // indices always match the parameter vector's order.
+    let mut predicates: Vec<String> = Vec::new();
+    let mut params: Vec<String> = Vec::new();
+
+    if let Some(hlc) = after_hlc {
         // Admit rows whose row-level HLC is absent (NULL) or empty in addition
         // to those strictly newer than the cursor. A corrupt/legacy row can
         // carry an empty row-level HLC while still holding a valid per-column
@@ -180,15 +295,29 @@ pub fn scan_table_for_local_changes(
         // so the row could only ever converge on a full scan. The per-column
         // loop re-checks each HLC against `after_hlc`, so widening here cannot
         // leak stale columns — rows with no usable HLC are still skipped.
-        (
-            format!(
-                " WHERE (\"{col}\" > ?1 OR \"{col}\" IS NULL OR \"{col}\" = '')",
-                col = HLC_TIMESTAMP_COLUMN
-            ),
-            vec![hlc.to_string()],
-        )
+        params.push(hlc.to_string());
+        predicates.push(format!(
+            "(\"{col}\" > ?{n} OR \"{col}\" IS NULL OR \"{col}\" = '')",
+            col = HLC_TIMESTAMP_COLUMN,
+            n = params.len()
+        ));
+    }
+
+    if let Some((filter_column, filter_value)) = filters.column_eq {
+        // The name already passed the identifier gate at the top of the
+        // function. Membership is the separate fail-closed rule: an unknown
+        // column means "no matching rows", never "the whole table".
+        if !schema.iter().any(|c| c.name == filter_column) {
+            return Ok(Vec::new());
+        }
+        params.push(filter_value.to_string());
+        predicates.push(format!("\"{filter_column}\" = ?{n}", n = params.len()));
+    }
+
+    let where_sql = if predicates.is_empty() {
+        String::new()
     } else {
-        (String::new(), Vec::new())
+        format!(" WHERE {}", predicates.join(" AND "))
     };
 
     let query = format!("SELECT {column_list} FROM \"{table_name}\"{where_sql}");
@@ -207,8 +336,8 @@ pub fn scan_table_for_local_changes(
             table_name,
             after_hlc,
             device_id,
-            origin_node_filter,
-            row_pks_filter,
+            filters.origin_node,
+            filters.row_pks,
             &mut changes,
         )?;
     }
@@ -228,28 +357,34 @@ pub fn scan_table_for_local_changes(
 /// **≥1 rule**: if the page is still empty when the first group alone
 /// exceeds the budget, that group is included anyway (with `has_more =
 /// true` if later groups exist) — otherwise an at-or-over-budget
-/// transaction could never traverse the wire. Bounded above by
-/// [`MAX_CRDT_TRANSACTION_BYTES`] because `execute_with_crdt` rejects
-/// oversized writes at commit time.
-pub fn paginate_changes(
-    changes: Vec<ColumnChange>,
-    page_budget: usize,
-) -> (Vec<ColumnChange>, bool) {
+/// transaction could never traverse the wire. A group's serialized size is
+/// therefore unbounded, and [`MAX_CRDT_TRANSACTION_BYTES`] does not bound
+/// it even for [`ColumnChange`]: that cap counts one write's serialized
+/// parameters while each change record re-serializes its table name, PK
+/// JSON, column name, HLC, device id and sig, and it is checked on the
+/// `execute_with_crdt` path only — a transaction applied by
+/// `apply_remote_changes` or written straight through a raw connection
+/// never passes it. For a consumer's own [`Paginable`] type, whose
+/// `Serialize` impl the crate has never seen, there is nothing to relate a
+/// group's size to at all. The ≥1 rule is what keeps pagination making
+/// progress in every one of those cases.
+///
+/// Generic over [`Paginable`] so a consumer's own change type gets the same
+/// invariants rather than a re-derived copy of them.
+pub fn paginate_changes<T: Paginable>(changes: Vec<T>, page_budget: usize) -> (Vec<T>, bool) {
     if changes.is_empty() {
         return (Vec::new(), false);
     }
 
-    let mut groups: HashMap<String, Vec<ColumnChange>> = HashMap::new();
+    let mut groups: HashMap<String, Vec<T>> = HashMap::new();
     for change in changes {
-        groups
-            .entry(change.hlc_timestamp.clone())
-            .or_default()
-            .push(change);
+        let group_hlc = change.transaction_hlc().to_string();
+        groups.entry(group_hlc).or_default().push(change);
     }
-    let mut ordered: Vec<(String, Vec<ColumnChange>)> = groups.into_iter().collect();
+    let mut ordered: Vec<(String, Vec<T>)> = groups.into_iter().collect();
     ordered.sort_by(|a, b| crate::crdt::hlc::compare_hlc_strings(&a.0, &b.0));
 
-    let mut page: Vec<ColumnChange> = Vec::new();
+    let mut page: Vec<T> = Vec::new();
     let mut running: usize = 0;
     let mut has_more = false;
 
@@ -274,146 +409,43 @@ pub fn paginate_changes(
 // Private helpers
 // -----------------------------------------------------------------------
 
-/// Splits a table schema into PK columns and syncable data columns. Data
-/// columns exclude PKs and the three CRDT metadata columns — consumer-
-/// schema conventions like `updated_at` are the consumer's concern (same
-/// stance as [`crate::crdt::trigger::setup_triggers_for_table`]).
+/// Splits a table schema into PK columns and syncable data columns.
+///
+/// Data columns exclude three things:
+///
+/// - PKs, which identify the row rather than carrying its state.
+/// - The crate's own three structural metadata columns
+///   ([`HLC_TIMESTAMP_COLUMN`], [`COLUMN_HLCS_COLUMN`],
+///   [`COLUMN_SIGS_COLUMN`]), withheld by explicit name — that is the
+///   crate describing its own internals, not a consumer exception list.
+///   See [`crate::crdt::columns`] for why they are not `_no_sync`-named.
+/// - Any column whose name ends in `_no_sync`: the consumer's "never ship
+///   this" rule, for state that must stay on this device.
+///
+/// `_no_trigger` columns are **still emitted**. That suffix governs what
+/// fires a trigger, i.e. what *drives* sync, not what ships: such a column
+/// has no entry in the per-column HLC map so it never causes a row to be
+/// scanned, but once a tracked sibling does, its current value rides along
+/// under the row-level HLC. Both rules are defined together in
+/// [`crate::crdt::columns`]; do not collapse them.
+///
+/// [`crate::crdt::apply::apply_remote_changes`] refuses this same set on
+/// the way in. The two sets must stay identical: if apply accepted what
+/// the scanner withholds, a column that never leaves one device could
+/// still be written on another.
 fn partition_columns(schema: &[ColumnInfo]) -> (Vec<&ColumnInfo>, Vec<&ColumnInfo>) {
     let pk_columns: Vec<&ColumnInfo> = schema.iter().filter(|c| c.is_pk).collect();
     let data_columns: Vec<&ColumnInfo> = schema
         .iter()
         .filter(|c| {
             !c.is_pk
+                && !c.name.ends_with("_no_sync")
                 && c.name != HLC_TIMESTAMP_COLUMN
                 && c.name != COLUMN_HLCS_COLUMN
                 && c.name != COLUMN_SIGS_COLUMN
         })
         .collect();
     (pk_columns, data_columns)
-}
-
-/// Per-row column-change emitter. Reads column values from `row`, builds
-/// the canonical PK JSON in schema-declaration order, applies the
-/// `row_pks_filter` allow-list if any, then for each data column emits a
-/// change when its per-column HLC (or the row-level fallback) is strictly
-/// newer than `after_hlc` and — if `origin_node_filter` is set — was
-/// written by this node.
-#[allow(clippy::too_many_arguments)]
-fn emit_row_changes(
-    row: &rusqlite::Row<'_>,
-    select_columns: &[&str],
-    pk_columns: &[&ColumnInfo],
-    data_columns: &[&ColumnInfo],
-    table_name: &str,
-    after_hlc: Option<&str>,
-    device_id: &str,
-    origin_node_filter: Option<u128>,
-    row_pks_filter: Option<&HashSet<String>>,
-    out: &mut Vec<ColumnChange>,
-) -> Result<(), DatabaseError> {
-    let mut row_map: HashMap<&str, JsonValue> = HashMap::new();
-    for (i, col_name) in select_columns.iter().enumerate() {
-        let value_ref = row.get_ref(i)?;
-        let json_val = convert_value_ref_to_json(value_ref)?;
-        row_map.insert(col_name, json_val);
-    }
-
-    // Canonical PK JSON in schema-declaration order. We cannot use
-    // `serde_json::Map` here — without the `preserve_order` feature it is
-    // a `BTreeMap` and sorts keys alphabetically, which silently breaks
-    // composite-PK equality against register-side JSON built in schema
-    // order. Construct the JSON string explicitly instead.
-    let mut pk_json = String::from("{");
-    let mut first = true;
-    for pk in pk_columns {
-        let val = row_map
-            .get(pk.name.as_str())
-            .cloned()
-            .unwrap_or(JsonValue::Null);
-        if !first {
-            pk_json.push(',');
-        }
-        first = false;
-        let key_json = serde_json::to_string(&pk.name).map_err(|e| DatabaseError::QueryError {
-            reason: format!("serialize pk column name '{}': {e}", pk.name),
-        })?;
-        let val_json = serde_json::to_string(&val).map_err(|e| DatabaseError::QueryError {
-            reason: format!("serialize pk column value for '{}': {e}", pk.name),
-        })?;
-        pk_json.push_str(&key_json);
-        pk_json.push(':');
-        pk_json.push_str(&val_json);
-    }
-    pk_json.push('}');
-
-    if let Some(wanted) = row_pks_filter {
-        if !wanted.contains(&pk_json) {
-            return Ok(());
-        }
-    }
-
-    let column_hlcs: HashMap<String, String> = match row_map.get(COLUMN_HLCS_COLUMN) {
-        Some(JsonValue::String(s)) => serde_json::from_str(s).unwrap_or_default(),
-        _ => HashMap::new(),
-    };
-    let column_sigs_map: serde_json::Map<String, JsonValue> = row_map
-        .get(COLUMN_SIGS_COLUMN)
-        .and_then(JsonValue::as_str)
-        .and_then(|raw| serde_json::from_str::<JsonValue>(raw).ok())
-        .and_then(|v| match v {
-            JsonValue::Object(m) => Some(m),
-            _ => None,
-        })
-        .unwrap_or_default();
-
-    let row_hlc = match row_map.get(HLC_TIMESTAMP_COLUMN) {
-        Some(JsonValue::String(s)) if !s.is_empty() => Some(s.as_str()),
-        _ => None,
-    };
-
-    for col in data_columns {
-        // Treat an empty per-column HLC as absent so it falls back to the
-        // row HLC; if both are empty/missing the column has no usable
-        // timestamp and is skipped.
-        let col_hlc = column_hlcs
-            .get(&col.name)
-            .map(|s| s.as_str())
-            .filter(|s| !s.is_empty());
-
-        let hlc_to_use = match col_hlc.or(row_hlc) {
-            Some(h) => h,
-            None => continue,
-        };
-
-        let passes_hlc = match after_hlc {
-            Some(threshold) => hlc_is_newer(hlc_to_use, threshold),
-            None => true,
-        };
-        let passes_origin = match origin_node_filter {
-            Some(our_node) => hlc_is_from_node(hlc_to_use, our_node),
-            None => true,
-        };
-
-        if passes_hlc && passes_origin {
-            let value = row_map
-                .get(col.name.as_str())
-                .cloned()
-                .unwrap_or(JsonValue::Null);
-            let sig = column_sigs_map.get(&col.name).cloned();
-
-            out.push(ColumnChange {
-                table_name: table_name.to_string(),
-                row_pks: pk_json.clone(),
-                column_name: col.name.clone(),
-                hlc_timestamp: hlc_to_use.to_string(),
-                value,
-                device_id: device_id.to_string(),
-                sig,
-            });
-        }
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

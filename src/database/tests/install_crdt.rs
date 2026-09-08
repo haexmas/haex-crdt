@@ -56,7 +56,7 @@ fn install_crdt_backfills_pre_existing_rows_and_marks_dirty() {
     // Scanner must now return the backfilled `body` column for both rows.
     // Two rows × one data column (`body`) = two changes.
     let changes = db
-        .scan_table_for_local_changes("legacy_items_no_sync", None, None, None)
+        .scan_table_for_local_changes("legacy_items_no_sync", None, ScanFilters::default())
         .unwrap();
     assert_eq!(
         changes.len(),
@@ -84,7 +84,7 @@ fn install_crdt_backfill_signs_each_row_value_and_primary_key() {
         .unwrap();
 
     let changes = db
-        .scan_table_for_local_changes("legacy_items_no_sync", None, None, None)
+        .scan_table_for_local_changes("legacy_items_no_sync", None, ScanFilters::default())
         .unwrap();
     assert_eq!(changes.len(), 2);
     for change in changes {

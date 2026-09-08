@@ -17,6 +17,7 @@ mod grouping;
 mod preflight;
 mod preimage;
 mod report;
+mod write;
 
 pub use engine::apply_remote_changes;
 pub use preimage::{column_sig_preimage, column_sig_preimage_from_parts};

@@ -54,7 +54,7 @@ fn store_scan_after_apply_returns_the_applied_change() {
     .unwrap();
 
     let changes = db
-        .scan_table_for_local_changes("items", None, None, None)
+        .scan_table_for_local_changes("items", None, ScanFilters::default())
         .unwrap();
     assert!(
         changes.iter().any(|c| c.column_name == "body"),
@@ -64,7 +64,14 @@ fn store_scan_after_apply_returns_the_applied_change() {
     // (author was the foreign node) — proves the filter is wired.
     let node = device_uuid_to_hlc_node(&fx.device.to_string()).unwrap();
     let self_only = db
-        .scan_table_for_local_changes("items", None, Some(node), None)
+        .scan_table_for_local_changes(
+            "items",
+            None,
+            ScanFilters {
+                origin_node: Some(node),
+                ..Default::default()
+            },
+        )
         .unwrap();
     assert!(
         self_only.is_empty(),
@@ -80,4 +87,58 @@ fn store_cleanup_delegate_reports_zero_pruned_on_empty_log() {
         .cleanup_deleted_rows(RetentionPolicy::All, |_, _| Ok(()))
         .unwrap();
     assert_eq!(report.rows_deleted, 0);
+}
+
+#[test]
+fn store_scan_forwards_the_column_eq_filter() {
+    let fx = Fixture::with_source(source(&[(
+        "0001_items",
+        "CREATE TABLE items (id TEXT PRIMARY KEY NOT NULL, bucket TEXT, body TEXT);",
+    )]));
+    let db = Database::open(fx.config).unwrap();
+
+    // Two rows in different buckets. Applied with a foreign HLC so the scan
+    // sees both without an origin filter.
+    let hlc = "9999999999999999/deadbeefdeadbeefdeadbeefdeadbe";
+    let remote = |pk: &str, column: &str, value: &str| ColumnChange {
+        table_name: "items".to_string(),
+        row_pks: format!(r#"{{"id":"{pk}"}}"#),
+        column_name: column.to_string(),
+        hlc_timestamp: hlc.to_string(),
+        value: json!(value),
+        device_id: String::new(),
+        sig: None,
+    };
+    db.apply_remote_changes(vec![
+        remote("r1", "bucket", "b1"),
+        remote("r1", "body", "one"),
+        remote("r2", "bucket", "b2"),
+        remote("r2", "body", "two"),
+    ])
+    .unwrap();
+
+    // The facade must forward `column_eq`, not just the two filters it
+    // carried before: this restriction is only expressible in the SQL
+    // WHERE clause, so a forward that dropped the field would silently
+    // return both rows.
+    let only_b1 = db
+        .scan_table_for_local_changes(
+            "items",
+            None,
+            ScanFilters {
+                column_eq: Some(("bucket", "b1")),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(
+        !only_b1.is_empty(),
+        "the b1 row's changes must survive the filter"
+    );
+    for change in &only_b1 {
+        assert_eq!(
+            change.row_pks, r#"{"id":"r1"}"#,
+            "only the b1 row may be scanned; got {only_b1:?}"
+        );
+    }
 }
