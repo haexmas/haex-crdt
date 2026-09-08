@@ -70,6 +70,30 @@ pub struct ColumnChange {
     pub sig: Option<JsonValue>,
 }
 
+/// A change record [`paginate_changes`] can pack into pages: it exposes the
+/// HLC identifying the source transaction the change belongs to.
+///
+/// Pagination needs nothing else from a change record, so the trait keeps
+/// the algorithm's invariants — the ≥1 rule, never splitting a
+/// transaction-HLC group, ascending HLC order, and with it the HLC-only
+/// cursor — in one place. [`ColumnChange`] implements it; a consumer whose
+/// change type carries more than the crate's (a decoded signature, a
+/// routing key, …) implements it too instead of re-deriving those
+/// invariants.
+///
+/// [`Serialize`] is a supertrait because the packing rule measures the
+/// serialized size of each transaction group.
+pub trait Paginable: Serialize {
+    /// HLC of the transaction that produced this change.
+    fn hlc_timestamp(&self) -> &str;
+}
+
+impl Paginable for ColumnChange {
+    fn hlc_timestamp(&self) -> &str {
+        &self.hlc_timestamp
+    }
+}
+
 /// Lists tables the trigger installer has marked dirty (see
 /// [`crate::crdt::trigger::setup_triggers_for_table`]). Returns the names
 /// ordered by ascending `last_modified`, with `table_name` ascending as the
@@ -270,25 +294,23 @@ pub fn scan_table_for_local_changes(
 /// transaction could never traverse the wire. Bounded above by
 /// [`MAX_CRDT_TRANSACTION_BYTES`] because `execute_with_crdt` rejects
 /// oversized writes at commit time.
-pub fn paginate_changes(
-    changes: Vec<ColumnChange>,
-    page_budget: usize,
-) -> (Vec<ColumnChange>, bool) {
+///
+/// Generic over [`Paginable`] so a consumer's own change type gets the same
+/// invariants rather than a re-derived copy of them.
+pub fn paginate_changes<T: Paginable>(changes: Vec<T>, page_budget: usize) -> (Vec<T>, bool) {
     if changes.is_empty() {
         return (Vec::new(), false);
     }
 
-    let mut groups: HashMap<String, Vec<ColumnChange>> = HashMap::new();
+    let mut groups: HashMap<String, Vec<T>> = HashMap::new();
     for change in changes {
-        groups
-            .entry(change.hlc_timestamp.clone())
-            .or_default()
-            .push(change);
+        let group_hlc = change.hlc_timestamp().to_string();
+        groups.entry(group_hlc).or_default().push(change);
     }
-    let mut ordered: Vec<(String, Vec<ColumnChange>)> = groups.into_iter().collect();
+    let mut ordered: Vec<(String, Vec<T>)> = groups.into_iter().collect();
     ordered.sort_by(|a, b| crate::crdt::hlc::compare_hlc_strings(&a.0, &b.0));
 
-    let mut page: Vec<ColumnChange> = Vec::new();
+    let mut page: Vec<T> = Vec::new();
     let mut running: usize = 0;
     let mut has_more = false;
 

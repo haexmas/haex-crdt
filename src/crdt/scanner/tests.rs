@@ -16,6 +16,7 @@ use std::collections::HashSet;
 use uuid::Uuid;
 
 mod filters;
+mod pagination;
 
 // -----------------------------------------------------------------------
 // Fixtures
@@ -351,89 +352,4 @@ fn sig_passes_through_as_raw_json_when_present() {
             .unwrap();
     let for_name = changes.iter().find(|c| c.column_name == "name").unwrap();
     assert_eq!(for_name.sig, Some(json!("sig-bytes-b64")));
-}
-
-// -----------------------------------------------------------------------
-// paginate_changes
-// -----------------------------------------------------------------------
-
-fn change(hlc: &str, table: &str, col: &str, value: &str) -> ColumnChange {
-    ColumnChange {
-        table_name: table.to_string(),
-        row_pks: r#"{"id":"r"}"#.to_string(),
-        column_name: col.to_string(),
-        hlc_timestamp: hlc.to_string(),
-        value: json!(value),
-        device_id: "dev".to_string(),
-        sig: None,
-    }
-}
-
-#[test]
-fn paginate_empty_input_returns_empty_and_no_more() {
-    let (page, has_more) = paginate_changes(Vec::new(), 1000);
-    assert!(page.is_empty());
-    assert!(!has_more);
-}
-
-#[test]
-fn paginate_packs_multiple_hlc_groups_when_they_fit() {
-    let changes = vec![
-        change("100/n", "t", "a", "aa"),
-        change("100/n", "t", "b", "bb"),
-        change("200/n", "t", "a", "cc"),
-    ];
-    let (page, has_more) = paginate_changes(changes.clone(), 10_000);
-    assert_eq!(page.len(), 3);
-    assert!(!has_more);
-}
-
-#[test]
-fn paginate_never_splits_a_transaction_hlc_group() {
-    // A tiny budget: two large-ish groups. The first fits (≥1 rule); the
-    // second exceeds the remaining budget and defers as one atomic group.
-    let big_group = vec![
-        change("100/n", "t", "a", &"x".repeat(50)),
-        change("100/n", "t", "b", &"x".repeat(50)),
-    ];
-    let follow_up = vec![change("200/n", "t", "a", &"y".repeat(50))];
-    let mut all = big_group.clone();
-    all.extend(follow_up);
-
-    let (page, has_more) = paginate_changes(all, 200);
-    // The first group's two changes stay together; the follow-up defers.
-    let hlcs: HashSet<&str> = page.iter().map(|c| c.hlc_timestamp.as_str()).collect();
-    assert_eq!(hlcs.len(), 1);
-    assert!(hlcs.contains("100/n"));
-    assert!(has_more);
-}
-
-#[test]
-fn paginate_ge_one_rule_admits_first_group_even_when_over_budget() {
-    // First group alone exceeds the budget: it must still be emitted, and
-    // has_more must be true if later groups exist.
-    let over = vec![
-        change("100/n", "t", "a", &"x".repeat(500)),
-        change("200/n", "t", "a", "b"),
-    ];
-    let (page, has_more) = paginate_changes(over, 50);
-    // Only the first group appears.
-    let hlcs: HashSet<&str> = page.iter().map(|c| c.hlc_timestamp.as_str()).collect();
-    assert!(hlcs.contains("100/n"));
-    assert!(!hlcs.contains("200/n"));
-    assert!(has_more);
-}
-
-#[test]
-fn paginate_orders_groups_ascending_by_hlc() {
-    // Insertion order is deliberately shuffled — the output must be sorted
-    // by HLC ascending.
-    let mixed = vec![
-        change("300/n", "t", "a", "c"),
-        change("100/n", "t", "a", "a"),
-        change("200/n", "t", "a", "b"),
-    ];
-    let (page, _) = paginate_changes(mixed, 10_000);
-    let hlcs: Vec<&str> = page.iter().map(|c| c.hlc_timestamp.as_str()).collect();
-    assert_eq!(hlcs, vec!["100/n", "200/n", "300/n"]);
 }

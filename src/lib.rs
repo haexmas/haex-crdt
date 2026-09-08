@@ -50,7 +50,7 @@ pub use crdt::hlc::{
     hlc_node_id_suffix, parse_hlc_node_hex, HlcError, HlcService,
 };
 pub use crdt::scanner::{
-    paginate_changes, scan_dirty_tables, scan_table_for_local_changes, ColumnChange,
+    paginate_changes, scan_dirty_tables, scan_table_for_local_changes, ColumnChange, Paginable,
     PULL_PAGE_BUDGET,
 };
 pub use crdt::trigger::{
