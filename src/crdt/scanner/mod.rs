@@ -43,9 +43,14 @@ use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
 
 /// The serve-side per-page byte budget for a paginated pull. Sized equal to
-/// [`MAX_CRDT_TRANSACTION_BYTES`] so a single page always has room for the
-/// largest legal transaction (the ≥1 rule in [`paginate_changes`] guarantees
-/// even an at-cap group is emitted).
+/// [`MAX_CRDT_TRANSACTION_BYTES`], the cap `execute_with_crdt` puts on one
+/// transaction's serialized parameters, so a page is dimensioned for a
+/// transaction at that cap. It is not a guarantee that any group fits: a
+/// group of change records re-serializes more than the write's parameters
+/// did, and for a consumer's own [`Paginable`] type the crate has never
+/// seen the `Serialize` impl. What guarantees progress regardless is the
+/// ≥1 rule in [`paginate_changes`], which emits an over-budget group
+/// rather than stalling on it.
 pub const PULL_PAGE_BUDGET: usize = MAX_CRDT_TRANSACTION_BYTES;
 
 /// One column-level change ready for outbound transmission by a
@@ -86,11 +91,11 @@ pub struct ColumnChange {
 /// serialized size of each transaction group.
 pub trait Paginable: Serialize {
     /// HLC of the transaction that produced this change.
-    fn hlc_timestamp(&self) -> &str;
+    fn transaction_hlc(&self) -> &str;
 }
 
 impl Paginable for ColumnChange {
-    fn hlc_timestamp(&self) -> &str {
+    fn transaction_hlc(&self) -> &str {
         &self.hlc_timestamp
     }
 }
@@ -331,9 +336,14 @@ pub fn scan_table_for_local_changes(
 /// **≥1 rule**: if the page is still empty when the first group alone
 /// exceeds the budget, that group is included anyway (with `has_more =
 /// true` if later groups exist) — otherwise an at-or-over-budget
-/// transaction could never traverse the wire. Bounded above by
-/// [`MAX_CRDT_TRANSACTION_BYTES`] because `execute_with_crdt` rejects
-/// oversized writes at commit time.
+/// transaction could never traverse the wire. For [`ColumnChange`] a
+/// group's size tracks the source transaction, which `execute_with_crdt`
+/// caps at [`MAX_CRDT_TRANSACTION_BYTES`] — but only loosely: that cap
+/// counts one write's serialized parameters, while each change record
+/// re-serializes its table name, PK JSON, column name, HLC, device id and
+/// sig. For a consumer's own [`Paginable`] type, whose `Serialize` impl
+/// the crate has never seen, no bound can be claimed at all — the ≥1 rule
+/// is then the only guarantee that pagination makes progress.
 ///
 /// Generic over [`Paginable`] so a consumer's own change type gets the same
 /// invariants rather than a re-derived copy of them.
@@ -344,7 +354,7 @@ pub fn paginate_changes<T: Paginable>(changes: Vec<T>, page_budget: usize) -> (V
 
     let mut groups: HashMap<String, Vec<T>> = HashMap::new();
     for change in changes {
-        let group_hlc = change.hlc_timestamp().to_string();
+        let group_hlc = change.transaction_hlc().to_string();
         groups.entry(group_hlc).or_default().push(change);
     }
     let mut ordered: Vec<(String, Vec<T>)> = groups.into_iter().collect();

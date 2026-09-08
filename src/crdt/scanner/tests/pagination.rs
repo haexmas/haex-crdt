@@ -106,7 +106,7 @@ fn paginate_accepts_a_consumer_defined_paginable_type() {
         payload: String,
     }
     impl Paginable for ScopedChange {
-        fn hlc_timestamp(&self) -> &str {
+        fn transaction_hlc(&self) -> &str {
             &self.hlc
         }
     }
