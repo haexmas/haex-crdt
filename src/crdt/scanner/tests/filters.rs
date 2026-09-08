@@ -413,3 +413,42 @@ fn column_eq_filter_rejects_an_unsafe_name_before_any_schema_check() {
         "an unusable filter name must not depend on table state: {err:?}"
     );
 }
+
+#[test]
+fn column_eq_filter_may_target_a_no_trigger_column() {
+    let (conn, hlc, dev) = make_fixture();
+    // Filtering on a column is deliberately independent of emitting it: a
+    // consumer may scope a scan by bookkeeping that is itself opted out of
+    // change tracking. Membership is checked against the whole schema, not
+    // the emitted data columns.
+    create_crdt_table(&conn, "items", "bucket_no_trigger TEXT, name TEXT");
+    insert_row_via_transformer(
+        &conn,
+        &hlc,
+        "INSERT INTO items (id, bucket_no_trigger, name) VALUES ('i1', 'b1', 'a')",
+    );
+    insert_row_via_transformer(
+        &conn,
+        &hlc,
+        "INSERT INTO items (id, bucket_no_trigger, name) VALUES ('i2', 'b2', 'b')",
+    );
+
+    let changes = scan_table_for_local_changes(
+        &conn,
+        "items",
+        None,
+        &dev.to_string(),
+        ScanFilters {
+            column_eq: Some(("bucket_no_trigger", "b1")),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let cols: Vec<&str> = changes.iter().map(|c| c.column_name.as_str()).collect();
+    assert_eq!(
+        cols,
+        vec!["name"],
+        "the filter column restricts rows without being emitted: {changes:?}"
+    );
+    assert_eq!(changes[0].row_pks, r#"{"id":"i1"}"#);
+}

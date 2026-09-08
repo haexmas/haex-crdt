@@ -43,14 +43,19 @@ use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
 
 /// The serve-side per-page byte budget for a paginated pull. Sized equal to
-/// [`MAX_CRDT_TRANSACTION_BYTES`], the cap `execute_with_crdt` puts on one
-/// transaction's serialized parameters, so a page is dimensioned for a
-/// transaction at that cap. It is not a guarantee that any group fits: a
-/// group of change records re-serializes more than the write's parameters
-/// did, and for a consumer's own [`Paginable`] type the crate has never
-/// seen the `Serialize` impl. What guarantees progress regardless is the
-/// ≥1 rule in [`paginate_changes`], which emits an over-budget group
-/// rather than stalling on it.
+/// [`MAX_CRDT_TRANSACTION_BYTES`], the cap `execute_with_crdt` rejects one
+/// write's serialized parameters against, so a page is dimensioned for a
+/// transaction at that cap.
+///
+/// It is not a guarantee that any group fits, in three ways: a group of
+/// change records re-serializes more than the write's parameters did; the
+/// cap is enforced on the `execute_with_crdt` path only, so transactions
+/// arriving through `apply_remote_changes` or a raw-connection write using
+/// the `current_hlc()` UDF are never size-checked at all; and for a
+/// consumer's own [`Paginable`] type the crate has never seen the
+/// `Serialize` impl. What guarantees progress regardless is the ≥1 rule in
+/// [`paginate_changes`], which emits an over-budget group rather than
+/// stalling on it.
 pub const PULL_PAGE_BUDGET: usize = MAX_CRDT_TRANSACTION_BYTES;
 
 /// One column-level change ready for outbound transmission by a
@@ -118,7 +123,10 @@ pub fn scan_dirty_tables(conn: &Connection) -> Result<Vec<String>, DatabaseError
 /// All three default to "no restriction", so a full scan is
 /// `ScanFilters::default()` and a single restriction is
 /// `ScanFilters { column_eq: Some(("tenant_id", id)), ..Default::default() }`.
-#[derive(Debug, Clone, Default)]
+///
+/// `Copy`, because [`scan_table_for_local_changes`] takes it by value and
+/// a consumer draining several tables passes the same filters to each.
+#[derive(Debug, Clone, Copy, Default)]
 pub struct ScanFilters<'a> {
     /// When `Some(node_id)`, emits only columns whose HLC's node-id
     /// matches. Use to skip columns freshly applied from remote peers so
@@ -133,6 +141,12 @@ pub struct ScanFilters<'a> {
     /// When `Some((column, value))`, restricts the scan to rows where
     /// `column` equals `value`. Composes with the scan's `after_hlc`
     /// cursor via `AND`.
+    ///
+    /// Any column the table actually has is a legal target — including a
+    /// PK, a `_no_trigger` column, and a CRDT metadata column. Which
+    /// columns may be *filtered on* is deliberately independent of which
+    /// ones get emitted, so a consumer can scope a scan by bookkeeping
+    /// that is itself opted out of change tracking.
     ///
     /// This cannot be a post-filter on the returned changes: if a row's
     /// filter-column HLC is at or below the cursor, no change is emitted
@@ -343,14 +357,17 @@ pub fn scan_table_for_local_changes(
 /// **≥1 rule**: if the page is still empty when the first group alone
 /// exceeds the budget, that group is included anyway (with `has_more =
 /// true` if later groups exist) — otherwise an at-or-over-budget
-/// transaction could never traverse the wire. For [`ColumnChange`] a
-/// group's size tracks the source transaction, which `execute_with_crdt`
-/// caps at [`MAX_CRDT_TRANSACTION_BYTES`] — but only loosely: that cap
-/// counts one write's serialized parameters, while each change record
-/// re-serializes its table name, PK JSON, column name, HLC, device id and
-/// sig. For a consumer's own [`Paginable`] type, whose `Serialize` impl
-/// the crate has never seen, no bound can be claimed at all — the ≥1 rule
-/// is then the only guarantee that pagination makes progress.
+/// transaction could never traverse the wire. A group's serialized size is
+/// therefore unbounded, and [`MAX_CRDT_TRANSACTION_BYTES`] does not bound
+/// it even for [`ColumnChange`]: that cap counts one write's serialized
+/// parameters while each change record re-serializes its table name, PK
+/// JSON, column name, HLC, device id and sig, and it is checked on the
+/// `execute_with_crdt` path only — a transaction applied by
+/// `apply_remote_changes` or written straight through a raw connection
+/// never passes it. For a consumer's own [`Paginable`] type, whose
+/// `Serialize` impl the crate has never seen, there is nothing to relate a
+/// group's size to at all. The ≥1 rule is what keeps pagination making
+/// progress in every one of those cases.
 ///
 /// Generic over [`Paginable`] so a consumer's own change type gets the same
 /// invariants rather than a re-derived copy of them.
