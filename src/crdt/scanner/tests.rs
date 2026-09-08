@@ -239,6 +239,31 @@ fn scan_excludes_pks_and_crdt_meta_from_emitted_columns() {
     }
 }
 
+#[test]
+fn scan_skips_consumer_no_trigger_suffixed_columns() {
+    let (conn, hlc, dev) = make_fixture();
+    // A consumer bookkeeping column opted out of change tracking by the
+    // `_no_trigger` suffix. The installer never tracks it, so it never
+    // gets an entry in the per-column HLC map — without the suffix rule
+    // the per-column loop falls back to the row-level HLC and ships it on
+    // every scan.
+    create_crdt_table(&conn, "items", "name TEXT, updated_at_no_trigger TEXT");
+    insert_row_via_transformer(
+        &conn,
+        &hlc,
+        "INSERT INTO items (id, name, updated_at_no_trigger) VALUES ('i1', 'a', '2026-01-01')",
+    );
+
+    let changes =
+        scan_table_for_local_changes(&conn, "items", None, &dev.to_string(), None, None).unwrap();
+    let cols: Vec<&str> = changes.iter().map(|c| c.column_name.as_str()).collect();
+    assert_eq!(
+        cols,
+        vec!["name"],
+        "only the tracked sibling column may emit; `_no_trigger` columns must not"
+    );
+}
+
 // -----------------------------------------------------------------------
 // after_hlc cursor
 // -----------------------------------------------------------------------

@@ -85,6 +85,11 @@ pub fn scan_dirty_tables(conn: &Connection) -> Result<Vec<String>, DatabaseError
 /// Reads per-column changes since `after_hlc` from `table_name`, returning
 /// one [`ColumnChange`] per (row, changed column) pair.
 ///
+/// Primary-key columns and any column whose name ends in `_no_trigger`
+/// are never emitted — the scanner applies the same one-rule skip as
+/// [`crate::crdt::trigger::setup_triggers_for_table`], so a column opted
+/// out of change tracking also stays off the wire.
+///
 /// # Filters
 ///
 /// - `after_hlc` — exclusive lower bound on the per-column HLC. `None`
@@ -274,20 +279,24 @@ pub fn paginate_changes(
 // Private helpers
 // -----------------------------------------------------------------------
 
-/// Splits a table schema into PK columns and syncable data columns. Data
-/// columns exclude PKs and the three CRDT metadata columns — consumer-
-/// schema conventions like `updated_at` are the consumer's concern (same
-/// stance as [`crate::crdt::trigger::setup_triggers_for_table`]).
+/// Splits a table schema into PK columns and syncable data columns.
+///
+/// One rule, the same one [`crate::crdt::trigger::setup_triggers_for_table`]
+/// applies: skip PKs and any column whose name ends in `_no_trigger`. The
+/// three structural CRDT metadata columns ([`HLC_TIMESTAMP_COLUMN`],
+/// [`COLUMN_HLCS_COLUMN`], [`COLUMN_SIGS_COLUMN`]) carry that suffix too,
+/// so the rule catches them without a separate exemption.
+///
+/// The scanner must honour the rule and not just the installer: because a
+/// `_no_trigger` column is never tracked, it never gets an entry in the
+/// per-column HLC map, so the per-column loop in [`emit_row_changes`]
+/// would fall back to the row-level HLC and ship the column on every scan
+/// — the opposite of what the suffix promised.
 fn partition_columns(schema: &[ColumnInfo]) -> (Vec<&ColumnInfo>, Vec<&ColumnInfo>) {
     let pk_columns: Vec<&ColumnInfo> = schema.iter().filter(|c| c.is_pk).collect();
     let data_columns: Vec<&ColumnInfo> = schema
         .iter()
-        .filter(|c| {
-            !c.is_pk
-                && c.name != HLC_TIMESTAMP_COLUMN
-                && c.name != COLUMN_HLCS_COLUMN
-                && c.name != COLUMN_SIGS_COLUMN
-        })
+        .filter(|c| !c.is_pk && !c.name.ends_with("_no_trigger"))
         .collect();
     (pk_columns, data_columns)
 }
