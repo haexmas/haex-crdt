@@ -2,21 +2,21 @@ use uuid::Uuid;
 
 use crate::error::Result;
 
-/// Supplies the persistent device UUID that scopes this store's HLC state.
+/// Supplies the device UUID used as this open's HLC node id.
 ///
-/// # Contract (plan §4.1)
+/// # Contract
 ///
-/// - The returned `Uuid` MUST be durable per physical device and stable
-///   across process restarts, OS reboots, and library upgrades within the
-///   same install. `uhlc::ID` uniqueness invariants depend on this.
-/// - The provider MUST NOT return a freshly generated `Uuid` on each call.
-///   Consumers that don't yet have a persisted device UUID are responsible
-///   for minting and persisting one **before** handing a provider to
-///   `haex-crdt`.
-/// - `Database::open` records the `device_id` observed on first successful
-///   open in `haex_hlc_state`. On subsequent opens, if the supplied
-///   provider returns a different `Uuid`, `Database::open` returns
-///   `Error::DeviceIdMismatch` rather than silently rewriting HLC state.
+/// - The returned `Uuid` scopes HLC causality for the current `Database::open`
+///   call and every operation on the resulting handle. `uhlc::ID` uniqueness
+///   invariants apply for the lifetime of that handle.
+/// - Across opens of the *same* DB file by the *same* logical replica, the
+///   consumer MUST return the same `Uuid` — otherwise HLC causality on that
+///   replica is broken.
+/// - Consumers that legitimately serve different UUIDs to the same DB file
+///   for different logical replicas (e.g. a per-installation UUID lookup, as
+///   in haex-vault) are directly supported: `Database::open` no longer stores
+///   or arbitrates the device UUID and simply uses what the provider returns.
+///   Enforcing uniqueness per (DB file × replica) is the consumer's job.
 pub trait DeviceIdProvider: Send + Sync {
     fn device_id(&self) -> Result<Uuid>;
 }

@@ -1,29 +1,39 @@
-//! `Database::open` lifecycle tests: fresh vs reopen, device-id contract,
-//! concurrent opens (now serialized by the fs2 vault lock), non-UTF-8 path
-//! rejection, migration idempotence.
+//! `Database::open` lifecycle tests: fresh vs reopen, concurrent opens (now
+//! serialized by the fs2 vault lock), non-UTF-8 path rejection, migration
+//! idempotence.
 
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 
 use uuid::Uuid;
 
 use super::super::*;
 use super::{assert_already_open, source, Fixture};
-use crate::device_id::StaticDeviceId;
+use crate::device_id::{DeviceIdProvider, StaticDeviceId};
+use crate::table_names::TABLE_CRDT_CONFIGS;
+
+struct OneShotDeviceId(Mutex<Option<Uuid>>);
+
+impl DeviceIdProvider for OneShotDeviceId {
+    fn device_id(&self) -> crate::Result<Uuid> {
+        self.0.lock().unwrap().take().ok_or_else(|| {
+            crate::Error::Hlc("device id provider called more than once".to_string())
+        })
+    }
+}
 
 #[test]
-fn open_fresh_bootstraps_bookkeeping_and_records_device_id() {
-    let fx = Fixture::new();
-    let db = Database::open(fx.config.clone()).unwrap();
+fn open_reads_provider_once_and_returns_its_uuid() {
+    let mut fx = Fixture::new();
+    fx.config.device_id = Arc::new(OneShotDeviceId(Mutex::new(Some(fx.device))));
+    let db = Database::open(fx.config).unwrap();
     assert_eq!(db.device_id(), fx.device);
 }
 
 #[test]
-fn reopen_with_same_device_id_succeeds() {
+fn reopen_with_same_provider_returns_same_uuid() {
     let fx = Fixture::new();
     Database::open(fx.config.clone()).unwrap();
-    // A second open on the same path with the same provider must succeed —
-    // the previous open's `Database` is dropped inline so the lock is free.
     let cfg = DatabaseConfig {
         create_if_missing: false,
         ..fx.config.clone()
@@ -33,25 +43,32 @@ fn reopen_with_same_device_id_succeeds() {
 }
 
 #[test]
-fn reopen_with_different_device_id_returns_device_id_mismatch() {
+fn reopen_with_different_provider_returns_that_providers_uuid() {
+    // Post-cleanup semantics: the crate does not arbitrate device IDs. If a
+    // consumer legitimately serves a different UUID for the same DB file
+    // (per-installation UUID lookup pattern), `Database::open` accepts it and
+    // returns exactly what the provider gave. Uniqueness per (DB × replica)
+    // is the consumer's job.
     let fx = Fixture::new();
-    Database::open(fx.config.clone()).unwrap();
+    let db = Database::open(fx.config.clone()).unwrap();
+    db.with_locked_conn(|conn| {
+        conn.execute(
+            &format!(
+                "INSERT INTO {TABLE_CRDT_CONFIGS} (key, type, value) VALUES ('device_id', 'system', ?1)"
+            ),
+            [fx.device.to_string()],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    drop(db);
 
     let other = Uuid::new_v4();
     let mut cfg = fx.config.clone();
     cfg.create_if_missing = false;
     cfg.device_id = Arc::new(StaticDeviceId(other));
-    let err = match Database::open(cfg) {
-        Err(e) => e,
-        Ok(_) => panic!("open must reject a mismatched device id"),
-    };
-    match err {
-        crate::Error::DeviceIdMismatch { expected, supplied } => {
-            assert_eq!(expected, fx.device);
-            assert_eq!(supplied, other);
-        }
-        other => panic!("wrong variant: {other:?}"),
-    }
+    let db = Database::open(cfg).unwrap();
+    assert_eq!(db.device_id(), other);
 }
 
 #[test]
@@ -92,11 +109,11 @@ fn concurrent_first_opens_serialize_via_vault_lock() {
 
 #[test]
 fn concurrent_first_opens_with_different_device_ids_reject_the_loser() {
-    // Post-lock semantics: whichever supplier acquired the lock first
-    // becomes the device-id winner; the loser sees `AlreadyOpen` and never
-    // reaches the device-id arbitration. `DeviceIdMismatch` is now reserved
-    // for the sequential re-open path — see
-    // `reopen_with_different_device_id_returns_device_id_mismatch`.
+    // Post-lock semantics: whichever supplier acquired the lock first opens
+    // the DB with its provider's UUID; the loser sees `AlreadyOpen` at the
+    // file lock, without ever running open. The crate no longer arbitrates
+    // between device IDs on the same file — see
+    // `reopen_with_different_provider_returns_that_providers_uuid`.
     let fx = Fixture::new();
     let other_device = Uuid::new_v4();
     let first_config = fx.config.clone();

@@ -85,6 +85,5 @@ pub use table_names::{
 };
 
 pub use database::{
-    Database, DatabaseConfig, InstallCrdtOptions, SqlCipherKey, CONFIG_KEY_DEVICE_ID,
-    DEFAULT_TRIGGER_VERSION,
+    Database, DatabaseConfig, InstallCrdtOptions, SqlCipherKey, DEFAULT_TRIGGER_VERSION,
 };

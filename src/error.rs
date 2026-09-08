@@ -1,6 +1,5 @@
 use std::time::Duration;
 use thiserror::Error;
-use uuid::Uuid;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -26,13 +25,6 @@ pub enum Error {
 
     #[error("uhlc error: {0}")]
     Hlc(String),
-
-    // ---- device identity contract (plan §4.1) --------------------------------
-    /// The `DeviceIdProvider` returned a `Uuid` that does not match the one
-    /// recorded in `haex_hlc_state` on first open. Recovery is the consumer's
-    /// decision — this crate never silently rewrites HLC state.
-    #[error("device id mismatch: recorded {expected}, supplied {supplied}")]
-    DeviceIdMismatch { expected: Uuid, supplied: Uuid },
 
     // ---- signature contract (plan §4.2) --------------------------------------
     /// `apply_remote_changes` preflight verification found a change whose

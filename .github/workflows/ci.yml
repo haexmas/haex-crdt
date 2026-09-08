@@ -25,6 +25,10 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_VERSION: 1.96.0
+  # Rustup downloads the pinned toolchain independently in each job. Increase
+  # its retry budget so transient resets from static.rust-lang.org do not fail
+  # an otherwise healthy CI run.
+  RUSTUP_MAX_RETRIES: 10
   # Deterministic + small caches. Debug info would double the target/ size
   # for no CI-side value.
   CARGO_INCREMENTAL: 0

@@ -1,10 +1,11 @@
-//! Hybrid Logical Clock service. Owns per-device HLC state, persists the
-//! latest timestamp in `haex_crdt_configs_no_sync`, and exposes helpers used by the
-//! scanner and apply pipeline.
+//! Hybrid Logical Clock service. Owns a logical replica's in-memory HLC,
+//! persists the latest timestamp in `haex_crdt_configs_no_sync`, and exposes
+//! helpers used by the scanner and apply pipeline.
 //!
-//! Extracted from `haex-vault`. The only change of substance is the
-//! Tauri-store lookup for the device UUID — it now comes from the
-//! consumer-supplied [`DeviceIdProvider`], per plan §4.1.
+//! The HLC node UUID comes from the consumer-supplied [`DeviceIdProvider`].
+//! Consumers may use different UUIDs for different logical replicas opening
+//! the same DB file; the provider remains responsible for returning a stable
+//! UUID when the same replica reopens it.
 
 use crate::device_id::DeviceIdProvider;
 use crate::table_names::TABLE_CRDT_CONFIGS;
@@ -220,10 +221,10 @@ impl HlcService {
         })
     }
 
-    /// Build an HLC for the provider's device and fold in the timestamp this
-    /// device last persisted, so a restart cannot hand out timestamps it has
-    /// already used. Distinct from the module-level [`build_hlc`], which owns
-    /// only the `uhlc` configuration.
+    /// Build an HLC for the provider's logical replica and fold in the latest
+    /// timestamp persisted in this DB, so a restart cannot hand out timestamps
+    /// already used in this file. Distinct from the module-level [`build_hlc`],
+    /// which owns only the `uhlc` configuration.
     fn build_hlc_from_db(
         conn: &Connection,
         device_id: &dyn DeviceIdProvider,
