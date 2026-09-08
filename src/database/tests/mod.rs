@@ -49,7 +49,7 @@ impl Fixture {
             path,
             key: SqlCipherKey::new("test-key"),
             create_if_missing: true,
-            device_id: Arc::new(StaticDeviceId(device)),
+            bootstrap: Arc::new(StaticDeviceId(device)),
             signature_provider: Arc::new(NoopSignatureProvider),
             migration_source,
             trigger_version: DEFAULT_TRIGGER_VERSION,

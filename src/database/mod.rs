@@ -1,7 +1,7 @@
 //! Public `Database` facade (plan §6).
 //!
-//! [`Database`] ties together the crate's four consumer-owned traits
-//! (`DeviceIdProvider`, `SignatureProvider`, `MigrationSource`, plus the
+//! [`Database`] ties together the crate's consumer-owned seams
+//! (`DatabaseBootstrap`, `SignatureProvider`, `MigrationSource`, plus the
 //! SQLCipher key) and exposes the CRDT operations as method calls. Consumers
 //! do not need to touch the internal helpers unless they explicitly opt into
 //! `with_connection` (see the crate `raw-connection` feature).
@@ -31,14 +31,16 @@
 //!    missing file is created or errors).
 //! 2. Apply crate-owned CRDT bookkeeping migrations, then consumer
 //!    migrations (see [`crate::run_migrations`]).
-//! 3. Initialize the HLC service from the persisted timestamp in
+//! 3. Run the consumer's [`crate::DatabaseBootstrap`] hook inside a fresh
+//!    transaction the crate commits on `Ok` or rolls back on `Err`. The
+//!    hook returns the device UUID for this open and may write consumer-owned
+//!    rows in the same atomic step — for example, a per-installation
+//!    device-registry lookup and insert, or minting a vault identity keypair
+//!    on Genesis. The crate does not persist or arbitrate the returned UUID.
+//! 4. Initialize the HLC service from the persisted timestamp in
 //!    `haex_crdt_configs_no_sync` — or seed it on first open — using the
-//!    UUID returned by the consumer's [`crate::DeviceIdProvider`]. The crate no
-//!    longer stores or arbitrates the device UUID: the provider is
-//!    authoritative on every open, so a consumer that legitimately serves
-//!    different UUIDs to the same DB file (a per-installation UUID lookup,
-//!    as in haex-vault / holzi) is directly supported.
-//! 4. Ensure CRDT triggers are at the requested `trigger_version`.
+//!    UUID the bootstrap hook returned.
+//! 5. Ensure CRDT triggers are at the requested `trigger_version`.
 
 pub mod config;
 mod install;
@@ -62,7 +64,6 @@ use crate::db::error::DatabaseError;
 use crate::db::init::ensure_triggers_initialized;
 use crate::db::lock::{DatabaseLock, DatabaseLockError};
 use crate::db::migrations::{run_migrations, MigrationReport};
-use crate::device_id::StaticDeviceId;
 use crate::error::{Error, Result};
 use crate::signature::{RemoteChanges, SignatureProvider};
 
@@ -121,17 +122,22 @@ impl Database {
 
         run_migrations(&mut conn, config.migration_source.as_ref())?;
 
-        // Read the provider exactly once so the HLC node id, scanner
-        // attribution, and `Database::device_id()` all use the same UUID for
-        // this handle. A provider may perform I/O, and even a faulty provider
-        // must not be able to supply two identities to one open operation.
-        let device_uuid = config
-            .device_id
-            .device_id()
-            .map_err(|e| DatabaseError::HlcError {
-                reason: e.to_string(),
-            })?;
-        hlc.initialize_in_place(&conn, &StaticDeviceId(device_uuid))
+        // Run the consumer bootstrap hook inside a fresh transaction the
+        // crate owns. The hook returns the device UUID for this open and
+        // may write consumer-owned rows (per-installation device registry
+        // lookup, Genesis vault-identity minting, ...); either the hook
+        // and its writes commit together, or both are rolled back. The
+        // returned UUID is also used for HLC init, scanner attribution,
+        // and `Database::device_id()` — all three see the same value for
+        // this handle.
+        let device_uuid = {
+            let tx = conn.transaction().map_err(DatabaseError::from)?;
+            let uuid = config.bootstrap.bootstrap(&tx)?;
+            tx.commit().map_err(DatabaseError::from)?;
+            uuid
+        };
+
+        hlc.initialize_in_place(&conn, device_uuid)
             .map_err(|e| DatabaseError::HlcError {
                 reason: e.to_string(),
             })?;
@@ -157,9 +163,9 @@ impl Database {
         &self.inner.hlc
     }
 
-    /// The device UUID returned by the consumer's `DeviceIdProvider` for this
-    /// open. Convenience for consumers that want to log or display it
-    /// alongside sync progress.
+    /// The device UUID returned by the consumer's `DatabaseBootstrap` hook
+    /// for this open. Convenience for consumers that want to log or display
+    /// it alongside sync progress.
     pub fn device_id(&self) -> Uuid {
         self.inner.device_uuid
     }
