@@ -261,13 +261,16 @@ fn scan_excludes_pks_and_crdt_meta_from_emitted_columns() {
 }
 
 #[test]
-fn scan_skips_consumer_no_trigger_suffixed_columns() {
+fn scan_emits_no_trigger_columns_under_the_row_hlc() {
     let (conn, hlc, dev) = make_fixture();
-    // A consumer bookkeeping column opted out of change tracking by the
-    // `_no_trigger` suffix. The installer never tracks it, so it never
-    // gets an entry in the per-column HLC map — without the suffix rule
-    // the per-column loop falls back to the row-level HLC and ships it on
-    // every scan.
+    // A consumer bookkeeping column opted out of *change tracking* by the
+    // `_no_trigger` suffix. The installer never tracks it, so it has no
+    // entry in the per-column HLC map and can never itself cause the row
+    // to be scanned — but once a tracked sibling does, the per-column loop
+    // falls back to the row-level HLC and the column's current value rides
+    // along. `_no_trigger` governs what fires a trigger, not what ships;
+    // keeping a column off the wire is `_no_sync`'s job, and that suffix
+    // is table-level.
     create_crdt_table(&conn, "items", "name TEXT, updated_at_no_trigger TEXT");
     insert_row_via_transformer(
         &conn,
@@ -283,11 +286,22 @@ fn scan_skips_consumer_no_trigger_suffixed_columns() {
         ScanFilters::default(),
     )
     .unwrap();
-    let cols: Vec<&str> = changes.iter().map(|c| c.column_name.as_str()).collect();
+    let mut cols: Vec<&str> = changes.iter().map(|c| c.column_name.as_str()).collect();
+    cols.sort_unstable();
     assert_eq!(
         cols,
-        vec!["name"],
-        "only the tracked sibling column may emit; `_no_trigger` columns must not"
+        vec!["name", "updated_at_no_trigger"],
+        "a `_no_trigger` column still ships under the row HLC; only the \
+         crate's own metadata columns are withheld"
+    );
+    let meta = changes
+        .iter()
+        .find(|c| c.column_name == "updated_at_no_trigger")
+        .expect("the untracked column must be present");
+    assert_eq!(
+        meta.value,
+        serde_json::json!("2026-01-01"),
+        "it ships its current value, not a tracked history"
     );
 }
 

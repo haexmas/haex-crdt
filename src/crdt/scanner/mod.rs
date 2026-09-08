@@ -174,10 +174,10 @@ pub struct ScanFilters<'a> {
 /// Reads per-column changes since `after_hlc` from `table_name`, returning
 /// one [`ColumnChange`] per (row, changed column) pair.
 ///
-/// Primary-key columns and any column whose name ends in `_no_trigger`
-/// are never emitted — the scanner applies the same one-rule skip as
-/// [`crate::crdt::trigger::setup_triggers_for_table`], so a column opted
-/// out of change tracking also stays off the wire.
+/// Primary-key columns and the crate's three structural metadata columns
+/// are never emitted. Every other column is, `_no_trigger` ones included —
+/// that suffix governs what fires a trigger, not what ships. See
+/// [`partition_columns`] for why the two are distinct.
 ///
 /// # Filters
 ///
@@ -411,23 +411,34 @@ pub fn paginate_changes<T: Paginable>(changes: Vec<T>, page_budget: usize) -> (V
 
 /// Splits a table schema into PK columns and syncable data columns.
 ///
-/// One rule, the same one [`crate::crdt::trigger::setup_triggers_for_table`]
-/// applies: skip PKs and any column whose name ends in `_no_trigger`. The
-/// three structural CRDT metadata columns ([`HLC_TIMESTAMP_COLUMN`],
-/// [`COLUMN_HLCS_COLUMN`], [`COLUMN_SIGS_COLUMN`]) carry that suffix too,
-/// so the rule catches them without a separate exemption.
+/// Data columns exclude PKs and the crate's own three structural metadata
+/// columns ([`HLC_TIMESTAMP_COLUMN`], [`COLUMN_HLCS_COLUMN`],
+/// [`COLUMN_SIGS_COLUMN`]) — those carry the CRDT's own bookkeeping, so
+/// shipping them as data changes would be meaningless. Naming them here is
+/// the crate describing its own internals, not a consumer exception list.
 ///
-/// The scanner must honour the rule and not just the installer: because a
-/// `_no_trigger` column is never tracked, it never gets an entry in the
-/// per-column HLC map, so the per-column loop in
-/// [`emit::emit_row_changes`] would fall back to the row-level HLC and
-/// ship the column on every scan — the opposite of what the suffix
-/// promised.
+/// Everything else is emitted, **including `_no_trigger` columns**. The two
+/// suffixes govern different questions and must not be conflated:
+///
+/// - `_no_trigger` decides what fires a trigger, i.e. what *drives* sync. A
+///   `_no_trigger` column has no entry in the per-column HLC map, so it
+///   never causes a row to be scanned — but when the row's tracked columns
+///   do sync, the column's current value rides along under the row-level
+///   HLC. That is the intended semantics, not a leak.
+/// - `_no_sync` decides what participates in sync at all, and is a
+///   *table*-level suffix (see [`crate::db::init`]). There is deliberately
+///   no column-level equivalent yet: a consumer that must keep a column off
+///   the wire filters it out of the returned changes.
 fn partition_columns(schema: &[ColumnInfo]) -> (Vec<&ColumnInfo>, Vec<&ColumnInfo>) {
     let pk_columns: Vec<&ColumnInfo> = schema.iter().filter(|c| c.is_pk).collect();
     let data_columns: Vec<&ColumnInfo> = schema
         .iter()
-        .filter(|c| !c.is_pk && !c.name.ends_with("_no_trigger"))
+        .filter(|c| {
+            !c.is_pk
+                && c.name != HLC_TIMESTAMP_COLUMN
+                && c.name != COLUMN_HLCS_COLUMN
+                && c.name != COLUMN_SIGS_COLUMN
+        })
         .collect();
     (pk_columns, data_columns)
 }

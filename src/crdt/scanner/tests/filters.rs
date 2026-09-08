@@ -417,10 +417,9 @@ fn column_eq_filter_rejects_an_unsafe_name_before_any_schema_check() {
 #[test]
 fn column_eq_filter_may_target_a_no_trigger_column() {
     let (conn, hlc, dev) = make_fixture();
-    // Filtering on a column is deliberately independent of emitting it: a
-    // consumer may scope a scan by bookkeeping that is itself opted out of
-    // change tracking. Membership is checked against the whole schema, not
-    // the emitted data columns.
+    // A consumer may scope a scan by bookkeeping that is itself opted out
+    // of change tracking. Membership is checked against the whole schema,
+    // so any column the table has is a legal filter target.
     create_crdt_table(&conn, "items", "bucket_no_trigger TEXT, name TEXT");
     insert_row_via_transformer(
         &conn,
@@ -444,11 +443,16 @@ fn column_eq_filter_may_target_a_no_trigger_column() {
         },
     )
     .unwrap();
-    let cols: Vec<&str> = changes.iter().map(|c| c.column_name.as_str()).collect();
+    let mut cols: Vec<&str> = changes.iter().map(|c| c.column_name.as_str()).collect();
+    cols.sort_unstable();
     assert_eq!(
         cols,
-        vec!["name"],
-        "the filter column restricts rows without being emitted: {changes:?}"
+        vec!["bucket_no_trigger", "name"],
+        "filtering on a `_no_trigger` column neither withholds it nor the \
+         row's tracked columns: {changes:?}"
     );
-    assert_eq!(changes[0].row_pks, r#"{"id":"i1"}"#);
+    assert!(
+        changes.iter().all(|c| c.row_pks == r#"{"id":"i1"}"#),
+        "only the matching row may be returned: {changes:?}"
+    );
 }
