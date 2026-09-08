@@ -693,9 +693,9 @@ fn crdt_setup_error_converts_into_database_error_crdt_setup_variant() {
 }
 
 // -------------------------------------------------------------------------
-// D-4 (revised): `_no_trigger` suffix on columns is the sole skip rule.
+// D-4 (revised): the `_no_sync` suffix on columns is the sole skip rule.
 // Structural CRDT metadata columns follow the same convention and are
-// caught by it.
+// caught by it. The consumer-column half lives in `tests/no_sync.rs`.
 // -------------------------------------------------------------------------
 
 /// Reads the raw SQL body of the AFTER-UPDATE trigger for `table_name` from
@@ -708,38 +708,6 @@ fn update_trigger_ddl(conn: &Connection, table_name: &str) -> String {
         |r| r.get::<_, String>(0),
     )
     .expect("update trigger must exist")
-}
-
-#[test]
-fn installer_skips_columns_ending_in_no_trigger() {
-    let conn = Connection::open_in_memory().unwrap();
-    register_test_udfs(&conn);
-    setup_crdt_bookkeeping(&conn);
-    conn.execute_batch(&format!(
-        "CREATE TABLE items (
-             id INTEGER PRIMARY KEY,
-             value TEXT,
-             bookkeeping_no_trigger TEXT,
-             {HLC_TIMESTAMP_COLUMN} TEXT,
-             {COLUMN_HLCS_COLUMN} TEXT NOT NULL DEFAULT '{{}}',
-             {COLUMN_SIGS_COLUMN} TEXT NOT NULL DEFAULT '{{}}'
-         );"
-    ))
-    .unwrap();
-
-    let tx = conn.unchecked_transaction().unwrap();
-    setup_triggers_for_table(&tx, "items", false).unwrap();
-    tx.commit().unwrap();
-
-    let sql = update_trigger_ddl(&conn, "items");
-    assert!(
-        !sql.contains("bookkeeping_no_trigger"),
-        "column ending in `_no_trigger` must not appear in tracked list: {sql}"
-    );
-    assert!(
-        sql.contains("\"value\""),
-        "non-suffixed column must be tracked: {sql}"
-    );
 }
 
 /// Extracts the tracked-column list from an `AFTER UPDATE OF ... ON` trigger
@@ -757,18 +725,19 @@ fn tracked_columns_of(sql: &str) -> Vec<String> {
 }
 
 #[test]
-fn installer_skips_structural_metadata_via_no_trigger_suffix() {
+fn installer_skips_structural_metadata_via_no_sync_suffix() {
     // Verifies the three structural CRDT metadata columns are skipped via
-    // the same `_no_trigger` suffix rule that skips consumer-declared
-    // `_no_trigger` columns. Their names all end in `_no_trigger`, so no
-    // separate hardcoded exemption is needed.
+    // the same `_no_sync` suffix rule that skips consumer-declared
+    // `_no_sync` columns. Their names all end in `_no_sync`, so neither the
+    // installer nor the scanner needs a hardcoded exemption — the suffix
+    // assertion below is what makes that exemption-free predicate correct.
     let conn = setup_trigger_fixture();
     let sql = update_trigger_ddl(&conn, "items");
 
     let tracked = tracked_columns_of(&sql);
     // Fixture table `items` carries id (PK), name, body, and the three
     // metadata columns. The tracked list is exactly {name, body} — metadata
-    // columns are excluded via the `_no_trigger` suffix rule.
+    // columns are excluded via the `_no_sync` suffix rule.
     assert_eq!(
         tracked,
         vec!["\"name\"".to_string(), "\"body\"".to_string()],
@@ -776,72 +745,14 @@ fn installer_skips_structural_metadata_via_no_trigger_suffix() {
     );
     for meta in [HLC_TIMESTAMP_COLUMN, COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN] {
         assert!(
-            meta.ends_with("_no_trigger"),
-            "invariant: structural metadata name {meta} must follow the `_no_trigger` suffix convention"
+            meta.ends_with("_no_sync"),
+            "invariant: structural metadata name {meta} must follow the `_no_sync` suffix convention"
         );
         assert!(
             !tracked.iter().any(|c| c == &format!("\"{meta}\"")),
             "structural metadata column {meta} must not be tracked"
         );
     }
-}
-
-#[test]
-fn update_of_no_trigger_suffixed_column_does_not_mark_dirty() {
-    let conn = Connection::open_in_memory().unwrap();
-    register_test_udfs(&conn);
-    setup_crdt_bookkeeping(&conn);
-    conn.execute_batch(&format!(
-        "CREATE TABLE items (
-             id INTEGER PRIMARY KEY,
-             value TEXT,
-             local_meta_no_trigger TEXT,
-             {HLC_TIMESTAMP_COLUMN} TEXT,
-             {COLUMN_HLCS_COLUMN} TEXT NOT NULL DEFAULT '{{}}',
-             {COLUMN_SIGS_COLUMN} TEXT NOT NULL DEFAULT '{{}}'
-         );"
-    ))
-    .unwrap();
-
-    let tx = conn.unchecked_transaction().unwrap();
-    setup_triggers_for_table(&tx, "items", false).unwrap();
-    tx.commit().unwrap();
-
-    conn.execute(
-        &format!(
-            "INSERT INTO items (id, value, local_meta_no_trigger, {HLC_TIMESTAMP_COLUMN})
-             VALUES (1, 'v', 'm1', 'hlc-1')"
-        ),
-        [],
-    )
-    .unwrap();
-    // Clear the dirty entry left by the INSERT so the UPDATE assertion is
-    // unambiguous.
-    conn.execute(
-        &format!("DELETE FROM {TABLE_CRDT_DIRTY_TABLES} WHERE table_name = 'items'"),
-        [],
-    )
-    .unwrap();
-
-    conn.execute(
-        &format!(
-            "UPDATE items SET local_meta_no_trigger = 'm2', {HLC_TIMESTAMP_COLUMN} = 'hlc-2' WHERE id = 1"
-        ),
-        [],
-    )
-    .unwrap();
-
-    let dirty: i64 = conn
-        .query_row(
-            &format!("SELECT COUNT(*) FROM {TABLE_CRDT_DIRTY_TABLES} WHERE table_name = 'items'"),
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        dirty, 0,
-        "UPDATE OF a `_no_trigger`-suffixed column must not mark the row dirty"
-    );
 }
 
 #[test]
@@ -853,7 +764,7 @@ fn update_of_regular_column_still_marks_dirty() {
         "CREATE TABLE items (
              id INTEGER PRIMARY KEY,
              value TEXT,
-             local_meta_no_trigger TEXT,
+             local_meta_no_sync TEXT,
              {HLC_TIMESTAMP_COLUMN} TEXT,
              {COLUMN_HLCS_COLUMN} TEXT NOT NULL DEFAULT '{{}}',
              {COLUMN_SIGS_COLUMN} TEXT NOT NULL DEFAULT '{{}}'
@@ -867,7 +778,7 @@ fn update_of_regular_column_still_marks_dirty() {
 
     conn.execute(
         &format!(
-            "INSERT INTO items (id, value, local_meta_no_trigger, {HLC_TIMESTAMP_COLUMN})
+            "INSERT INTO items (id, value, local_meta_no_sync, {HLC_TIMESTAMP_COLUMN})
              VALUES (1, 'v1', 'm1', 'hlc-1')"
         ),
         [],

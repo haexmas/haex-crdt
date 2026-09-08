@@ -142,15 +142,14 @@ fn column_eq_filter_value_with_sql_metacharacters_matches_literally() {
 fn column_eq_filter_rejects_an_identifier_unsafe_column_name() {
     let (conn, hlc, dev) = make_fixture();
     // A column whose NAME closes the quoted identifier and opens a
-    // tautology. Nothing else in the crate validates it: the `_no_trigger`
+    // tautology. Nothing else in the crate validates it: the `_no_sync`
     // suffix keeps it out of `partition_columns`' SELECT list, and the
-    // trigger installer strips `_no_trigger` names before its own
-    // identifier check — the filter is the only path from this name into
-    // SQL.
+    // trigger installer strips `_no_sync` names before its own identifier
+    // check — the filter is the only path from this name into SQL.
     create_crdt_table(
         &conn,
         "items",
-        r#"bucket TEXT, "bucket"" OR 1=1 OR ""bucket_no_trigger" TEXT"#,
+        r#"bucket TEXT, "bucket"" OR 1=1 OR ""bucket_no_sync" TEXT"#,
     );
     insert_row_via_transformer(
         &conn,
@@ -164,7 +163,7 @@ fn column_eq_filter_rejects_an_identifier_unsafe_column_name() {
     );
 
     // Interpolated unquoted this yields
-    //   WHERE "bucket" OR 1=1 OR "bucket_no_trigger" = ?1
+    //   WHERE "bucket" OR 1=1 OR "bucket_no_sync" = ?1
     // — valid SQL with one bind param that matches every row, so a filter
     // value matching nothing would ship the whole table.
     let err = scan_table_for_local_changes(
@@ -173,7 +172,7 @@ fn column_eq_filter_rejects_an_identifier_unsafe_column_name() {
         None,
         &dev.to_string(),
         ScanFilters {
-            column_eq: Some((r#"bucket" OR 1=1 OR "bucket_no_trigger"#, "matches-nothing")),
+            column_eq: Some((r#"bucket" OR 1=1 OR "bucket_no_sync"#, "matches-nothing")),
             ..Default::default()
         },
     )
@@ -242,49 +241,6 @@ fn column_eq_filter_rejects_an_unsafe_name_before_any_schema_check() {
     assert!(
         matches!(err, DatabaseError::ValidationError { .. }),
         "an unusable filter name must not depend on table state: {err:?}"
-    );
-}
-
-#[test]
-fn column_eq_filter_may_target_a_no_trigger_column() {
-    let (conn, hlc, dev) = make_fixture();
-    // A consumer may scope a scan by bookkeeping that is itself opted out
-    // of change tracking. Membership is checked against the whole schema,
-    // so any column the table has is a legal filter target.
-    create_crdt_table(&conn, "items", "bucket_no_trigger TEXT, name TEXT");
-    insert_row_via_transformer(
-        &conn,
-        &hlc,
-        "INSERT INTO items (id, bucket_no_trigger, name) VALUES ('i1', 'b1', 'a')",
-    );
-    insert_row_via_transformer(
-        &conn,
-        &hlc,
-        "INSERT INTO items (id, bucket_no_trigger, name) VALUES ('i2', 'b2', 'b')",
-    );
-
-    let changes = scan_table_for_local_changes(
-        &conn,
-        "items",
-        None,
-        &dev.to_string(),
-        ScanFilters {
-            column_eq: Some(("bucket_no_trigger", "b1")),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    let mut cols: Vec<&str> = changes.iter().map(|c| c.column_name.as_str()).collect();
-    cols.sort_unstable();
-    assert_eq!(
-        cols,
-        vec!["bucket_no_trigger", "name"],
-        "filtering on a `_no_trigger` column neither withholds it nor the \
-         row's tracked columns: {changes:?}"
-    );
-    assert!(
-        changes.iter().all(|c| c.row_pks == r#"{"id":"i1"}"#),
-        "only the matching row may be returned: {changes:?}"
     );
 }
 

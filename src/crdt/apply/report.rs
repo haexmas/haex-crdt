@@ -29,6 +29,9 @@ pub struct ApplyReport {
     pub skipped_unknown_column: usize,
     /// Column carried a `_no_sync` name, which the local scanner would never
     /// ship (a misconfigured peer, or one predating the column-level rule).
+    /// The crate's own metadata columns carry that suffix too but are
+    /// counted under [`Self::skipped_reserved_column`], which is checked
+    /// first.
     pub skipped_no_sync_column: usize,
     /// Column named something the crate owns the value of: one of its three
     /// structural metadata columns, or a primary key (row identity comes

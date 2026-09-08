@@ -7,6 +7,10 @@
 //! crate's own in the column list, and SQLite takes the FIRST value for a
 //! duplicated column, so an unfiltered remote metadata column wins over
 //! the crate's computed one.
+//!
+//! The metadata columns carry the `_no_sync` suffix themselves, so the two
+//! guards overlap and the report's two counters are told apart by statement
+//! order alone. `reserved_metadata_outranks_the_no_sync_suffix` pins it.
 
 use std::time::Duration;
 
@@ -381,42 +385,39 @@ fn a_dropped_change_does_not_drag_the_local_clock_forward() {
 }
 
 #[test]
-fn remote_no_trigger_column_is_accepted() {
+fn reserved_metadata_outranks_the_no_sync_suffix() {
     let (mut conn, hlc, _dev) = make_fixture();
-    create_crdt_table(&conn, "items", "body TEXT, updated_at_no_trigger TEXT");
+    create_crdt_table(&conn, "items", "body TEXT");
 
-    // The "must accept" half of the mirror. `_no_trigger` governs what
-    // fires a trigger, `_no_sync` what participates in sync at all: the
-    // scanner ships `_no_trigger` columns under the row HLC, so apply must
-    // take them. Collapsing the guard into
-    // `ends_with("_no_sync") || ends_with("_no_trigger")` would break every
-    // consumer's bookkeeping sync with an otherwise green suite.
-    let report = apply_remote_changes(
-        &mut conn,
-        vec![
-            change("items", "r1", "body", HLC2, json!("hello")),
-            change(
-                "items",
-                "r1",
-                "updated_at_no_trigger",
-                HLC2,
-                json!("2026-01-01"),
-            ),
-        ],
-        &hlc,
-        &NoopSignatureProvider,
-    )
-    .unwrap();
-
-    let stored: String = conn
-        .query_row(
-            "SELECT updated_at_no_trigger FROM items WHERE id = 'r1'",
-            [],
-            |r| r.get(0),
+    // Precedence guard. The three metadata columns end in `_no_sync` like
+    // any consumer column that never ships, so both guards match them and
+    // only statement order decides which counter they land in. Reserved has
+    // to win: the counters are the diagnostic split between a misconfigured
+    // or stale peer (`_no_sync`) and a badly broken or hostile one (naming
+    // a column the crate owns the value of).
+    let reserved_columns = [HLC_TIMESTAMP_COLUMN, COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN];
+    for (n, reserved) in reserved_columns.iter().enumerate() {
+        // A fresh row each time, so every iteration takes the INSERT path.
+        let row = format!("r{n}");
+        let report = apply_remote_changes(
+            &mut conn,
+            vec![
+                change("items", &row, "body", HLC2, json!("hello")),
+                change("items", &row, reserved, HLC_ATTACKER, json!("mine")),
+            ],
+            &hlc,
+            &NoopSignatureProvider,
         )
         .unwrap();
-    assert_eq!(stored, "2026-01-01");
-    assert_eq!(report.applied, 2);
-    assert_eq!(report.skipped_no_sync_column, 0);
-    assert_eq!(report.skipped_reserved_column, 0);
+
+        assert_eq!(
+            report.skipped_reserved_column, 1,
+            "{reserved} must count as reserved, not as `_no_sync`"
+        );
+        assert_eq!(
+            report.skipped_no_sync_column, 0,
+            "{reserved} must not be swallowed by the suffix check: order is \
+             the only thing keeping the two counters apart"
+        );
+    }
 }
