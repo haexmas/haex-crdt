@@ -4,15 +4,19 @@
 //! 500-LoC cap: `lww` covers the write loop, `sig` covers the preflight
 //! contract, `delete` covers the delete-log fan-out + shadowing,
 //! `reserved_columns` covers the columns apply refuses to accept from a
-//! peer.
+//! peer, `drift` covers the pre-transaction clock-drift gate.
 
 mod delete;
+mod drift;
 mod lww;
 mod reserved_columns;
 mod sig;
 
+use std::time::Duration;
+
 use rusqlite::functions::FunctionFlags;
 use rusqlite::Connection;
+use uhlc::NTP64;
 use uuid::Uuid;
 
 use crate::crdt::columns::{
@@ -101,4 +105,29 @@ pub(super) fn change(
         device_id: String::new(),
         sig: None,
     }
+}
+
+/// An HLC `offset` beyond the live wall clock, carrying `hlc`'s node id.
+///
+/// Every test value that has to sit on one side of
+/// [`crate::MAX_REMOTE_HLC_DRIFT`] comes from here rather than from a
+/// constant: a hardcoded "far future" HLC once rotted into tolerance
+/// silently, and a hardcoded one would rot again the next time the
+/// tolerance moves.
+pub(super) fn hlc_ahead_of_now(hlc: &HlcService, offset: Duration) -> String {
+    hlc_offset_from_now(hlc, NTP64::from(offset).as_u64() as i128)
+}
+
+/// The mirror of [`hlc_ahead_of_now`], for the one-sidedness of the gate:
+/// `uhlc` never refuses a timestamp for lying in the past.
+pub(super) fn hlc_behind_now(hlc: &HlcService, offset: Duration) -> String {
+    hlc_offset_from_now(hlc, -(NTP64::from(offset).as_u64() as i128))
+}
+
+fn hlc_offset_from_now(hlc: &HlcService, offset_ntp: i128) -> String {
+    // The node id has to come from a real timestamp: uhlc parses the id back
+    // out of the string, and rejects one with a leading zero.
+    let id = *hlc.new_timestamp().expect("timestamp").get_id();
+    let shifted = (uhlc::system_time_clock().as_u64() as i128 + offset_ntp) as u64;
+    format!("{shifted}/{id}")
 }

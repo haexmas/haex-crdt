@@ -16,10 +16,86 @@ use std::{
     time::Duration,
 };
 use thiserror::Error;
-use uhlc::{HLCBuilder, Timestamp, HLC, ID};
+use uhlc::{system_time_clock, HLCBuilder, Timestamp, HLC, ID};
 use uuid::Uuid;
 
 const HLC_TIMESTAMP_TYPE: &str = "hlc_timestamp";
+
+/// How far ahead of local now an incoming remote HLC timestamp may lie and
+/// still be treated as a clock reading: within this, the timestamp is stored
+/// *and* the local clock is advanced past it; beyond it, the change is
+/// refused (see `apply_remote_changes`).
+///
+/// **One-sided.** `uhlc` only rejects drift into the *future*
+/// (`msg_time > now && msg_time - now > delta`), so a timestamp in the past
+/// is always accepted — it simply loses last-write-wins. This bound is
+/// therefore a ceiling on how far a peer may push our clock forward, not a
+/// window around now.
+///
+/// **12 hours, not `uhlc`'s 500 ms default.** Peers are other people's
+/// devices: a laptop resuming from sleep, a phone that spent a day offline,
+/// a VM with no NTP. At half a second of tolerance those honest devices fall
+/// out of tolerance routinely, and the cost of a false refusal is not one
+/// lost write but a peer that cannot sync at all. 12 h swallows ordinary
+/// device skew (including a whole-timezone misconfiguration) while still
+/// bounding how far a hostile or broken peer can drag this device's clock —
+/// and thus its own future writes' LWW position — forward.
+///
+/// **Set explicitly at every construction site**, which deliberately makes
+/// `uhlc`'s `UHLC_MAX_DELTA_MS` environment variable inert: sync tolerance
+/// is a property of the protocol, not of whoever launched the process.
+pub const MAX_REMOTE_HLC_DRIFT: Duration = Duration::from_secs(12 * 60 * 60);
+
+/// The crate's **only** `uhlc::HLC` construction site.
+///
+/// Every constructor — production and test — funnels through here so that
+/// [`MAX_REMOTE_HLC_DRIFT`] cannot be set to a second value by omission:
+/// before this existed, `new_with_uuid` inherited `uhlc`'s 500 ms default
+/// while `try_initialize` set one second, so a device's drift tolerance
+/// depended on which constructor its consumer happened to call.
+///
+/// `None` yields `HLCBuilder`'s random `ID::rand()`, which is the fallback
+/// for a device UUID `uhlc::ID` will not accept (it rejects all-zero ids).
+fn build_hlc(node_id: Option<ID>) -> HLC {
+    let builder = HLCBuilder::new().with_max_delta(MAX_REMOTE_HLC_DRIFT);
+    match node_id {
+        Some(id) => builder.with_id(id),
+        None => builder,
+    }
+    .build()
+}
+
+/// How far `hlc` lies beyond local now, or `None` if it does not lie beyond
+/// it at all (including for a `hlc` that is not a well-formed timestamp).
+///
+/// Read this against [`MAX_REMOTE_HLC_DRIFT`] to decide whether a remote
+/// timestamp is a clock reading. It measures against the same physical clock
+/// and applies the same logical-counter masking that
+/// `uhlc::HLC::update_with_timestamp` does internally, so a timestamp this
+/// function reports as within tolerance is one `update_with_timestamp` will
+/// also accept — unless the wall clock runs backwards in between. That
+/// equivalence is what lets `apply_remote_changes` refuse over-drift input
+/// *before* it opens its transaction and still be sure the clock advance it
+/// performs after committing cannot fail for drift.
+///
+/// A malformed `hlc` returns `None` rather than an error: drift is undefined
+/// for a string that is not a timestamp. The apply preflight validates
+/// complete `<time>/<node>` timestamps separately; strings without that full
+/// shape still reach [`compare_hlc_strings`], which reads them as ancient so
+/// they lose LWW instead of being applied.
+pub fn remote_hlc_drift(hlc: &str) -> Option<Duration> {
+    let remote = *Timestamp::from_str(hlc).ok()?.get_time();
+    // uhlc masks off the logical-counter bits of its physical reading before
+    // comparing; mask identically so the two comparisons cannot disagree at
+    // the boundary by the counter's worth of nanoseconds.
+    let mut now = system_time_clock();
+    now.0 &= !((1u64 << uhlc::CSIZE) - 1);
+    if remote > now {
+        Some((remote - now).to_duration())
+    } else {
+        None
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum HlcError {
@@ -102,14 +178,10 @@ impl HlcService {
     /// and for consumers that already hold a persisted UUID and want to
     /// skip the provider indirection at construction time.
     ///
-    /// Falls back to `HLCBuilder::default()` (which seeds a random
-    /// `ID::rand()`) if the UUID's byte pattern is all zeros — `uhlc::ID`
-    /// rejects the all-zero id.
+    /// Falls back to a random `ID::rand()` if the UUID's byte pattern is all
+    /// zeros — `uhlc::ID` rejects the all-zero id.
     pub fn new_with_uuid(device_uuid: Uuid) -> Self {
-        let hlc = match ID::try_from(*device_uuid.as_bytes()) {
-            Ok(node_id) => HLCBuilder::new().with_id(node_id).build(),
-            Err(_) => HLCBuilder::new().build(),
-        };
+        let hlc = build_hlc(ID::try_from(*device_uuid.as_bytes()).ok());
 
         HlcService {
             hlc: Arc::new(Mutex::new(Some(hlc))),
@@ -126,7 +198,7 @@ impl HlcService {
         conn: &Connection,
         device_id: &dyn DeviceIdProvider,
     ) -> Result<(), HlcError> {
-        let hlc = Self::build_hlc(conn, device_id)?;
+        let hlc = Self::build_hlc_from_db(conn, device_id)?;
 
         let mut slot = self.hlc.lock().map_err(|_| HlcError::MutexPoisoned)?;
         *slot = Some(hlc);
@@ -141,14 +213,21 @@ impl HlcService {
         conn: &Connection,
         device_id: &dyn DeviceIdProvider,
     ) -> Result<Self, HlcError> {
-        let hlc = Self::build_hlc(conn, device_id)?;
+        let hlc = Self::build_hlc_from_db(conn, device_id)?;
 
         Ok(HlcService {
             hlc: Arc::new(Mutex::new(Some(hlc))),
         })
     }
 
-    fn build_hlc(conn: &Connection, device_id: &dyn DeviceIdProvider) -> Result<HLC, HlcError> {
+    /// Build an HLC for the provider's device and fold in the timestamp this
+    /// device last persisted, so a restart cannot hand out timestamps it has
+    /// already used. Distinct from the module-level [`build_hlc`], which owns
+    /// only the `uhlc` configuration.
+    fn build_hlc_from_db(
+        conn: &Connection,
+        device_id: &dyn DeviceIdProvider,
+    ) -> Result<HLC, HlcError> {
         let uuid = device_id
             .device_id()
             .map_err(|e| HlcError::DeviceStore(e.to_string()))?;
@@ -157,10 +236,7 @@ impl HlcService {
             HlcError::ParseNodeId(format!("Invalid node ID format from device store: {e:?}"))
         })?;
 
-        let hlc = HLCBuilder::new()
-            .with_id(node_id)
-            .with_max_delta(Duration::from_secs(1))
-            .build();
+        let hlc = build_hlc(Some(node_id));
 
         if let Some(last_timestamp) = Self::load_last_timestamp(conn)? {
             hlc.update_with_timestamp(&last_timestamp).map_err(|e| {
@@ -288,8 +364,10 @@ impl Default for HlcService {
 /// paths, so it intentionally does **NOT** log. An earlier version
 /// `eprintln!`-ed on every parse failure, which produced one log line *per
 /// comparison* and flooded the logs whenever a single corrupt row (empty
-/// row-level HLC) was present. Malformed/empty HLCs are detected and kept
-/// off the wire at the ingestion boundary in the scanner instead.
+/// row-level HLC) was present. Complete malformed timestamps are rejected by
+/// apply preflight before this comparator can influence a write; malformed or
+/// empty strings that reach other comparator call sites retain the ancient
+/// fallback.
 pub fn compare_hlc_strings(a: &str, b: &str) -> std::cmp::Ordering {
     fn parse(s: &str) -> (u64, u128) {
         let (time_str, node_str) = match s.split_once('/') {
@@ -363,261 +441,4 @@ pub fn hlc_is_from_node(hlc: &str, expected_node: u128) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::device_id::StaticDeviceId;
-    use rusqlite::Connection;
-    use std::str::FromStr;
-
-    fn fresh_configs_table(conn: &Connection) {
-        conn.execute(
-            &format!(
-                "CREATE TABLE {TABLE_CRDT_CONFIGS} (key TEXT PRIMARY KEY, type TEXT NOT NULL, value TEXT NOT NULL)"
-            ),
-            [],
-        )
-        .expect("Should create table");
-    }
-
-    #[test]
-    fn test_timestamp_format() {
-        // Verify that uhlc uses the "time/node_id_hex" format
-        let node_id = ID::try_from([1u8; 16]).unwrap();
-        let hlc = HLCBuilder::new()
-            .with_id(node_id)
-            .with_max_delta(Duration::from_secs(1))
-            .build();
-
-        let timestamp = hlc.new_timestamp();
-        let formatted = timestamp.to_string();
-
-        assert!(formatted.contains('/'), "Timestamp should contain '/'");
-        let parts: Vec<&str> = formatted.split('/').collect();
-        assert_eq!(parts.len(), 2, "Timestamp should have exactly 2 parts");
-
-        let time_part = parts[0].parse::<u64>();
-        assert!(time_part.is_ok(), "Time part should be a valid u64");
-
-        assert!(
-            parts[1].len() <= 32,
-            "Node ID hex should be at most 32 characters (16 bytes)"
-        );
-        assert!(!parts[1].is_empty(), "Node ID hex should not be empty");
-    }
-
-    #[test]
-    fn test_timestamp_parsing() {
-        let node_id = ID::try_from([2u8; 16]).unwrap();
-        let hlc = HLCBuilder::new()
-            .with_id(node_id)
-            .with_max_delta(Duration::from_secs(1))
-            .build();
-
-        let original = hlc.new_timestamp();
-        let formatted = original.to_string();
-
-        let parsed = Timestamp::from_str(&formatted).expect("Should parse timestamp");
-
-        assert_eq!(original, parsed, "Parsed timestamp should equal original");
-    }
-
-    #[test]
-    fn test_timestamp_ordering() {
-        let node_id = ID::try_from([4u8; 16]).unwrap();
-        let hlc = HLCBuilder::new()
-            .with_id(node_id)
-            .with_max_delta(Duration::from_secs(1))
-            .build();
-
-        let ts1 = hlc.new_timestamp();
-        std::thread::sleep(std::time::Duration::from_millis(1));
-        let ts2 = hlc.new_timestamp();
-        std::thread::sleep(std::time::Duration::from_millis(1));
-        let ts3 = hlc.new_timestamp();
-
-        assert!(ts1 < ts2, "ts1 should be less than ts2");
-        assert!(ts2 < ts3, "ts2 should be less than ts3");
-    }
-
-    #[test]
-    fn test_hlc_persistence() {
-        let mut conn = Connection::open_in_memory().expect("Should create in-memory DB");
-        fresh_configs_table(&conn);
-
-        let node_id = ID::try_from([5u8; 16]).unwrap();
-        let hlc = HLCBuilder::new()
-            .with_id(node_id)
-            .with_max_delta(Duration::from_secs(1))
-            .build();
-
-        let original_timestamp = hlc.new_timestamp();
-
-        {
-            let tx = conn.transaction().expect("Should start transaction");
-            HlcService::persist_timestamp(&tx, &original_timestamp)
-                .expect("Should persist timestamp");
-            tx.commit().expect("Should commit");
-        }
-
-        let loaded_timestamp =
-            HlcService::load_last_timestamp(&conn).expect("Should load timestamp");
-
-        assert!(loaded_timestamp.is_some(), "Should have loaded a timestamp");
-        assert_eq!(
-            loaded_timestamp.unwrap(),
-            original_timestamp,
-            "Loaded timestamp should match original"
-        );
-    }
-
-    #[test]
-    fn try_initialize_from_provider_reads_persisted_timestamp() {
-        let mut conn = Connection::open_in_memory().expect("open");
-        fresh_configs_table(&conn);
-
-        // Seed a persisted timestamp created by a foreign node so we can
-        // check try_initialize consumes it.
-        let foreign_node = ID::try_from([9u8; 16]).unwrap();
-        let foreign_hlc = HLCBuilder::new()
-            .with_id(foreign_node)
-            .with_max_delta(Duration::from_secs(1))
-            .build();
-        let foreign_ts = foreign_hlc.new_timestamp();
-        {
-            let tx = conn.transaction().expect("tx");
-            HlcService::persist_timestamp(&tx, &foreign_ts).expect("persist");
-            tx.commit().expect("commit");
-        }
-
-        let uuid = Uuid::from_bytes([7u8; 16]);
-        let provider = StaticDeviceId(uuid);
-        let svc = HlcService::try_initialize(&conn, &provider).expect("init");
-        let next = svc.new_timestamp().expect("timestamp");
-
-        assert!(
-            next > foreign_ts,
-            "next local timestamp must dominate the persisted foreign one"
-        );
-    }
-
-    #[test]
-    fn compare_treats_node_ids_numerically_not_lexically() {
-        let with_leading = "5/01";
-        let without_leading = "5/1";
-        assert_eq!(
-            compare_hlc_strings(with_leading, without_leading),
-            std::cmp::Ordering::Equal,
-            "node ids '01' and '1' must compare as equal"
-        );
-    }
-
-    #[test]
-    fn compare_with_wide_node_ids_orders_numerically() {
-        assert_eq!(
-            compare_hlc_strings("5/02", "5/10"),
-            std::cmp::Ordering::Less,
-            "node 0x02 must compare less than 0x10 numerically"
-        );
-    }
-
-    #[test]
-    fn advance_past_remote_rejects_malformed_string() {
-        let svc = HlcService::new_with_uuid(Uuid::from_bytes([1u8; 16]));
-        let result = svc.advance_past_remote("not-a-timestamp");
-        assert!(
-            matches!(result, Err(HlcError::Parse(_))),
-            "Expected Err(HlcError::Parse), got: {:?}",
-            result
-        );
-    }
-
-    #[test]
-    fn advance_past_remote_reports_drift_not_a_parse_failure() {
-        let svc = HlcService::new_with_uuid(Uuid::from_bytes([3u8; 16]));
-        let ts = svc.new_timestamp().unwrap();
-        // An hour ahead of the local clock, well past uhlc's tolerance.
-        // NTP64 counts 2^32 units per second.
-        let future = ts.get_time().as_u64() + 3600 * (1u64 << 32);
-        let err = svc
-            .advance_past_remote(&format!("{future}/{}", ts.get_id()))
-            .expect_err("a timestamp an hour ahead must be refused");
-
-        assert!(
-            matches!(err, HlcError::RemoteTimestampOutOfTolerance { .. }),
-            "a well-formed but out-of-tolerance timestamp is clock skew, \
-             not a parse failure: {err:?}"
-        );
-        let message = err.to_string();
-        assert!(
-            message.contains("drift tolerance") && !message.contains("parse"),
-            "the message must send the reader at the clock, not the parser: {message}"
-        );
-    }
-
-    #[test]
-    fn advance_past_remote_errors_when_uninitialized() {
-        let svc = HlcService::new();
-        let initialized = HlcService::new_with_uuid(Uuid::from_bytes([2u8; 16]));
-        let ts_str = initialized.new_timestamp().unwrap().to_string();
-
-        let result = svc.advance_past_remote(&ts_str);
-        assert!(
-            matches!(result, Err(HlcError::NotInitialized)),
-            "Expected Err(HlcError::NotInitialized), got: {:?}",
-            result
-        );
-    }
-
-    #[test]
-    fn advance_past_remote_ok_on_empty_string() {
-        let svc = HlcService::new_with_uuid(Uuid::from_bytes([3u8; 16]));
-        let result = svc.advance_past_remote("");
-        assert!(result.is_ok(), "Expected Ok(()), got: {:?}", result);
-    }
-
-    /// The `new_for_testing` shim must derive its UUID deterministically
-    /// from the input string: two constructions from the same string must
-    /// yield HLC services with the same node id.
-    #[cfg(feature = "test-shims")]
-    #[allow(deprecated)]
-    #[test]
-    fn new_for_testing_is_deterministic() {
-        let svc_a = HlcService::new_for_testing("test-device-a");
-        let svc_b = HlcService::new_for_testing("test-device-a");
-        let ts_a = svc_a.new_timestamp().expect("timestamp a").to_string();
-        let ts_b = svc_b.new_timestamp().expect("timestamp b").to_string();
-        let node_a = hlc_node_id_suffix(&ts_a).expect("node id a");
-        let node_b = hlc_node_id_suffix(&ts_b).expect("node id b");
-        assert_eq!(
-            node_a, node_b,
-            "the shim must hash equal inputs to equal UUIDs"
-        );
-        // uhlc strips leading zeros; a 16-byte UUID hex is 1..=32 chars.
-        assert!(!node_a.is_empty(), "node id must be non-empty");
-        assert!(node_a.len() <= 32, "node id must be at most 16 bytes hex");
-        // Sanity check that we are not accidentally returning a constant:
-        // a different input must hash to a *different* node id.
-        let svc_c = HlcService::new_for_testing("test-device-b");
-        let ts_c = svc_c.new_timestamp().expect("timestamp c").to_string();
-        let node_c = hlc_node_id_suffix(&ts_c).expect("node id c");
-        assert_ne!(
-            node_a, node_c,
-            "different inputs must hash to different UUIDs"
-        );
-    }
-
-    /// Locks the `HlcError::DeviceStore` variant name at the type level.
-    ///
-    /// haex-vault (and other pre-extraction consumers) pattern-match on this
-    /// name; a rename would be a silent semver break for them. This test
-    /// fails at *compile* time if the variant is renamed, which is exactly
-    /// the tripwire we want.
-    #[test]
-    fn device_store_variant_name_is_stable() {
-        let err = HlcError::DeviceStore("boom".to_string());
-        match err {
-            HlcError::DeviceStore(msg) => assert_eq!(msg, "boom"),
-            other => panic!("expected DeviceStore variant, got {other:?}"),
-        }
-    }
-}
+mod tests;

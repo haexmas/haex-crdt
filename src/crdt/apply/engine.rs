@@ -1,12 +1,13 @@
 //! Apply-remote-changes entry point (plan §4.2).
 //!
-//! One `apply_remote_changes` call is one all-or-nothing sync round:
+//! One `apply_remote_changes` call has a preflight phase and one atomic write
+//! transaction. The HLC advance happens after that transaction commits and
+//! may therefore return an error after the batch has landed:
 //!
 //! ```text
+//! preflight_batch(&changes, provider)?      // no transaction open yet
 //! with_fk_disabled(conn):
 //!     IMMEDIATE tx {
-//!         provider.on_before_apply(&changes)?
-//!         verify_all_signatures(&changes, provider)?
 //!         disable triggers
 //!         load delete-shadow map
 //!         for each (table, row) in HLC-ordered groups:
@@ -22,10 +23,12 @@
 //! Every skip goes into an [`ApplyReport`] counter — no silent drops.
 
 use std::collections::HashSet;
+use std::str::FromStr;
 
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, Transaction};
 use serde_json::Value as JsonValue;
+use uhlc::Timestamp;
 
 use crate::crdt::apply::delete_propagation::{
     insert_suppressed_by_deletes, load_delete_shadow_map, propagate_deleted_rows_to_target_tables,
@@ -33,7 +36,7 @@ use crate::crdt::apply::delete_propagation::{
 use crate::crdt::apply::grouping::{
     build_pk_where_from_map, group_by_transaction_hlc, group_row_changes_in_hlc_order,
 };
-use crate::crdt::apply::preflight::verify_all_signatures;
+use crate::crdt::apply::preflight::preflight_batch;
 use crate::crdt::apply::report::ApplyReport;
 use crate::crdt::apply::write::{write_insert, write_update};
 use crate::crdt::cleanup::with_fk_disabled;
@@ -42,7 +45,7 @@ use crate::crdt::columns::{
 };
 use crate::crdt::hlc::{hlc_is_newer, HlcService};
 use crate::crdt::scanner::ColumnChange;
-use crate::crdt::trigger::{get_table_schema, is_safe_identifier};
+use crate::crdt::trigger::get_table_schema;
 use crate::db::core::ValueConverter;
 use crate::db::error::DatabaseError;
 use crate::error::Result;
@@ -57,31 +60,10 @@ pub fn apply_remote_changes(
     hlc_service: &HlcService,
     provider: &dyn SignatureProvider,
 ) -> Result<ApplyReport> {
-    // Pre-tx sanity: refuse identifier-unsafe input at the boundary so the
-    // rest of the code can build SQL without re-checking.
-    for change in &changes {
-        if !is_safe_identifier(&change.table_name) {
-            return Err(DatabaseError::ValidationError {
-                reason: format!(
-                    "Invalid table name '{}' in remote change",
-                    change.table_name
-                ),
-            }
-            .into());
-        }
-        if !is_safe_identifier(&change.column_name) {
-            return Err(DatabaseError::ValidationError {
-                reason: format!(
-                    "Invalid column name '{}' in table '{}'",
-                    change.column_name, change.table_name
-                ),
-            }
-            .into());
-        }
-    }
-
-    provider.on_before_apply(&changes)?;
-    verify_all_signatures(&changes, provider)?;
+    // Every check that can refuse this batch runs here, to completion,
+    // before a transaction exists — so a refusal provably wrote nothing.
+    // New whole-batch checks belong in `preflight`, not in the write loop.
+    preflight_batch(&changes, provider)?;
 
     // Reorder for the write loop: transaction-HLC groups sorted ascending,
     // flattened back to a single vec. Same content, deterministic order.
@@ -120,6 +102,14 @@ pub fn apply_remote_changes(
         Ok(())
     })?;
 
+    // Runs after the commit, so an `Err` here does not mean nothing landed.
+    // Drift is no longer a way to reach that state — every HLC in `staged`
+    // cleared the pre-tx gate — but an unusable *clock service* still is:
+    // an uninitialized or poisoned `HlcService`, or an HLC that
+    // `compare_hlc_strings` ranked as newest yet `uhlc` will not parse (a
+    // decimal time part with a node id it rejects). Left as-is: those are
+    // local-service faults and parser input the ingestion boundary is
+    // supposed to keep off the wire, not remote clock skew.
     if let Some(hlc) = max_accepted_hlc {
         hlc_service
             .advance_past_remote(&hlc)
@@ -329,8 +319,14 @@ fn apply_row(
     // and if it was dropped for schema drift it will arrive again once the
     // consumer installs the missing table or column.
     for (_, _, hlc, _) in &staged {
+        let incoming =
+            Timestamp::from_str(hlc).expect("preflight must reject malformed full HLC timestamps");
         let is_newer = match max_accepted_hlc.as_deref() {
-            Some(current) => hlc_is_newer(hlc, current),
+            Some(current) => {
+                let current = Timestamp::from_str(current)
+                    .expect("max_accepted_hlc must contain a valid HLC timestamp");
+                incoming > current
+            }
             None => true,
         };
         if is_newer {

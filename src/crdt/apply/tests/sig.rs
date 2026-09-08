@@ -2,7 +2,8 @@
 //!
 //! The engine must call `on_before_apply` first, then verify every
 //! sig-carrying change, and only then start writing. Any failure aborts the
-//! whole batch — nothing lands, the tx rolls back.
+//! whole batch and nothing lands — and, because both passes complete before
+//! the transaction is opened, without needing a rollback to make that true.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
