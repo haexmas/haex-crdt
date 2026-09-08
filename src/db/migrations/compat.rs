@@ -15,9 +15,12 @@ use crate::table_names::{
 
 use super::bootstrap::CRATE_MIGRATIONS;
 
-const LEGACY_HLC_TIMESTAMP_COLUMN: &str = "haex_hlc";
-const LEGACY_COLUMN_HLCS_COLUMN: &str = "haex_column_hlcs";
-const LEGACY_COLUMN_SIGS_COLUMN: &str = "haex_column_sigs";
+/// Pre-v0.2 metadata column names, positionally paired with the current
+/// ones in [`migrate_legacy_metadata_columns`]. These are the only names a
+/// tagged release ever wrote into a database (v0.1.0); the intermediate
+/// names that the unreleased 0.2.0 line carried for a while need no entry
+/// here, because no shipped version produced them.
+const LEGACY_COLUMNS: &[&str] = &["haex_hlc", "haex_column_hlcs", "haex_column_sigs"];
 
 const LEGACY_TABLES: &[(&str, &str)] = &[
     ("haex_crdt_configs", TABLE_CRDT_CONFIGS),
@@ -74,14 +77,16 @@ pub(crate) fn record_legacy_bootstrap(conn: &Connection) -> Result<()> {
 /// by `install_crdt` so its direct setup path cannot silently discard metadata
 /// from a table that predates the current naming convention.
 pub(crate) fn migrate_legacy_metadata_columns(conn: &Connection) -> Result<()> {
+    let current_columns = [HLC_TIMESTAMP_COLUMN, COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN];
     let tables = list_user_tables(conn)?;
     for table in tables {
-        let columns = table_columns(conn, &table)?;
-        for (legacy, current) in [
-            (LEGACY_HLC_TIMESTAMP_COLUMN, HLC_TIMESTAMP_COLUMN),
-            (LEGACY_COLUMN_HLCS_COLUMN, COLUMN_HLCS_COLUMN),
-            (LEGACY_COLUMN_SIGS_COLUMN, COLUMN_SIGS_COLUMN),
-        ] {
+        // Tracked across renames rather than read once. With a single legacy
+        // generation no two pairs share a target column, so this cannot
+        // currently change an outcome — but a second generation mapping onto
+        // an already-renamed name would otherwise hit a raw SQLite
+        // "duplicate column name" instead of the compatibility error below.
+        let mut columns = table_columns(conn, &table)?;
+        for (legacy, current) in LEGACY_COLUMNS.iter().zip(current_columns.iter()) {
             let has_legacy = columns.iter().any(|column| column == legacy);
             let has_current = columns.iter().any(|column| column == current);
             if has_legacy && has_current {
@@ -99,6 +104,8 @@ pub(crate) fn migrate_legacy_metadata_columns(conn: &Connection) -> Result<()> {
                     ),
                     [],
                 )?;
+                columns.retain(|column| column != legacy);
+                columns.push((*current).to_string());
             }
         }
     }

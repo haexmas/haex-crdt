@@ -26,6 +26,15 @@ fn source_from(entries: &[(&str, &str)]) -> StaticMigrationSource {
     StaticMigrationSource(m)
 }
 
+fn table_columns(conn: &Connection, table: &str) -> Vec<String> {
+    conn.prepare(&format!("PRAGMA table_info(\"{table}\")"))
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+}
+
 fn table_exists(conn: &Connection, name: &str) -> bool {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
@@ -212,6 +221,30 @@ fn content_drift_on_consumer_migration_aborts_open() {
             assert_eq!(name, "0001_items");
             assert_ne!(expected, found);
         }
+        other => panic!("expected MigrationContentDrift, got {other:?}"),
+    }
+}
+
+#[test]
+fn content_drift_on_a_crate_migration_aborts_open() {
+    // The crate-owned journal is reconciled independently of the consumer's,
+    // so its drift check needs its own coverage. Corrupting the stored digest
+    // stands in for the case that would produce it in the wild: a shipped
+    // migration edited after the fact, which `bootstrap::CRATE_MIGRATIONS`
+    // forbids from the first tagged release containing it.
+    let mut conn = Connection::open_in_memory().unwrap();
+    run_migrations(&mut conn, &empty_source()).unwrap();
+
+    let (name, _) = CRATE_MIGRATIONS[0];
+    conn.execute(
+        &format!("UPDATE {TABLE_CRDT_MIGRATIONS} SET sha256_digest = ?1 WHERE migration_name = ?2"),
+        rusqlite::params!["0".repeat(64), name],
+    )
+    .unwrap();
+
+    let err = run_migrations(&mut conn, &empty_source()).unwrap_err();
+    match err {
+        Error::MigrationContentDrift { name: drifted, .. } => assert_eq!(drifted, name),
         other => panic!("expected MigrationContentDrift, got {other:?}"),
     }
 }
@@ -563,4 +596,31 @@ fn conflicting_legacy_and_current_tables_abort_without_merging() {
     assert!(matches!(err, Error::MigrationCompatibility { .. }));
     assert!(table_exists(&conn, TABLE_CRDT_CONFIGS));
     assert!(table_exists(&conn, "haex_crdt_configs"));
+}
+
+#[test]
+fn a_table_carrying_both_a_legacy_and_a_current_column_aborts_without_renaming() {
+    // The column analogue of the case above. SQLite cannot hold two columns
+    // of one name, so the rename would fail with a raw "duplicate column
+    // name"; report it as a compatibility problem instead and leave both
+    // columns in place for inspection.
+    let mut conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(&format!(
+        "CREATE TABLE items (
+             id TEXT PRIMARY KEY NOT NULL,
+             body TEXT,
+             haex_hlc TEXT,
+             {HLC_TIMESTAMP_COLUMN} TEXT
+         );"
+    ))
+    .unwrap();
+
+    let err = run_migrations(&mut conn, &empty_source()).unwrap_err();
+    assert!(
+        matches!(err, Error::MigrationCompatibility { .. }),
+        "expected MigrationCompatibility, got {err:?}"
+    );
+    let columns = table_columns(&conn, "items");
+    assert!(columns.iter().any(|name| name == "haex_hlc"));
+    assert!(columns.iter().any(|name| name == HLC_TIMESTAMP_COLUMN));
 }
