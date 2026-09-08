@@ -31,6 +31,12 @@ pub enum HlcError {
     Parse(String),
     #[error("Failed to parse HLC Node ID: {0}")]
     ParseNodeId(String),
+    /// A remote timestamp lay outside `uhlc`'s drift tolerance, so the local
+    /// clock was NOT advanced past it. Distinct from [`Self::Parse`] because
+    /// the timestamp was well-formed — the two clocks disagree — and the
+    /// fix is a clock-skew investigation, not a parser one.
+    #[error("Remote HLC '{hlc}' is outside the local clock's drift tolerance: {reason}")]
+    RemoteTimestampOutOfTolerance { hlc: String, reason: String },
     #[error("HLC mutex was poisoned")]
     MutexPoisoned,
     #[error("Failed to create node ID: {0}")]
@@ -215,7 +221,18 @@ impl HlcService {
                 "Failed to parse remote HLC timestamp '{hlc_string}': {e:?}"
             ))
         })?;
-        self.update_with_timestamp(&remote_ts)
+        // Inlined rather than delegating to `update_with_timestamp` so a
+        // drift refusal reports as clock skew and names the offending
+        // timestamp, instead of inheriting that method's generic parse
+        // wrapper — which sent readers of `ExceedingDeltaError` looking for
+        // a corrupt persisted state.
+        let mut hlc_guard = self.hlc.lock().map_err(|_| HlcError::MutexPoisoned)?;
+        let hlc = hlc_guard.as_mut().ok_or(HlcError::NotInitialized)?;
+        hlc.update_with_timestamp(&remote_ts)
+            .map_err(|e| HlcError::RemoteTimestampOutOfTolerance {
+                hlc: hlc_string.to_string(),
+                reason: format!("{e:?}"),
+            })
     }
 
     fn load_last_timestamp(conn: &Connection) -> Result<Option<Timestamp>, HlcError> {
@@ -511,6 +528,29 @@ mod tests {
             matches!(result, Err(HlcError::Parse(_))),
             "Expected Err(HlcError::Parse), got: {:?}",
             result
+        );
+    }
+
+    #[test]
+    fn advance_past_remote_reports_drift_not_a_parse_failure() {
+        let svc = HlcService::new_with_uuid(Uuid::from_bytes([3u8; 16]));
+        let ts = svc.new_timestamp().unwrap();
+        // An hour ahead of the local clock, well past uhlc's tolerance.
+        // NTP64 counts 2^32 units per second.
+        let future = ts.get_time().as_u64() + 3600 * (1u64 << 32);
+        let err = svc
+            .advance_past_remote(&format!("{future}/{}", ts.get_id()))
+            .expect_err("a timestamp an hour ahead must be refused");
+
+        assert!(
+            matches!(err, HlcError::RemoteTimestampOutOfTolerance { .. }),
+            "a well-formed but out-of-tolerance timestamp is clock skew, \
+             not a parse failure: {err:?}"
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("drift tolerance") && !message.contains("parse"),
+            "the message must send the reader at the clock, not the parser: {message}"
         );
     }
 
