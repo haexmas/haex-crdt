@@ -31,7 +31,7 @@
 
 use crate::crdt::columns::{COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN, HLC_TIMESTAMP_COLUMN};
 use crate::crdt::hlc::{hlc_is_from_node, hlc_is_newer};
-use crate::crdt::trigger::{get_table_schema, ColumnInfo};
+use crate::crdt::trigger::{get_table_schema, is_safe_identifier, ColumnInfo};
 use crate::db::core::convert_value_ref_to_json;
 use crate::db::core::execute::MAX_CRDT_TRANSACTION_BYTES;
 use crate::db::error::DatabaseError;
@@ -130,11 +130,13 @@ pub fn scan_dirty_tables(conn: &Connection) -> Result<Vec<String>, DatabaseError
 ///   cost only on the matches.
 /// - `column_eq_filter` — when `Some((column, value))`, restricts the scan
 ///   to rows where `column` equals `value`. `value` is bound as a SQL
-///   parameter; it is never interpolated. If the table has no column of
-///   that name the scan returns no rows at all — fail-closed, both as the
-///   safety gate for the interpolated column name and because a consumer
-///   whose filter target is missing must not silently receive the whole
-///   table. Composes with `after_hlc` via `AND`.
+///   parameter; it is never interpolated. The column NAME is interpolated,
+///   so it must pass [`is_safe_identifier`] — a name that does not is an
+///   `Err`, since "this name cannot be filtered on" is not "no rows
+///   matched". If the table has no column of that name the scan returns no
+///   rows at all: fail closed, because a consumer whose filter target is
+///   missing must not silently receive the whole table. Composes with
+///   `after_hlc` via `AND`.
 ///
 ///   This cannot be a post-filter on the returned changes: if a row's
 ///   filter-column HLC is at or below the cursor, no change is emitted for
@@ -237,10 +239,24 @@ pub fn scan_table_for_local_changes(
     }
 
     if let Some((filter_column, filter_value)) = column_eq_filter {
-        // Fail closed on an unknown column: "no matching rows", not "the
-        // whole table". Matching against the schema we already fetched is
-        // also what makes interpolating the name into the SQL safe — only a
-        // name SQLite itself reported can reach the query.
+        // The name is interpolated into the SQL, so the identifier gate has
+        // to run first. Schema membership is NOT that gate: SQLite happily
+        // reports a column named `bucket" OR 1=1 OR "bucket_no_trigger`,
+        // and a `_no_trigger` name reaches this filter without passing any
+        // other check in the crate — `partition_columns` keeps it out of
+        // the SELECT list, and the trigger installer strips the suffix
+        // before its own identifier check. Interpolated, such a name turns
+        // the restriction into a tautology and ships every row for a value
+        // that matches none.
+        if !is_safe_identifier(filter_column) {
+            return Err(DatabaseError::ValidationError {
+                reason: format!(
+                    "Unsafe filter column name '{filter_column}' for table '{table_name}'"
+                ),
+            });
+        }
+        // Membership is the fail-closed rule: an unknown column means "no
+        // matching rows", never "the whole table".
         if !schema.iter().any(|c| c.name == filter_column) {
             return Ok(Vec::new());
         }
