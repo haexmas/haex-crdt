@@ -1,7 +1,7 @@
 //! Public `Database` facade (plan §6).
 //!
-//! [`Database`] ties together the crate's four consumer-owned seams
-//! (`DatabaseBootstrap`, `SignatureProvider`, `MigrationSource`, plus the
+//! [`Database`] ties together the crate's four consumer-owned traits
+//! (`DeviceIdProvider`, `SignatureProvider`, `MigrationSource`, plus the
 //! SQLCipher key) and exposes the CRDT operations as method calls. Consumers
 //! do not need to touch the internal helpers unless they explicitly opt into
 //! `with_connection` (see the crate `raw-connection` feature).
