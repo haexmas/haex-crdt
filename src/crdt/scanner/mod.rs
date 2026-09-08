@@ -190,6 +190,28 @@ pub fn scan_table_for_local_changes(
     device_id: &str,
     filters: ScanFilters<'_>,
 ) -> Result<Vec<ColumnChange>, DatabaseError> {
+    // Pre-query sanity: refuse identifier-unsafe input at the boundary, so
+    // the error a caller sees for a bad filter name does not depend on the
+    // table's shape (same stance as `apply_remote_changes`). The gate needs
+    // no schema, and the name is interpolated into the WHERE clause below.
+    //
+    // Schema membership is NOT this gate: SQLite happily reports a column
+    // named `bucket" OR 1=1 OR "bucket_no_trigger`, and a `_no_trigger`
+    // name reaches this filter without passing any other check in the crate
+    // — `partition_columns` keeps it out of the SELECT list, and the trigger
+    // installer strips the suffix before its own identifier check.
+    // Interpolated, such a name turns the restriction into a tautology and
+    // ships every row for a value that matches none.
+    if let Some((filter_column, _)) = filters.column_eq {
+        if !is_safe_identifier(filter_column) {
+            return Err(DatabaseError::ValidationError {
+                reason: format!(
+                    "Unsafe filter column name '{filter_column}' for table '{table_name}'"
+                ),
+            });
+        }
+    }
+
     let schema = get_table_schema(conn, table_name)?;
     if schema.is_empty() {
         return Ok(Vec::new());
@@ -268,24 +290,9 @@ pub fn scan_table_for_local_changes(
     }
 
     if let Some((filter_column, filter_value)) = filters.column_eq {
-        // The name is interpolated into the SQL, so the identifier gate has
-        // to run first. Schema membership is NOT that gate: SQLite happily
-        // reports a column named `bucket" OR 1=1 OR "bucket_no_trigger`,
-        // and a `_no_trigger` name reaches this filter without passing any
-        // other check in the crate — `partition_columns` keeps it out of
-        // the SELECT list, and the trigger installer strips the suffix
-        // before its own identifier check. Interpolated, such a name turns
-        // the restriction into a tautology and ships every row for a value
-        // that matches none.
-        if !is_safe_identifier(filter_column) {
-            return Err(DatabaseError::ValidationError {
-                reason: format!(
-                    "Unsafe filter column name '{filter_column}' for table '{table_name}'"
-                ),
-            });
-        }
-        // Membership is the fail-closed rule: an unknown column means "no
-        // matching rows", never "the whole table".
+        // The name already passed the identifier gate at the top of the
+        // function. Membership is the separate fail-closed rule: an unknown
+        // column means "no matching rows", never "the whole table".
         if !schema.iter().any(|c| c.name == filter_column) {
             return Ok(Vec::new());
         }

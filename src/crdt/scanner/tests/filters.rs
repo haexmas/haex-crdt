@@ -383,3 +383,33 @@ fn missing_crdt_metadata_outranks_an_absent_filter_column() {
         "the metadata error must outrank the absent-column fail-closed rule: {err:?}"
     );
 }
+
+#[test]
+fn column_eq_filter_rejects_an_unsafe_name_before_any_schema_check() {
+    let (conn, _hlc, dev) = make_fixture();
+    // The identifier gate sits at the boundary, so an unusable filter name
+    // is reported as such regardless of the table's shape — this table has
+    // no CRDT metadata at all and would otherwise raise the table-shape
+    // error instead.
+    conn.execute(
+        "CREATE TABLE t (id TEXT PRIMARY KEY NOT NULL, body TEXT)",
+        [],
+    )
+    .unwrap();
+
+    let err = scan_table_for_local_changes(
+        &conn,
+        "t",
+        None,
+        &dev.to_string(),
+        ScanFilters {
+            column_eq: Some((r#"body" OR 1=1 OR "body"#, "matches-nothing")),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, DatabaseError::ValidationError { .. }),
+        "an unusable filter name must not depend on table state: {err:?}"
+    );
+}
