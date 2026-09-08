@@ -428,6 +428,11 @@ pub fn paginate_changes<T: Paginable>(changes: Vec<T>, page_budget: usize) -> (V
 /// scanned, but once a tracked sibling does, its current value rides along
 /// under the row-level HLC. Both rules are defined together in
 /// [`crate::crdt::columns`]; do not collapse them.
+///
+/// [`crate::crdt::apply::apply_remote_changes`] refuses this same set on
+/// the way in. The two sets must stay identical: if apply accepted what
+/// the scanner withholds, a column that never leaves one device could
+/// still be written on another.
 fn partition_columns(schema: &[ColumnInfo]) -> (Vec<&ColumnInfo>, Vec<&ColumnInfo>) {
     let pk_columns: Vec<&ColumnInfo> = schema.iter().filter(|c| c.is_pk).collect();
     let data_columns: Vec<&ColumnInfo> = schema

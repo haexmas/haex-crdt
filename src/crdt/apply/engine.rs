@@ -35,13 +35,14 @@ use crate::crdt::apply::grouping::{
 };
 use crate::crdt::apply::preflight::verify_all_signatures;
 use crate::crdt::apply::report::ApplyReport;
+use crate::crdt::apply::write::{write_insert, write_update};
 use crate::crdt::cleanup::with_fk_disabled;
 use crate::crdt::columns::{
     COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN, DELETED_ROWS_TABLE, HLC_TIMESTAMP_COLUMN,
 };
 use crate::crdt::hlc::{hlc_is_newer, HlcService};
 use crate::crdt::scanner::ColumnChange;
-use crate::crdt::trigger::{get_table_schema, is_safe_identifier, ColumnInfo};
+use crate::crdt::trigger::{get_table_schema, is_safe_identifier};
 use crate::db::core::ValueConverter;
 use crate::db::error::DatabaseError;
 use crate::error::Result;
@@ -223,6 +224,38 @@ fn apply_row(
             report.skipped_unknown_column += 1;
             continue;
         }
+        // Inbound mirror of the scanner's `partition_columns`: the set of
+        // columns apply accepts from a peer is exactly the set the scanner
+        // is willing to ship. That identity is the invariant — when the two
+        // sides drift, a column that can never leave one device can still
+        // be written on another.
+        //
+        // Both checks skip and count rather than fail the batch. Rejecting
+        // would hand any peer a denial-of-service primitive: one poisoned
+        // change per batch and the victim's sync stops entirely, which is
+        // worse than the single write it prevents. Skipping degrades to
+        // "that column never travels", which is what the rule promises
+        // anyway, and the counters keep a broken peer diagnosable.
+        if change.column_name.ends_with("_no_sync") {
+            report.skipped_no_sync_column += 1;
+            continue;
+        }
+        // Columns whose value the crate itself owns. Load-bearing, not
+        // cosmetic: `write_insert` pushes the staged remote columns BEFORE
+        // the crate's own, and SQLite takes the FIRST value for a column
+        // named twice in an INSERT — so an unfiltered metadata column wins
+        // over the computed row HLC, per-column HLC map, or signature map.
+        // A remote PK assignment is worse on the UPDATE path, where it
+        // would repoint the very row the WHERE clause just matched; row
+        // identity comes from `row_pks` alone.
+        if change.column_name == HLC_TIMESTAMP_COLUMN
+            || change.column_name == COLUMN_HLCS_COLUMN
+            || change.column_name == COLUMN_SIGS_COLUMN
+            || expected_pks.contains(change.column_name.as_str())
+        {
+            report.skipped_reserved_column += 1;
+            continue;
+        }
         let current_col_hlc = column_hlcs
             .get(&change.column_name)
             .and_then(JsonValue::as_str)
@@ -339,154 +372,4 @@ fn fetch_existing_hlcs(
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(DatabaseError::from(e)),
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn write_update(
-    tx: &Transaction<'_>,
-    table_name: &str,
-    staged: &[(String, SqlValue, String, Option<JsonValue>)],
-    column_hlcs_json: &str,
-    max_hlc_for_row: &str,
-    where_clause: &str,
-    pk_values: &[JsonValue],
-    has_sigs_column: bool,
-) -> std::result::Result<(), DatabaseError> {
-    let mut set_parts: Vec<String> = staged
-        .iter()
-        .map(|(col, _, _, _)| format!("\"{col}\" = ?"))
-        .collect();
-    set_parts.push(format!("{COLUMN_HLCS_COLUMN} = ?"));
-    set_parts.push(format!("{HLC_TIMESTAMP_COLUMN} = ?"));
-    if has_sigs_column {
-        set_parts.push(format!("{COLUMN_SIGS_COLUMN} = ?"));
-    }
-    let sql = format!(
-        "UPDATE \"{table_name}\" SET {} WHERE {where_clause}",
-        set_parts.join(", ")
-    );
-
-    let mut params: Vec<SqlValue> = Vec::with_capacity(staged.len() + 3 + pk_values.len());
-    for (_, val, _, _) in staged {
-        params.push(val.clone());
-    }
-    params.push(SqlValue::Text(column_hlcs_json.to_string()));
-    params.push(SqlValue::Text(max_hlc_for_row.to_string()));
-    if has_sigs_column {
-        params.push(SqlValue::Text(merge_sigs_json(
-            tx,
-            table_name,
-            where_clause,
-            pk_values,
-            staged,
-        )?));
-    }
-    for v in ValueConverter::convert_params(pk_values)? {
-        params.push(v);
-    }
-
-    let param_refs: Vec<&dyn rusqlite::ToSql> =
-        params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
-    tx.execute(&sql, &*param_refs)?;
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn write_insert(
-    tx: &Transaction<'_>,
-    table_name: &str,
-    schema: &[ColumnInfo],
-    row_pks: &serde_json::Map<String, JsonValue>,
-    staged: &[(String, SqlValue, String, Option<JsonValue>)],
-    column_hlcs_json: &str,
-    max_hlc_for_row: &str,
-    has_sigs_column: bool,
-) -> std::result::Result<(), DatabaseError> {
-    let mut columns: Vec<String> = Vec::new();
-    let mut values: Vec<SqlValue> = Vec::new();
-
-    let pk_columns: Vec<&ColumnInfo> = schema.iter().filter(|c| c.is_pk).collect();
-    let pk_json_values: Vec<JsonValue> = pk_columns
-        .iter()
-        .map(|c| row_pks[&c.name].clone())
-        .collect();
-    for (c, v) in pk_columns
-        .iter()
-        .zip(ValueConverter::convert_params(&pk_json_values)?)
-    {
-        columns.push(c.name.clone());
-        values.push(v);
-    }
-    for (col, val, _, _) in staged {
-        columns.push(col.clone());
-        values.push(val.clone());
-    }
-    columns.push(COLUMN_HLCS_COLUMN.to_string());
-    columns.push(HLC_TIMESTAMP_COLUMN.to_string());
-    values.push(SqlValue::Text(column_hlcs_json.to_string()));
-    values.push(SqlValue::Text(max_hlc_for_row.to_string()));
-    if has_sigs_column {
-        let sigs_json = build_sigs_json_for_insert(staged);
-        columns.push(COLUMN_SIGS_COLUMN.to_string());
-        values.push(SqlValue::Text(sigs_json));
-    }
-
-    let placeholders = vec!["?"; columns.len()].join(", ");
-    let quoted: Vec<String> = columns.iter().map(|c| format!("\"{c}\"")).collect();
-    let sql = format!(
-        "INSERT INTO \"{table_name}\" ({}) VALUES ({placeholders})",
-        quoted.join(", ")
-    );
-    let param_refs: Vec<&dyn rusqlite::ToSql> =
-        values.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
-    tx.execute(&sql, &*param_refs)?;
-    Ok(())
-}
-
-/// Serialise the column-signature JSON map for a fresh INSERT — only the
-/// staged columns that carry a `sig` land in the map.
-fn build_sigs_json_for_insert(staged: &[(String, SqlValue, String, Option<JsonValue>)]) -> String {
-    let mut map = serde_json::Map::new();
-    for (col, _, _, sig) in staged {
-        if let Some(s) = sig {
-            map.insert(col.clone(), s.clone());
-        }
-    }
-    serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string())
-}
-
-/// Merge staged sigs into the row's existing column-signature JSON for an
-/// UPDATE. A signed value replaces the column's previous signature; an
-/// unsigned value removes it because the old signature no longer describes
-/// the current column value.
-fn merge_sigs_json(
-    tx: &Transaction<'_>,
-    table_name: &str,
-    where_clause: &str,
-    pk_values: &[JsonValue],
-    staged: &[(String, SqlValue, String, Option<JsonValue>)],
-) -> std::result::Result<String, DatabaseError> {
-    let sql = format!("SELECT {COLUMN_SIGS_COLUMN} FROM \"{table_name}\" WHERE {where_clause}");
-    let sql_params = ValueConverter::convert_params(pk_values)?;
-    let param_refs: Vec<&dyn rusqlite::ToSql> = sql_params
-        .iter()
-        .map(|v| v as &dyn rusqlite::ToSql)
-        .collect();
-    let mut stmt = tx.prepare(&sql)?;
-    let existing: String = stmt
-        .query_row(&*param_refs, |r| r.get::<_, String>(0))
-        .unwrap_or_else(|_| "{}".to_string());
-    let mut map: serde_json::Map<String, JsonValue> =
-        serde_json::from_str(&existing).unwrap_or_default();
-    for (col, _, _, sig) in staged {
-        match sig {
-            Some(s) => {
-                map.insert(col.clone(), s.clone());
-            }
-            None => {
-                map.remove(col);
-            }
-        }
-    }
-    Ok(serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string()))
 }
