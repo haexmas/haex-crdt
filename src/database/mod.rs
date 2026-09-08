@@ -31,13 +31,14 @@
 //!    missing file is created or errors).
 //! 2. Apply crate-owned CRDT bookkeeping migrations, then consumer
 //!    migrations (see [`crate::run_migrations`]).
-//! 3. Initialize the HLC service from the persisted row in
-//!    `haex_crdt_configs_no_sync` — or seed it on first open.
-//! 4. Enforce the device-id contract (plan §4.1): the first-open device UUID
-//!    is stored in `haex_crdt_configs_no_sync`; every subsequent open rejects a
-//!    provider that returns a different UUID with
-//!    [`crate::Error::DeviceIdMismatch`].
-//! 5. Ensure CRDT triggers are at the requested `trigger_version`.
+//! 3. Initialize the HLC service from the persisted timestamp in
+//!    `haex_crdt_configs_no_sync` — or seed it on first open — using the
+//!    UUID returned by the consumer's [`DeviceIdProvider`]. The crate no
+//!    longer stores or arbitrates the device UUID: the provider is
+//!    authoritative on every open, so a consumer that legitimately serves
+//!    different UUIDs to the same DB file (a per-installation UUID lookup,
+//!    as in haex-vault / holzi) is directly supported.
+//! 4. Ensure CRDT triggers are at the requested `trigger_version`.
 
 pub mod config;
 mod install;
@@ -46,7 +47,7 @@ pub use config::{DatabaseConfig, InstallCrdtOptions, SqlCipherKey, DEFAULT_TRIGG
 
 use std::sync::{Arc, Mutex};
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::Connection;
 use uuid::Uuid;
 
 use crate::crdt::apply::{apply_remote_changes, ApplyReport};
@@ -63,12 +64,6 @@ use crate::db::lock::{DatabaseLock, DatabaseLockError};
 use crate::db::migrations::{run_migrations, MigrationReport};
 use crate::error::{Error, Result};
 use crate::signature::{RemoteChanges, SignatureProvider};
-use crate::table_names::TABLE_CRDT_CONFIGS;
-
-/// Config-row key under which the device UUID recorded on first open lives
-/// (see plan §4.1). Public so consumers who need to peek at raw
-/// bookkeeping via `with_connection` can find the row.
-pub const CONFIG_KEY_DEVICE_ID: &str = "device_id";
 
 /// The public facade — one `Database` per opened SQLCipher database. Cloning
 /// shares the underlying connection, so a `Database` handed to multiple threads
@@ -131,13 +126,12 @@ impl Database {
                 reason: e.to_string(),
             })?;
 
-        let supplied_uuid = config
+        let device_uuid = config
             .device_id
             .device_id()
             .map_err(|e| DatabaseError::HlcError {
                 reason: e.to_string(),
             })?;
-        reconcile_device_id(&conn, supplied_uuid)?;
 
         ensure_triggers_initialized(&mut conn, config.trigger_version)?;
 
@@ -147,7 +141,7 @@ impl Database {
                 hlc,
                 signature_provider: config.signature_provider,
                 migration_source: config.migration_source,
-                device_uuid: supplied_uuid,
+                device_uuid,
                 lock,
             }),
         })
@@ -160,9 +154,9 @@ impl Database {
         &self.inner.hlc
     }
 
-    /// The device UUID observed on first successful open and re-checked on
-    /// every subsequent open. Convenience for consumers that want to log or
-    /// display it alongside sync progress.
+    /// The device UUID returned by the consumer's `DeviceIdProvider` for this
+    /// open. Convenience for consumers that want to log or display it
+    /// alongside sync progress.
     pub fn device_id(&self) -> Uuid {
         self.inner.device_uuid
     }
@@ -270,46 +264,6 @@ impl Database {
             })?;
         f(&mut guard)
     }
-}
-
-/// Enforce the device-id contract from plan §4.1: first-open records the
-/// UUID, later opens reject a mismatched provider with
-/// [`Error::DeviceIdMismatch`]. Stored under the reserved config key
-/// [`CONFIG_KEY_DEVICE_ID`] in the `haex_crdt_configs_no_sync` table (already
-/// materialised by the crate bootstrap migration).
-fn reconcile_device_id(conn: &Connection, supplied: Uuid) -> Result<()> {
-    // The insert is the arbitration point for concurrent first opens. The
-    // config key is unique, so exactly one value can win; every opener then
-    // compares against the value that actually persisted rather than against
-    // its own earlier observation of an empty table.
-    conn.execute(
-        &format!(
-            "INSERT OR IGNORE INTO {TABLE_CRDT_CONFIGS} (key, type, value) \
-             VALUES (?1, 'system', ?2)"
-        ),
-        params![CONFIG_KEY_DEVICE_ID, supplied.to_string()],
-    )
-    .map_err(DatabaseError::from)?;
-
-    let recorded: String = conn
-        .query_row(
-            &format!("SELECT value FROM {TABLE_CRDT_CONFIGS} WHERE key = ?1"),
-            params![CONFIG_KEY_DEVICE_ID],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(DatabaseError::from)?
-        .ok_or_else(|| DatabaseError::ValidationError {
-            reason: "device_id config row disappeared after initialization".to_string(),
-        })?;
-
-    let expected = Uuid::parse_str(&recorded).map_err(|e| DatabaseError::ValidationError {
-        reason: format!("stored device_id is not a UUID: {e}"),
-    })?;
-    if expected != supplied {
-        return Err(Error::DeviceIdMismatch { expected, supplied });
-    }
-    Ok(())
 }
 
 /// Map a [`DatabaseLockError`] into the crate's top-level [`Error`], routing

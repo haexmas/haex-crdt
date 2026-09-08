@@ -17,8 +17,10 @@
 //!   before the apply pass
 //! - (e) Local write on A → `scan_table_for_local_changes(A)` returns it →
 //!   `apply_remote_changes(B)` succeeds → readback from B carries A's
-//!   HLC and author metadata → reopening either store with the wrong
-//!   device provider returns `Error::DeviceIdMismatch`
+//!   HLC and author metadata → reopening either store with a different
+//!   device provider is accepted and returns the new provider's UUID
+//!   (the crate no longer arbitrates device IDs; the consumer owns
+//!   uniqueness per (DB × replica))
 //!
 //! This is an integration test on the local path (workspace path dependency);
 //! the true "consumable from a tagged git commit" check that plan §8 gates
@@ -277,35 +279,20 @@ fn two_devices_sync_backfilled_and_fresh_writes_end_to_end() {
         .expect("readback legacy row on device_b");
     assert_eq!(legacy_on_b, "legacy body one");
 
-    // ---------- device-id contract ---------------------------------------
-    // Drop both handles so their vault locks release, then attempt to
-    // reopen each store with the OTHER device's provider. Plan §4.1 says
-    // this must fail with DeviceIdMismatch and NEVER silently rewrite HLC
-    // state.
+    // ---------- provider-authoritative device id -------------------------
+    // The crate no longer arbitrates device IDs on the same DB file. A
+    // reopen with a different provider is accepted and returns exactly
+    // that provider's UUID. Enforcing uniqueness per (DB × replica) is
+    // the consumer's job — see the DeviceIdProvider contract docs.
     drop(db_a);
     drop(db_b);
 
-    let wrong_a = match Database::open(config(path_a, Arc::clone(&provider_b), source.clone())) {
-        Err(e) => e,
-        Ok(_) => panic!("reopen device_a with device_b's provider must fail"),
-    };
-    match wrong_a {
-        haex_crdt::Error::DeviceIdMismatch { expected, supplied } => {
-            assert_eq!(expected, device_a);
-            assert_eq!(supplied, device_b);
-        }
-        other => panic!("wrong error variant for device_a: {other:?}"),
-    }
+    let db_a_with_b = Database::open(config(path_a, Arc::clone(&provider_b), source.clone()))
+        .expect("crate accepts a different provider on the same file");
+    assert_eq!(db_a_with_b.device_id(), device_b);
+    drop(db_a_with_b);
 
-    let wrong_b = match Database::open(config(path_b, Arc::clone(&provider_a), source)) {
-        Err(e) => e,
-        Ok(_) => panic!("reopen device_b with device_a's provider must fail"),
-    };
-    match wrong_b {
-        haex_crdt::Error::DeviceIdMismatch { expected, supplied } => {
-            assert_eq!(expected, device_b);
-            assert_eq!(supplied, device_a);
-        }
-        other => panic!("wrong error variant for device_b: {other:?}"),
-    }
+    let db_b_with_a = Database::open(config(path_b, Arc::clone(&provider_a), source))
+        .expect("crate accepts a different provider on the same file");
+    assert_eq!(db_b_with_a.device_id(), device_a);
 }
