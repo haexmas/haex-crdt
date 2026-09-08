@@ -56,19 +56,27 @@ pub(crate) fn prepare_legacy_schema(conn: &mut Connection) -> Result<bool> {
     Ok(present == bootstrap_tables.len())
 }
 
-/// Journal the immutable bootstrap migration when its schema came from the
-/// legacy tables. Without this marker, the unchanged `CREATE TABLE` statements
-/// would be replayed against the renamed tables and fail with "already exists".
+/// Journal the current bootstrap after the legacy schema has been renamed.
+/// A v0.1.0 journal already contains the original bootstrap digest: accept
+/// that exact released content as a compatibility conversion, preserving
+/// its application time. Every other differing digest remains untouched so
+/// reconciliation still rejects content drift, including unreleased schemas.
+/// Unjournaled legacy installs need a marker to avoid replaying CREATE TABLE.
 pub(crate) fn record_legacy_bootstrap(conn: &Connection) -> Result<()> {
     let (name, content) = CRATE_MIGRATIONS
         .first()
         .expect("CRATE_MIGRATIONS must contain the bootstrap migration");
+    // Verify against the released bytes, never an intermediate 0.2.0 build:
+    // git show v0.1.0:src/db/migrations/sql/0001_crdt_bootstrap.sql | sha256sum
+    let released_digest = "9dd00af288cfadffd5e982fa4ea2f72827816e781406b984fd6092a76ed7bcdf";
     conn.execute(
         &format!(
-            "INSERT OR IGNORE INTO {TABLE_CRDT_MIGRATIONS} \
-             (migration_name, sha256_digest) VALUES (?1, ?2)"
+            "INSERT INTO {TABLE_CRDT_MIGRATIONS} \
+             (migration_name, sha256_digest) VALUES (?1, ?2) \
+             ON CONFLICT(migration_name) DO UPDATE SET sha256_digest = excluded.sha256_digest \
+             WHERE {TABLE_CRDT_MIGRATIONS}.sha256_digest = ?3"
         ),
-        rusqlite::params![name, sha256_hex(content.as_bytes())],
+        rusqlite::params![name, sha256_hex(content.as_bytes()), released_digest],
     )?;
     Ok(())
 }

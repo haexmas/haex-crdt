@@ -12,15 +12,17 @@
 //! aborts open on any post-hoc edit. New CRDT-bookkeeping work goes into a
 //! new migration name, never into an existing one.
 //!
-//! The freeze binds from the first **tagged release** containing the
-//! migration, and that precondition is worth checking before invoking the
-//! rule: editing a migration that exists only in an unreleased version is a
-//! normal change, not a drift exception, because no journal anywhere holds
-//! the old digest. Confirm with `git tag` and
-//! `git show <tag>:src/db/migrations/sql/<name>.sql` rather than assuming a
-//! migration present in the working tree has shipped — a working-tree
-//! database from an unreleased version is expected to be deleted and
-//! recreated, not migrated forward.
+//! The bootstrap was already shipped and journaled under this name in
+//! **v0.1.0**. Its identifier renames are an explicit compatibility exception:
+//! `compat` renames the existing schema and converts only the exact released
+//! v0.1.0 digest to the current one. Other differing digests still abort open.
+//! Further schema changes must use new migrations.
+//!
+//! Verify released content with `git tag` and
+//! `git show <tag>:src/db/migrations/sql/<name>.sql`. An unreleased crate
+//! version does not make an already released migration editable. Databases
+//! from unreleased intermediate versions are expected to be deleted and
+//! recreated; their bootstrap digests have no compatibility conversion.
 
 /// The compiled-in list of crate-owned migrations, in apply order.
 ///

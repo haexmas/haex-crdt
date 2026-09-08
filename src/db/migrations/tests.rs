@@ -26,15 +26,6 @@ fn source_from(entries: &[(&str, &str)]) -> StaticMigrationSource {
     StaticMigrationSource(m)
 }
 
-fn table_columns(conn: &Connection, table: &str) -> Vec<String> {
-    conn.prepare(&format!("PRAGMA table_info(\"{table}\")"))
-        .unwrap()
-        .query_map([], |row| row.get::<_, String>(1))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap()
-}
-
 fn table_exists(conn: &Connection, name: &str) -> bool {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
@@ -459,9 +450,13 @@ fn crate_bootstrap_records_a_stable_digest() {
 
 #[test]
 fn legacy_crdt_identifiers_are_migrated_before_current_bootstrap() {
-    let mut conn = Connection::open_in_memory().unwrap();
-    conn.execute_batch(
-        "CREATE TABLE haex_crdt_configs (
+    // SHA-256 of the exact SQL shipped in v0.1.0, which its migration
+    // engine journaled under the same bootstrap name used today.
+    let released_digest = "9dd00af288cfadffd5e982fa4ea2f72827816e781406b984fd6092a76ed7bcdf";
+    for stored_digest in [None, Some(released_digest), Some("invalid-digest")] {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE haex_crdt_configs (
              key TEXT PRIMARY KEY NOT NULL, type TEXT NOT NULL, value TEXT NOT NULL
          );
          CREATE TABLE haex_crdt_dirty_tables (
@@ -499,82 +494,117 @@ fn legacy_crdt_identifiers_are_migrated_before_current_bootstrap() {
          INSERT INTO legacy_items
              (id, body, haex_hlc, haex_column_hlcs, haex_column_sigs)
              VALUES ('row-1', 'preserve me', 'hlc-1', '{\"body\":\"hlc-1\"}', '{}');",
-    )
-    .unwrap();
+        )
+        .unwrap();
 
-    run_migrations(&mut conn, &empty_source()).unwrap();
-
-    for legacy in [
-        "haex_crdt_configs",
-        "haex_crdt_dirty_tables",
-        "haex_crdt_migrations",
-        "haex_app_migrations",
-    ] {
-        assert!(
-            !table_exists(&conn, legacy),
-            "legacy table still exists: {legacy}"
+        if let Some(digest) = stored_digest {
+            conn.execute(
+                "INSERT INTO haex_crdt_migrations
+             (migration_name, sha256_digest, applied_at) VALUES (?1, ?2, '2026-09-01 12:00:00')",
+                [CRATE_MIGRATIONS[0].0, digest],
+            )
+            .unwrap();
+        }
+        if stored_digest == Some("invalid-digest") {
+            assert!(matches!(
+                run_migrations(&mut conn, &empty_source()),
+                Err(Error::MigrationContentDrift { .. })
+            ));
+            continue;
+        }
+        run_migrations(&mut conn, &empty_source()).unwrap();
+        // The compatibility conversion must be stable on the next open too.
+        assert_eq!(
+            run_migrations(&mut conn, &empty_source())
+                .unwrap()
+                .crate_applied,
+            0
         );
-    }
-    assert!(table_exists(&conn, TABLE_CRDT_CONFIGS));
-    assert!(table_exists(&conn, TABLE_CRDT_DIRTY_TABLES));
-    assert!(table_exists(&conn, TABLE_CRDT_MIGRATIONS));
-    assert!(table_exists(&conn, TABLE_APP_MIGRATIONS));
+        if stored_digest.is_some() {
+            let applied_at: String = conn
+                .query_row(
+                    &format!(
+                        "SELECT applied_at FROM {TABLE_CRDT_MIGRATIONS} WHERE migration_name = ?1"
+                    ),
+                    [CRATE_MIGRATIONS[0].0],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(applied_at, "2026-09-01 12:00:00");
+        }
 
-    let config: String = conn
-        .query_row(
-            &format!("SELECT value FROM {TABLE_CRDT_CONFIGS} WHERE key = 'hlc_timestamp'"),
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(config, "0000000000000001/1");
+        for legacy in [
+            "haex_crdt_configs",
+            "haex_crdt_dirty_tables",
+            "haex_crdt_migrations",
+            "haex_app_migrations",
+        ] {
+            assert!(
+                !table_exists(&conn, legacy),
+                "legacy table still exists: {legacy}"
+            );
+        }
+        assert!(table_exists(&conn, TABLE_CRDT_CONFIGS));
+        assert!(table_exists(&conn, TABLE_CRDT_DIRTY_TABLES));
+        assert!(table_exists(&conn, TABLE_CRDT_MIGRATIONS));
+        assert!(table_exists(&conn, TABLE_APP_MIGRATIONS));
 
-    let columns = conn
-        .prepare("PRAGMA table_info(legacy_items)")
-        .unwrap()
-        .query_map([], |row| row.get::<_, String>(1))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    assert!(columns.iter().any(|name| name == HLC_TIMESTAMP_COLUMN));
-    assert!(columns.iter().any(|name| name == COLUMN_HLCS_COLUMN));
-    assert!(columns.iter().any(|name| name == COLUMN_SIGS_COLUMN));
+        let config: String = conn
+            .query_row(
+                &format!("SELECT value FROM {TABLE_CRDT_CONFIGS} WHERE key = 'hlc_timestamp'"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(config, "0000000000000001/1");
 
-    let row: (String, String, String) = conn
-        .query_row(
-            &format!(
-                "SELECT body, {HLC_TIMESTAMP_COLUMN}, {COLUMN_HLCS_COLUMN} \
+        let columns = conn
+            .prepare("PRAGMA table_info(legacy_items)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(columns.iter().any(|name| name == HLC_TIMESTAMP_COLUMN));
+        assert!(columns.iter().any(|name| name == COLUMN_HLCS_COLUMN));
+        assert!(columns.iter().any(|name| name == COLUMN_SIGS_COLUMN));
+
+        let row: (String, String, String) = conn
+            .query_row(
+                &format!(
+                    "SELECT body, {HLC_TIMESTAMP_COLUMN}, {COLUMN_HLCS_COLUMN} \
                  FROM legacy_items WHERE id = 'row-1'"
-            ),
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .unwrap();
-    assert_eq!(
-        row,
-        (
-            "preserve me".into(),
-            "hlc-1".into(),
-            "{\"body\":\"hlc-1\"}".into()
-        )
-    );
+                ),
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                "preserve me".into(),
+                "hlc-1".into(),
+                "{\"body\":\"hlc-1\"}".into()
+            )
+        );
 
-    let deleted_columns = conn
-        .prepare("PRAGMA table_info(haex_deleted_rows)")
-        .unwrap()
-        .query_map([], |row| row.get::<_, String>(1))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    assert!(deleted_columns
-        .iter()
-        .any(|name| name == HLC_TIMESTAMP_COLUMN));
-    assert!(deleted_columns
-        .iter()
-        .any(|name| name == COLUMN_HLCS_COLUMN));
-    assert!(deleted_columns
-        .iter()
-        .any(|name| name == COLUMN_SIGS_COLUMN));
+        let deleted_columns = conn
+            .prepare("PRAGMA table_info(haex_deleted_rows)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(deleted_columns
+            .iter()
+            .any(|name| name == HLC_TIMESTAMP_COLUMN));
+        assert!(deleted_columns
+            .iter()
+            .any(|name| name == COLUMN_HLCS_COLUMN));
+        assert!(deleted_columns
+            .iter()
+            .any(|name| name == COLUMN_SIGS_COLUMN));
+    }
 }
 
 #[test]
@@ -620,7 +650,9 @@ fn a_table_carrying_both_a_legacy_and_a_current_column_aborts_without_renaming()
         matches!(err, Error::MigrationCompatibility { .. }),
         "expected MigrationCompatibility, got {err:?}"
     );
-    let columns = table_columns(&conn, "items");
-    assert!(columns.iter().any(|name| name == "haex_hlc"));
-    assert!(columns.iter().any(|name| name == HLC_TIMESTAMP_COLUMN));
+    let columns = crate::crdt::trigger::get_table_schema(&conn, "items").unwrap();
+    assert!(columns.iter().any(|column| column.name == "haex_hlc"));
+    assert!(columns
+        .iter()
+        .any(|column| column.name == HLC_TIMESTAMP_COLUMN));
 }
