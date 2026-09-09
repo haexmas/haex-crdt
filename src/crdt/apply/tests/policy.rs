@@ -1,7 +1,9 @@
 //! `ApplyPolicy` hook tests: malformed policy output, row- vs column-level
-//! skip, `after_row` / `before_commit` failure semantics, the
-//! `on_insert_constraint` hook on a real NOT NULL / UNIQUE violation, and
-//! that a skip anywhere in the pipeline never advances the local clock.
+//! skip, `after_row` / `before_commit` failure semantics, and that a skip
+//! anywhere in the pipeline never advances the local clock.
+//!
+//! `on_insert_constraint` coverage (real NOT NULL / UNIQUE / PRIMARY KEY
+//! violations) lives in `insert_constraint.rs`.
 //!
 //! `SignatureApplyPolicy`-mediated behavior (drift, reserved columns,
 //! `_no_sync`, unknown columns, stale/superseded, delete propagation) is
@@ -27,6 +29,7 @@ use crate::error::{Error, Result};
 use crate::signature::RemoteChanges;
 use crate::table_names::TABLE_CRDT_CONFIGS;
 
+mod insert_constraint;
 mod regressions;
 
 const HLC1: &str = "0000000000000001/abcdef0000000000000000000000";
@@ -250,118 +253,6 @@ fn after_row_failure_aborts_the_whole_batch() {
         count, 0,
         "after_row failing must roll back the write it was called for"
     );
-}
-
-// -----------------------------------------------------------------------
-// `on_insert_constraint`: a real NOT NULL / UNIQUE violation
-// -----------------------------------------------------------------------
-
-struct SkipOnConstraintPolicy;
-impl ApplyPolicy for SkipOnConstraintPolicy {
-    fn preflight(&mut self, _changes: &RemoteChanges) -> Result<()> {
-        Ok(())
-    }
-    fn prepare_row(&mut self, _tx: &Transaction<'_>, row: RowInput<'_>) -> Result<RowDecision> {
-        accept_all(&row)
-    }
-    fn on_insert_constraint(
-        &mut self,
-        _tx: &Transaction<'_>,
-        _attempted: RowWrite<'_>,
-        _error: &rusqlite::Error,
-    ) -> Result<ConstraintDecision> {
-        Ok(ConstraintDecision::SkipRow)
-    }
-}
-
-#[test]
-fn insert_not_null_violation_skip_row_continues_the_batch_and_does_not_advance_the_clock() {
-    let (mut conn, hlc, _dev) = make_fixture();
-    // `body` is NOT NULL with no default; the change below only touches
-    // `note`, so the generated INSERT omits `body` entirely and SQLite
-    // raises a real NOT NULL constraint violation.
-    create_crdt_table(&conn, "items", "body TEXT NOT NULL, note TEXT");
-
-    let mut policy = SkipOnConstraintPolicy;
-    let poisoned = hlc_ahead_of_now(&hlc, Duration::from_secs(6 * 60 * 60));
-    let outcome = apply_remote_changes(
-        &mut conn,
-        vec![change("items", "r1", "note", &poisoned, json!("hi"))],
-        &hlc,
-        &mut policy,
-    )
-    .expect("SkipRow must not fail the batch");
-
-    assert_eq!(outcome.report.applied, 0);
-    assert_eq!(outcome.report.skipped_insert_constraint, 1);
-    assert_eq!(outcome.skipped[0].reason, SkipReason::InsertNotNull);
-
-    let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(count, 0, "the failed insert must not have landed");
-
-    let next = hlc.new_timestamp().expect("timestamp").to_string();
-    assert!(
-        hlc_is_newer(&poisoned, &next),
-        "a constraint-skipped row must not advance the local clock"
-    );
-}
-
-#[test]
-fn insert_not_null_violation_aborts_by_default() {
-    let (mut conn, hlc, _dev) = make_fixture();
-    create_crdt_table(&conn, "items", "body TEXT NOT NULL, note TEXT");
-
-    let mut policy = AcceptAllPolicy;
-    let err = apply_remote_changes(
-        &mut conn,
-        vec![change("items", "r1", "note", HLC1, json!("hi"))],
-        &hlc,
-        &mut policy,
-    )
-    .unwrap_err();
-    assert!(
-        matches!(err, Error::Sqlite(_)),
-        "the default hook must abort with the original SQL error, got {err:?}"
-    );
-
-    let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(count, 0);
-}
-
-#[test]
-fn insert_unique_violation_skip_row_continues_the_batch() {
-    let (mut conn, hlc, _dev) = make_fixture();
-    create_crdt_table(&conn, "items", "code TEXT UNIQUE");
-
-    let mut policy = SkipOnConstraintPolicy;
-    let outcome = apply_remote_changes(
-        &mut conn,
-        vec![
-            change("items", "r1", "code", HLC1, json!("dup")),
-            change("items", "r2", "code", HLC2, json!("dup")),
-        ],
-        &hlc,
-        &mut policy,
-    )
-    .expect("SkipRow must not fail the batch");
-
-    assert_eq!(outcome.report.applied, 1, "only the first row may land");
-    assert_eq!(outcome.report.skipped_insert_constraint, 1);
-    let reason = outcome
-        .skipped
-        .iter()
-        .find(|s| s.input_index == 1)
-        .map(|s| s.reason);
-    assert_eq!(reason, Some(SkipReason::InsertUnique));
-
-    let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(count, 1, "only the first row may exist");
 }
 
 // -----------------------------------------------------------------------

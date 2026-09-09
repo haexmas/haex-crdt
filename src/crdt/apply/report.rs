@@ -52,10 +52,11 @@ pub struct ApplyReport {
     /// [`super::RowDecision::Skip`] (whole row, every still-eligible column)
     /// or [`super::ColumnDecision::Skip`] (one column).
     pub skipped_policy: usize,
-    /// INSERT failed on a NOT NULL or UNIQUE constraint and the policy's
-    /// [`super::ApplyPolicy::on_insert_constraint`] returned
+    /// INSERT failed a NOT NULL, UNIQUE, or PRIMARY KEY constraint and the
+    /// policy's [`super::ApplyPolicy::on_insert_constraint`] returned
     /// [`super::ConstraintDecision::SkipRow`]. See [`SkipReason::InsertNotNull`]
-    /// / [`SkipReason::InsertUnique`] in `skipped` for which kind.
+    /// / [`SkipReason::InsertUnique`] / [`SkipReason::InsertPrimaryKey`] in
+    /// `skipped` for which kind.
     pub skipped_insert_constraint: usize,
     /// A column-accepting decision lost to a *later* change on the same
     /// column within the same call (last-in-HLC-order wins). Distinct from
@@ -116,4 +117,12 @@ pub enum SkipReason {
     /// INSERT failed a UNIQUE constraint and the policy chose to skip the
     /// row rather than abort the batch.
     InsertUnique,
+    /// INSERT failed a PRIMARY KEY constraint — the row's own identity
+    /// already exists — and the policy chose to skip the row rather than
+    /// abort the batch. Distinct from [`Self::InsertUnique`]: a PK collision
+    /// means this exact row already exists, while a UNIQUE collision means a
+    /// different row already claims some other business-unique value.
+    /// SQLite renders both with the same message text ("UNIQUE constraint
+    /// failed: ..."); only the extended error code tells them apart.
+    InsertPrimaryKey,
 }

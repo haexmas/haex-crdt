@@ -1,7 +1,7 @@
 //! The two SQL writers the apply loop ends in, wrapped in a savepoint so a
-//! NOT NULL / UNIQUE INSERT failure can be recovered per-row, plus the
-//! signature-map helpers `SignatureApplyPolicy` uses to reproduce today's
-//! flat `[column]` replace-or-remove shape.
+//! NOT NULL / UNIQUE / PRIMARY KEY INSERT failure can be recovered per-row,
+//! plus the signature-map helpers `SignatureApplyPolicy` uses to reproduce
+//! today's flat `[column]` replace-or-remove shape.
 //!
 //! Split out of `engine.rs` to keep both files inside the repo's file-size
 //! cap. Note the column ordering in [`write_insert`]: the staged remote
@@ -20,8 +20,8 @@ use crate::db::core::ValueConverter;
 use crate::db::error::DatabaseError;
 
 /// A row's INSERT/UPDATE either landed, or failed with a raw `rusqlite`
-/// error the caller must classify (only an INSERT's NOT NULL / UNIQUE
-/// failure is recoverable — see [`classify_insert_constraint`]).
+/// error the caller must classify (only an INSERT's NOT NULL / UNIQUE /
+/// PRIMARY KEY failure is recoverable — see [`classify_insert_constraint`]).
 pub(super) enum WriteOutcome {
     Written,
     SqlFailure(rusqlite::Error),
@@ -32,8 +32,8 @@ const ROW_SAVEPOINT: &str = "haex_apply_row";
 /// Wrap `write_fn` in a SQLite savepoint: on success, release it; on
 /// failure, return the raw error for the caller to classify (constraint
 /// failures are handled by the caller rolling back the savepoint itself,
-/// since only an INSERT's NOT NULL/UNIQUE failure is recoverable and the
-/// caller is the one that knows which statement kind this was).
+/// since only an INSERT's NOT NULL/UNIQUE/PRIMARY KEY failure is recoverable
+/// and the caller is the one that knows which statement kind this was).
 pub(super) fn in_row_savepoint(
     tx: &Transaction<'_>,
     write_fn: impl FnOnce() -> rusqlite::Result<usize>,
@@ -63,9 +63,14 @@ pub(super) fn rollback_row_savepoint(tx: &Transaction<'_>) -> Result<(), Databas
     Ok(())
 }
 
-/// Classify a SQL error from an INSERT statement as a recoverable NOT NULL /
-/// UNIQUE constraint violation, or `None` for anything else (which always
-/// aborts the batch regardless of any policy hook).
+/// Classify a SQL error from an INSERT statement as a recoverable NOT NULL,
+/// UNIQUE, or PRIMARY KEY constraint violation, or `None` for anything else
+/// (which always aborts the batch regardless of any policy hook).
+///
+/// SQLite renders a PRIMARY KEY conflict with the same message text as a
+/// UNIQUE conflict ("UNIQUE constraint failed: ..."); only the extended
+/// error code (1555 vs 2067) tells them apart, which is why this matches on
+/// `ffi_err.extended_code` rather than the message string.
 pub(super) fn classify_insert_constraint(
     err: &rusqlite::Error,
 ) -> Option<super::report::SkipReason> {
@@ -76,6 +81,9 @@ pub(super) fn classify_insert_constraint(
         }
         if ffi_err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE {
             return Some(SkipReason::InsertUnique);
+        }
+        if ffi_err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY {
+            return Some(SkipReason::InsertPrimaryKey);
         }
     }
     None
