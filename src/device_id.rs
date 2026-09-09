@@ -30,7 +30,7 @@ use crate::error::Result;
 ///
 /// - Commit or roll back `tx`. Ownership stays with `Database::open`.
 /// - Touch CRDT bookkeeping tables (`haex_crdt_*_no_sync`) or CRDT-tracked
-///   tables that carry `_no_trigger` metadata columns; those are populated
+///   tables that carry `_no_sync` metadata columns; those are populated
 ///   only after HLC and trigger initialization run. The bootstrap phase is
 ///   for unsigned, non-CRDT setup only.
 /// - Rely on `crate::current_hlc()` or any HLC-derived value; HLC is not
