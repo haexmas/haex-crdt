@@ -118,10 +118,10 @@ pub trait ApplyPolicy {
         Ok(())
     }
 
-    /// Runs only for a NOT NULL or UNIQUE violation raised by the row's own
-    /// INSERT statement, after that INSERT's savepoint has already been
-    /// rolled back. Any other SQL error always aborts the batch regardless
-    /// of this hook.
+    /// Runs only for a NOT NULL, UNIQUE, or PRIMARY KEY violation raised by
+    /// the row's own INSERT statement, after that INSERT's savepoint has
+    /// already been rolled back. Any other SQL error always aborts the
+    /// batch regardless of this hook.
     ///
     /// Default: [`ConstraintDecision::Abort`].
     fn on_insert_constraint(

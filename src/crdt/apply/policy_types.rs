@@ -102,10 +102,12 @@ pub struct RowWrite<'a> {
     pub row_hlc: &'a str,
 }
 
-/// A policy's verdict after a NOT NULL / UNIQUE INSERT failure.
+/// A policy's verdict after a NOT NULL / UNIQUE / PRIMARY KEY INSERT
+/// failure.
 pub enum ConstraintDecision {
     /// Drop the row (recorded as `SkipReason::InsertNotNull` /
-    /// `InsertUnique`) and continue with the rest of the batch.
+    /// `InsertUnique` / `InsertPrimaryKey`) and continue with the rest of
+    /// the batch.
     SkipRow,
     /// Abort the whole batch, surfacing the original SQL error.
     Abort,
