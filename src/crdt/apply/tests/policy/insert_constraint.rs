@@ -3,6 +3,7 @@
 //! cap.
 
 use super::*;
+use crate::crdt::columns::{COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN, HLC_TIMESTAMP_COLUMN};
 
 struct SkipOnConstraintPolicy;
 impl ApplyPolicy for SkipOnConstraintPolicy {
@@ -57,27 +58,54 @@ fn insert_not_null_violation_skip_row_continues_the_batch_and_does_not_advance_t
 }
 
 #[test]
-fn insert_not_null_violation_aborts_by_default() {
-    let (mut conn, hlc, _dev) = make_fixture();
-    create_crdt_table(&conn, "items", "body TEXT NOT NULL, note TEXT");
+fn insert_constraint_violation_aborts_by_default() {
+    for primary_key in [false, true] {
+        let (mut conn, hlc, _dev) = make_fixture();
+        let (columns, expected_code, mut policy): (_, _, Box<dyn ApplyPolicy>) = if primary_key {
+            (
+                "body TEXT NOT NULL DEFAULT 'stub', note TEXT",
+                rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY,
+                Box::new(StubRowThenAcceptPolicy {
+                    skip_constraint: false,
+                }),
+            )
+        } else {
+            (
+                "body TEXT NOT NULL, note TEXT",
+                rusqlite::ffi::SQLITE_CONSTRAINT_NOTNULL,
+                Box::new(AcceptAllPolicy),
+            )
+        };
+        create_crdt_table(&conn, "items", columns);
+        let future = hlc_ahead_of_now(&hlc, Duration::from_secs(6 * 60 * 60));
+        let err = apply_remote_changes(
+            &mut conn,
+            vec![
+                change("items", "r0", "body", HLC1, json!("earlier write")),
+                change("items", "r1", "note", &future, json!("hi")),
+            ],
+            &hlc,
+            policy.as_mut(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::Sqlite(rusqlite::Error::SqliteFailure(code, _))
+                if code.extended_code == expected_code),
+            "the default hook must abort with the original SQL error, got {err:?}"
+        );
 
-    let mut policy = AcceptAllPolicy;
-    let err = apply_remote_changes(
-        &mut conn,
-        vec![change("items", "r1", "note", HLC1, json!("hi"))],
-        &hlc,
-        &mut policy,
-    )
-    .unwrap_err();
-    assert!(
-        matches!(err, Error::Sqlite(_)),
-        "the default hook must abort with the original SQL error, got {err:?}"
-    );
-
-    let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(count, 0);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "abort must roll back earlier writes and policy stubs"
+        );
+        assert!(hlc_is_newer(
+            &future,
+            &hlc.new_timestamp().unwrap().to_string()
+        ));
+    }
 }
 
 #[test]
@@ -116,54 +144,113 @@ fn insert_unique_violation_skip_row_continues_the_batch() {
 /// exact PK *before* the core's own INSERT runs for the same row — e.g. an
 /// identity-resolution stub insert, as haex-vault's `prepare_row` does. The
 /// core's own INSERT then collides on the row's PRIMARY KEY, not on a
-/// UNIQUE column.
-struct StubRowThenAcceptPolicy;
+/// UNIQUE column. Only `r1` gets a stub so other rows can test batch progress.
+struct StubRowThenAcceptPolicy {
+    skip_constraint: bool,
+}
 impl ApplyPolicy for StubRowThenAcceptPolicy {
     fn preflight(&mut self, _changes: &RemoteChanges) -> Result<()> {
         Ok(())
     }
     fn prepare_row(&mut self, tx: &Transaction<'_>, row: RowInput<'_>) -> Result<RowDecision> {
         let id = row.row_pks["id"].as_str().expect("id pk is a string");
-        tx.execute(
-            &format!("INSERT INTO \"{}\" (id) VALUES (?)", row.table_name),
-            [id],
-        )?;
+        if id == "r1" {
+            tx.execute(
+                &format!("INSERT INTO \"{}\" (id) VALUES (?)", row.table_name),
+                [id],
+            )?;
+        }
         accept_all(&row)
     }
     fn on_insert_constraint(
         &mut self,
-        _tx: &Transaction<'_>,
-        _attempted: RowWrite<'_>,
-        _error: &rusqlite::Error,
+        tx: &Transaction<'_>,
+        attempted: RowWrite<'_>,
+        error: &rusqlite::Error,
     ) -> Result<ConstraintDecision> {
-        Ok(ConstraintDecision::SkipRow)
+        if self.skip_constraint {
+            Ok(ConstraintDecision::SkipRow)
+        } else {
+            // Exercise the actual trait default without duplicating its verdict.
+            AcceptAllPolicy.on_insert_constraint(tx, attempted, error)
+        }
     }
 }
 
 #[test]
 fn insert_primary_key_violation_from_a_policy_created_row_skip_row_continues_the_batch() {
     let (mut conn, hlc, _dev) = make_fixture();
-    create_crdt_table(&conn, "items", "note TEXT");
+    create_crdt_table(&conn, "items", "note TEXT, title TEXT");
 
-    let mut policy = StubRowThenAcceptPolicy;
+    let mut policy = StubRowThenAcceptPolicy {
+        skip_constraint: true,
+    };
+    let future = hlc_ahead_of_now(&hlc, Duration::from_secs(6 * 60 * 60));
     let outcome = apply_remote_changes(
         &mut conn,
-        vec![change("items", "r1", "note", HLC1, json!("hi"))],
+        vec![
+            // Groups use their minimum HLC: the conflicted row runs first,
+            // while its second column would poison the clock if folded.
+            change("items", "r1", "note", HLC1, json!("hi")),
+            change("items", "r1", "title", &future, json!("skipped future")),
+            change("items", "r2", "note", HLC2, json!("later row")),
+        ],
         &hlc,
         &mut policy,
     )
     .expect("on_insert_constraint returning SkipRow must not hard-abort the batch");
 
-    assert_eq!(outcome.report.applied, 0);
-    assert_eq!(outcome.report.skipped_insert_constraint, 1);
-    assert_eq!(outcome.skipped[0].reason, SkipReason::InsertPrimaryKey);
+    assert_eq!(
+        outcome.report.applied, 1,
+        "the row after the conflict must land"
+    );
+    assert_eq!(outcome.report.skipped_insert_constraint, 2);
+    let mut skipped: Vec<_> = outcome
+        .skipped
+        .iter()
+        .map(|s| (s.input_index, s.reason))
+        .collect();
+    skipped.sort_by_key(|(index, _)| *index);
+    assert_eq!(
+        skipped,
+        vec![
+            (0, SkipReason::InsertPrimaryKey),
+            (1, SkipReason::InsertPrimaryKey)
+        ]
+    );
 
-    let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
+    let stub: (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+        String,
+    ) = conn
+        .query_row(
+            &format!(
+                "SELECT note, title, {HLC_TIMESTAMP_COLUMN}, {COLUMN_HLCS_COLUMN}, \
+                 {COLUMN_SIGS_COLUMN} FROM items WHERE id = 'r1'"
+            ),
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
         .unwrap();
     assert_eq!(
-        count, 1,
-        "only the policy's own stub row may exist; the core's INSERT must not have landed"
+        stub,
+        (None, None, None, "{}".into(), "{}".into()),
+        "the skipped INSERT must leave the policy stub and its metadata untouched"
+    );
+    let later: (String, String) = conn
+        .query_row(
+            &format!("SELECT note, {HLC_TIMESTAMP_COLUMN} FROM items WHERE id = 'r2'"),
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(later, ("later row".into(), HLC2.into()));
+    assert!(
+        hlc_is_newer(&future, &hlc.new_timestamp().unwrap().to_string()),
+        "a primary-key-skipped row must not advance the clock"
     );
 }
 
@@ -175,7 +262,9 @@ fn primary_key_and_unique_violations_are_distinguished_by_extended_code_not_mess
     // the extended error code (1555 vs 2067) tells them apart.
     let (mut pk_conn, pk_hlc, _pk_dev) = make_fixture();
     create_crdt_table(&pk_conn, "items", "note TEXT");
-    let mut pk_policy = StubRowThenAcceptPolicy;
+    let mut pk_policy = StubRowThenAcceptPolicy {
+        skip_constraint: true,
+    };
     let pk_outcome = apply_remote_changes(
         &mut pk_conn,
         vec![change("items", "r1", "note", HLC1, json!("hi"))],
