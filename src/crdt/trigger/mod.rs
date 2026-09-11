@@ -223,6 +223,7 @@ pub fn drop_triggers_for_table(tx: &Transaction, table_name: &str) -> Result<(),
     Ok(())
 }
 
+/// Generates the SQL for the AFTER INSERT CRDT trigger for `table_name`.
 fn generate_insert_trigger_sql(
     table_name: &str,
     cols_to_track: &[String],
@@ -261,8 +262,9 @@ fn generate_insert_trigger_sql(
             SET {COLUMN_HLCS_COLUMN} = {json_object}
             WHERE {pk_where};
 
-            INSERT OR REPLACE INTO {TABLE_CRDT_DIRTY_TABLES} (table_name, last_modified)
-            VALUES ('{table_name}', datetime('now'));
+            INSERT INTO {TABLE_CRDT_DIRTY_TABLES} (table_name, last_modified)
+            VALUES ('{table_name}', datetime('now'))
+            ON CONFLICT (table_name) DO UPDATE SET last_modified = excluded.last_modified;
             END;"
     )
 }
@@ -271,6 +273,7 @@ fn drop_trigger_sql(trigger_name: &str) -> String {
     format!("DROP TRIGGER IF EXISTS \"{trigger_name}\";")
 }
 
+/// Generates the SQL for the AFTER UPDATE CRDT trigger for `table_name`.
 fn generate_update_trigger_sql(
     table_name: &str,
     cols_to_track: &[String],
@@ -337,13 +340,15 @@ fn generate_update_trigger_sql(
             BEGIN
             {all_updates}
 
-            INSERT OR REPLACE INTO {TABLE_CRDT_DIRTY_TABLES} (table_name, last_modified)
+            INSERT INTO {TABLE_CRDT_DIRTY_TABLES} (table_name, last_modified)
             SELECT '{table_name}', datetime('now')
-            WHERE ({any_tracked_changed});
+            WHERE ({any_tracked_changed})
+            ON CONFLICT (table_name) DO UPDATE SET last_modified = excluded.last_modified;
             END;"
     )
 }
 
+/// Generates the SQL for the BEFORE DELETE CRDT trigger for `table_name`.
 fn generate_delete_trigger_sql(table_name: &str, pks: &[String]) -> String {
     let trigger_name = DELETE_TRIGGER_TPL.replace("{TABLE_NAME}", table_name);
 
@@ -361,8 +366,9 @@ fn generate_delete_trigger_sql(table_name: &str, pks: &[String]) -> String {
             BEGIN
             INSERT INTO {DELETED_ROWS_TABLE} (id, table_name, row_pks, {HLC_TIMESTAMP_COLUMN}, {COLUMN_HLCS_COLUMN})
             VALUES ({UUID_FUNCTION_NAME}(), '{table_name}', json_object({row_pks_json}), {HLC_FUNCTION_NAME}(), '{{}}');
-            INSERT OR REPLACE INTO {TABLE_CRDT_DIRTY_TABLES} (table_name, last_modified)
-            VALUES ('{DELETED_ROWS_TABLE}', datetime('now'));
+            INSERT INTO {TABLE_CRDT_DIRTY_TABLES} (table_name, last_modified)
+            VALUES ('{DELETED_ROWS_TABLE}', datetime('now'))
+            ON CONFLICT (table_name) DO UPDATE SET last_modified = excluded.last_modified;
             END;"
     )
 }
