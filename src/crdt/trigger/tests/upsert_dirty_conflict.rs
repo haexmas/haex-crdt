@@ -28,6 +28,7 @@ fn setup_single_tracked_column() -> Connection {
     conn
 }
 
+/// Repeated upserts refresh the dirty-table timestamp without duplicating its row.
 #[test]
 fn upsert_twice_on_single_tracked_column_table_succeeds() {
     let conn = setup_single_tracked_column();
@@ -46,6 +47,15 @@ fn upsert_twice_on_single_tracked_column_table_succeeds() {
 
     conn.execute(
         &format!(
+            "UPDATE {TABLE_CRDT_DIRTY_TABLES} SET last_modified = 'sentinel' \
+             WHERE table_name = 'prefs'"
+        ),
+        [],
+    )
+    .expect("set dirty-table timestamp sentinel");
+
+    conn.execute(
+        &format!(
             "INSERT INTO prefs (pk, value, {HLC_TIMESTAMP_COLUMN}) \
              VALUES ('a', 'v2', 'hlc-2') \
              ON CONFLICT (pk) DO UPDATE SET \
@@ -55,6 +65,21 @@ fn upsert_twice_on_single_tracked_column_table_succeeds() {
         [],
     )
     .expect("second upsert must not fail with UNIQUE constraint on dirty_tables");
+
+    let last_modified: String = conn
+        .query_row(
+            &format!(
+                "SELECT last_modified FROM {TABLE_CRDT_DIRTY_TABLES} \
+                 WHERE table_name = 'prefs'"
+            ),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_ne!(
+        last_modified, "sentinel",
+        "repeat upsert refreshes the dirty-table timestamp"
+    );
 
     let dirty: i64 = conn
         .query_row(

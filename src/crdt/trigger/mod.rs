@@ -223,6 +223,7 @@ pub fn drop_triggers_for_table(tx: &Transaction, table_name: &str) -> Result<(),
     Ok(())
 }
 
+/// Generates the SQL for the AFTER INSERT CRDT trigger for `table_name`.
 fn generate_insert_trigger_sql(
     table_name: &str,
     cols_to_track: &[String],
@@ -272,6 +273,7 @@ fn drop_trigger_sql(trigger_name: &str) -> String {
     format!("DROP TRIGGER IF EXISTS \"{trigger_name}\";")
 }
 
+/// Generates the SQL for the AFTER UPDATE CRDT trigger for `table_name`.
 fn generate_update_trigger_sql(
     table_name: &str,
     cols_to_track: &[String],
@@ -346,6 +348,7 @@ fn generate_update_trigger_sql(
     )
 }
 
+/// Generates the SQL for the BEFORE DELETE CRDT trigger for `table_name`.
 fn generate_delete_trigger_sql(table_name: &str, pks: &[String]) -> String {
     let trigger_name = DELETE_TRIGGER_TPL.replace("{TABLE_NAME}", table_name);
 
