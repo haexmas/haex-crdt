@@ -261,8 +261,9 @@ fn generate_insert_trigger_sql(
             SET {COLUMN_HLCS_COLUMN} = {json_object}
             WHERE {pk_where};
 
-            INSERT OR REPLACE INTO {TABLE_CRDT_DIRTY_TABLES} (table_name, last_modified)
-            VALUES ('{table_name}', datetime('now'));
+            INSERT INTO {TABLE_CRDT_DIRTY_TABLES} (table_name, last_modified)
+            VALUES ('{table_name}', datetime('now'))
+            ON CONFLICT (table_name) DO UPDATE SET last_modified = excluded.last_modified;
             END;"
     )
 }
@@ -337,9 +338,10 @@ fn generate_update_trigger_sql(
             BEGIN
             {all_updates}
 
-            INSERT OR REPLACE INTO {TABLE_CRDT_DIRTY_TABLES} (table_name, last_modified)
+            INSERT INTO {TABLE_CRDT_DIRTY_TABLES} (table_name, last_modified)
             SELECT '{table_name}', datetime('now')
-            WHERE ({any_tracked_changed});
+            WHERE ({any_tracked_changed})
+            ON CONFLICT (table_name) DO UPDATE SET last_modified = excluded.last_modified;
             END;"
     )
 }
@@ -361,8 +363,9 @@ fn generate_delete_trigger_sql(table_name: &str, pks: &[String]) -> String {
             BEGIN
             INSERT INTO {DELETED_ROWS_TABLE} (id, table_name, row_pks, {HLC_TIMESTAMP_COLUMN}, {COLUMN_HLCS_COLUMN})
             VALUES ({UUID_FUNCTION_NAME}(), '{table_name}', json_object({row_pks_json}), {HLC_FUNCTION_NAME}(), '{{}}');
-            INSERT OR REPLACE INTO {TABLE_CRDT_DIRTY_TABLES} (table_name, last_modified)
-            VALUES ('{DELETED_ROWS_TABLE}', datetime('now'));
+            INSERT INTO {TABLE_CRDT_DIRTY_TABLES} (table_name, last_modified)
+            VALUES ('{DELETED_ROWS_TABLE}', datetime('now'))
+            ON CONFLICT (table_name) DO UPDATE SET last_modified = excluded.last_modified;
             END;"
     )
 }

@@ -6,6 +6,7 @@
 //! `gen_uuid` and `current_hlc`.
 
 mod no_sync;
+mod upsert_dirty_conflict;
 
 use super::*;
 use rusqlite::functions::FunctionFlags;
