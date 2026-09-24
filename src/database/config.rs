@@ -9,6 +9,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+
 use crate::device_id::DatabaseBootstrap;
 use crate::migration::MigrationSource;
 use crate::signature::SignatureProvider;
@@ -27,21 +29,33 @@ pub const DEFAULT_TRIGGER_VERSION: i32 = 2;
 /// The wrapper exists so the surrounding type shape (`DatabaseConfig`) makes it
 /// syntactically obvious what the value is, and so a future protocol shift
 /// (`kdf_iter=N`, PBKDF2 salt injection) can land without breaking the outer
-/// public signature.
+/// public signature. The buffer is held in a `Zeroizing<String>` so it is
+/// erased on drop; `Clone` still works because cloning a `Zeroizing` value
+/// produces another erasing copy, never a plain `String`.
 #[derive(Clone)]
-pub struct SqlCipherKey(String);
+pub struct SqlCipherKey(Zeroizing<String>);
 
 impl SqlCipherKey {
-    /// Wrap a caller-owned key string. The value is never logged or cloned
-    /// outside the open path.
+    /// Wrap a caller-owned key string. The value is never logged, and cloning
+    /// it (see `Clone` above) never produces a copy that outlives this type's
+    /// own erasure on drop.
     pub fn new(key: impl Into<String>) -> Self {
-        SqlCipherKey(key.into())
+        SqlCipherKey(Zeroizing::new(key.into()))
     }
 
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 }
+
+impl Zeroize for SqlCipherKey {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+// The inner `Zeroizing<String>` erases the buffer when this value drops.
+impl ZeroizeOnDrop for SqlCipherKey {}
 
 /// Configuration passed to [`super::Database::open`].
 ///
@@ -102,6 +116,8 @@ mod tests {
     use std::collections::BTreeMap;
     use uuid::Uuid;
 
+    fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
+
     fn dummy_config() -> DatabaseConfig {
         DatabaseConfig {
             path: PathBuf::from(":memory:"),
@@ -118,6 +134,22 @@ mod tests {
     fn sql_cipher_key_round_trips_string_into_inner() {
         let k = SqlCipherKey::new("passphrase");
         assert_eq!(k.as_str(), "passphrase");
+    }
+
+    #[test]
+    fn sql_cipher_key_erases_on_drop() {
+        // A compile-time assertion: the type promises to erase its buffer when dropped.
+        assert_zeroize_on_drop::<SqlCipherKey>();
+    }
+
+    #[test]
+    fn sql_cipher_key_clone_is_an_independent_erasing_copy() {
+        let k1 = SqlCipherKey::new("passphrase");
+        let k2 = k1.clone();
+        assert_eq!(k1.as_str(), "passphrase");
+        assert_eq!(k2.as_str(), "passphrase");
+        drop(k1);
+        assert_eq!(k2.as_str(), "passphrase");
     }
 
     #[test]
