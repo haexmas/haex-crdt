@@ -84,24 +84,8 @@ pub fn execute_with_crdt(
         });
     }
 
-    let statement = parse_single_statement(&sql)?;
+    let (statement, touched) = parse_crdt_write(&sql)?;
     let has_returning = statement_has_returning(&statement);
-    let touched = extract_touched_for_signing(&statement);
-
-    // Reject caller-supplied writes to CRDT meta columns. The transformer
-    // would otherwise clobber the row-level HLC silently, and a
-    // caller-supplied column-HLC map would feed a forged HLC into any
-    // sig-preimage a signing hook builds after this write — an attacker
-    // could then mint a valid signature over an arbitrary HLC. Hard
-    // rejection is the only safe choice.
-    if let Some(bad) = touched
-        .as_ref()
-        .and_then(|(_, cols)| cols.explicit().iter().find(|c| is_crdt_meta_column(c)))
-    {
-        return Err(DatabaseError::CrdtMetaColumnWriteForbidden {
-            column: bad.clone(),
-        });
-    }
 
     with_connection(connection, |conn| {
         let tx = conn.transaction()?;
@@ -221,6 +205,45 @@ pub fn execute(
     })
 }
 
+// ---- shared with `Database::write` ----------------------------------------
+
+/// Parses one statement for the CRDT write path and returns it with the
+/// table and columns it writes.
+///
+/// Rejects caller-supplied writes to CRDT meta columns. The transformer
+/// would otherwise clobber the row-level HLC silently, and a caller-supplied
+/// column-HLC map would feed a forged HLC into any sig-preimage a signing hook
+/// builds after this write — an attacker could then mint a valid signature
+/// over an arbitrary HLC. Hard rejection is the only safe choice.
+pub(crate) fn parse_crdt_write(
+    sql: &str,
+) -> Result<(Statement, Option<(TouchedTable, TouchedColumns)>), DatabaseError> {
+    let statement = parse_single_statement(sql)?;
+    let touched = extract_touched_for_signing(&statement);
+    if let Some(bad) = touched
+        .as_ref()
+        .and_then(|(_, cols)| cols.explicit().iter().find(|c| is_crdt_meta_column(c)))
+    {
+        return Err(DatabaseError::CrdtMetaColumnWriteForbidden {
+            column: bad.clone(),
+        });
+    }
+    Ok((statement, touched))
+}
+
+/// Stamps `statement` with the transaction-scoped HLC through the CRDT
+/// transformer and returns the HLC together with the SQL to run.
+pub(crate) fn transform_write(
+    tx: &Transaction,
+    hlc_service: &HlcService,
+    statement: &mut Statement,
+) -> Result<(Timestamp, String), DatabaseError> {
+    let hlc_timestamp = tx_scoped_hlc(tx, hlc_service)?;
+    CrdtTransformer::new().transform_execute_statement(statement, &hlc_timestamp)?;
+    let sql = strip_main_schema_prefix(&statement.to_string());
+    Ok((hlc_timestamp, sql))
+}
+
 // ---- private helpers -----------------------------------------------------
 
 /// Reads the transaction-scoped HLC, aligns [`HlcService`] with it, and
@@ -265,13 +288,7 @@ fn execute_internal(
     let sql_params = ValueConverter::convert_params(params)?;
     let param_refs: Vec<&dyn ToSql> = sql_params.iter().map(|p| p as &dyn ToSql).collect();
 
-    let transformer = CrdtTransformer::new();
-    let hlc_timestamp = tx_scoped_hlc(tx, hlc_service)?;
-
-    transformer.transform_execute_statement(&mut statement, &hlc_timestamp)?;
-
-    let raw_sql = statement.to_string();
-    let sql_str = strip_main_schema_prefix(&raw_sql);
+    let (hlc_timestamp, sql_str) = transform_write(tx, hlc_service, &mut statement)?;
 
     tx.execute(&sql_str, &param_refs[..])
         .map_err(|e| DatabaseError::ExecutionError {
@@ -294,13 +311,7 @@ fn query_internal(
     let sql_params = ValueConverter::convert_params(params)?;
     let param_refs: Vec<&dyn ToSql> = sql_params.iter().map(|p| p as &dyn ToSql).collect();
 
-    let transformer = CrdtTransformer::new();
-    let hlc_timestamp = tx_scoped_hlc(tx, hlc_service)?;
-
-    transformer.transform_execute_statement(&mut statement, &hlc_timestamp)?;
-
-    let raw_sql = statement.to_string();
-    let sql_str = strip_main_schema_prefix(&raw_sql);
+    let (hlc_timestamp, sql_str) = transform_write(tx, hlc_service, &mut statement)?;
 
     let mut stmt = tx
         .prepare(&sql_str)

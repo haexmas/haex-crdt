@@ -25,9 +25,15 @@ Not provided (intentionally):
 - Identity, UCAN, or MLS. `SignatureProvider` is the interface.
 - Any Tauri or async framework opinion beyond what `rusqlite` already implies (blocking I/O).
 
+## Writing and reading
+
+`db.write(|tx| { ... })` runs one `IMMEDIATE` transaction on the CRDT write path. Every `tx.execute`, `tx.query_map` and `tx.query_row` goes through the CRDT transformer, so callers never stamp the HLC by hand, and all writes in the closure share one HLC — one transaction group for sync. Tables ending in `_no_sync` pass through untouched. The closure commits on `Ok` and rolls back on `Err` or a panic. The serialized parameters of all writes count against `DatabaseConfig::max_transaction_bytes` (default `MAX_CRDT_TRANSACTION_BYTES`); the write that would cross it fails with `TransactionTooLarge` before it runs.
+
+`db.read(|connection| { ... })` runs a closure with `PRAGMA query_only` set, so a read path cannot write around the transformer.
+
 ## rusqlite version contract
 
-`db.with_connection(|connection| { ... })` is exposed behind the `raw-connection` feature (default off). When enabled, all consumers of `haex-crdt` in one dependency tree must resolve to the same `rusqlite` version this crate pins; otherwise `Connection`'s `ToSql`/`FromSql` types belong to different crate instances and cannot be passed through the callback. See plan §6.
+`write` and `read` take and hand out `rusqlite` types (`ToSql`, `Row`, `Connection`), and `db.with_connection(|connection| { ... })` is exposed behind the `raw-connection` feature (default off). All consumers of `haex-crdt` in one dependency tree must resolve to the same `rusqlite` version this crate pins; otherwise `Connection`'s `ToSql`/`FromSql` types belong to different crate instances and cannot be passed through the callback. See plan §6.
 
 ## Usage scope
 
