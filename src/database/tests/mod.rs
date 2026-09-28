@@ -6,6 +6,8 @@
 //! - [`install_crdt`] — `install_crdt` semantics: empty, backfill, sig
 //!   binding, reinstall refuse/allow, unsafe identifier
 //! - [`delegates`] — method delegates (apply/scan/cleanup)
+//! - [`write`] — `write` / `read`: one HLC per transaction, rollback, size
+//!   limit, BLOB parameters, read-only guard
 //!
 //! Tests use a temp-file SQLCipher DB rather than `:memory:` —
 //! `Database::open` insists on WAL journaling which `:memory:` cannot provide.
@@ -25,6 +27,7 @@ use crate::signature::{AuthorId, NoopSignatureProvider, SignatureProvider};
 mod delegates;
 mod install_crdt;
 mod open;
+mod write;
 
 pub(super) fn source(entries: &[(&str, &str)]) -> Arc<StaticMigrationSource> {
     let mut m = BTreeMap::new();
@@ -53,6 +56,7 @@ impl Fixture {
             signature_provider: Arc::new(NoopSignatureProvider),
             migration_source,
             trigger_version: DEFAULT_TRIGGER_VERSION,
+            max_transaction_bytes: crate::MAX_CRDT_TRANSACTION_BYTES,
         };
         Fixture {
             _tmp: tmp,

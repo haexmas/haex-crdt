@@ -44,9 +44,12 @@
 
 pub mod config;
 mod install;
+mod write;
 
 pub use config::{DatabaseConfig, InstallCrdtOptions, SqlCipherKey, DEFAULT_TRIGGER_VERSION};
+pub use write::{CrdtTransaction, ReadOnlyConnection};
 
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
@@ -82,6 +85,7 @@ struct DatabaseInner {
     #[allow(dead_code)] // kept for future re-check / diagnostics
     migration_source: Arc<dyn MigrationSource>,
     device_uuid: Uuid,
+    max_transaction_bytes: usize,
     /// Advisory file lock guarding the DB from cross-process concurrent
     /// mounts. Held for the lifetime of every clone of this `Database`;
     /// dropping the last clone releases the OS-level lock via `Drop`.
@@ -151,6 +155,7 @@ impl Database {
                 signature_provider: config.signature_provider,
                 migration_source: config.migration_source,
                 device_uuid,
+                max_transaction_bytes: config.max_transaction_bytes,
                 lock,
             }),
         })
@@ -279,7 +284,13 @@ impl Database {
             .map_err(|_| DatabaseError::MutexPoisoned {
                 reason: "Database connection mutex poisoned".to_string(),
             })?;
-        f(&mut guard)
+        match catch_unwind(AssertUnwindSafe(|| f(&mut guard))) {
+            Ok(result) => result,
+            Err(payload) => {
+                drop(guard);
+                resume_unwind(payload);
+            }
+        }
     }
 }
 

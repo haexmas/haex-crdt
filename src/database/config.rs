@@ -93,6 +93,11 @@ pub struct DatabaseConfig {
     /// `ensure_triggers_initialized`. Defaults to
     /// [`DEFAULT_TRIGGER_VERSION`].
     pub trigger_version: i32,
+    /// Upper bound for the serialized parameters of all writes in one
+    /// [`super::Database::write`] transaction. Large payloads belong in file
+    /// storage, not in CRDT columns. Defaults to
+    /// [`crate::MAX_CRDT_TRANSACTION_BYTES`].
+    pub max_transaction_bytes: usize,
 }
 
 /// Options controlling [`super::Database::install_crdt`]. Defaults to a fresh
@@ -127,6 +132,7 @@ mod tests {
             signature_provider: Arc::new(NoopSignatureProvider),
             migration_source: Arc::new(StaticMigrationSource(BTreeMap::new())),
             trigger_version: DEFAULT_TRIGGER_VERSION,
+            max_transaction_bytes: crate::MAX_CRDT_TRANSACTION_BYTES,
         }
     }
 
