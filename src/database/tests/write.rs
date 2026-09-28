@@ -235,7 +235,7 @@ fn read_refuses_writes_and_leaves_the_connection_writable_afterwards() {
     let (_fx, db) = open();
     let attempt = db.read(|conn| {
         Ok(conn
-            .execute("INSERT INTO items (id) VALUES ('sneaky')", [])
+            .query_row("INSERT INTO items (id) VALUES ('sneaky')", [], |_| Ok(()))
             .map_err(DatabaseError::from)?)
     });
     assert!(attempt.is_err());
@@ -243,6 +243,46 @@ fn read_refuses_writes_and_leaves_the_connection_writable_afterwards() {
 
     db.write(|tx| {
         tx.execute("INSERT INTO items (id) VALUES ('ok')", params![])?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(count(&db, "items"), 1);
+}
+
+#[test]
+fn read_cannot_disable_the_write_guard() {
+    let (_fx, db) = open();
+    let attempt = db.read(|conn| {
+        conn.query_row("PRAGMA query_only = OFF", [], |_| Ok(()))
+            .map_err(DatabaseError::from)?;
+        Ok(conn
+            .query_row("INSERT INTO items (id) VALUES ('sneaky')", [], |_| Ok(()))
+            .map_err(DatabaseError::from)?)
+    });
+
+    assert!(attempt.is_err());
+    assert_eq!(count(&db, "items"), 0);
+}
+
+#[test]
+fn callback_panics_do_not_poison_the_connection() {
+    let (_fx, db) = open();
+    let write_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _: crate::Result<()> = db.write(|tx| {
+            tx.execute("INSERT INTO items (id) VALUES ('rolled_back')", &[])?;
+            panic!("simulated write callback panic");
+        });
+    }));
+    assert!(write_panic.is_err());
+
+    let read_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _: crate::Result<()> = db.read(|_| panic!("simulated read callback panic"));
+    }));
+    assert!(read_panic.is_err());
+
+    assert_eq!(count(&db, "items"), 0);
+    db.write(|tx| {
+        tx.execute("INSERT INTO items (id) VALUES ('usable')", &[])?;
         Ok(())
     })
     .unwrap();

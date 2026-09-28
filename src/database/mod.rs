@@ -47,8 +47,9 @@ mod install;
 mod write;
 
 pub use config::{DatabaseConfig, InstallCrdtOptions, SqlCipherKey, DEFAULT_TRIGGER_VERSION};
-pub use write::CrdtTransaction;
+pub use write::{CrdtTransaction, ReadOnlyConnection};
 
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
@@ -283,7 +284,13 @@ impl Database {
             .map_err(|_| DatabaseError::MutexPoisoned {
                 reason: "Database connection mutex poisoned".to_string(),
             })?;
-        f(&mut guard)
+        match catch_unwind(AssertUnwindSafe(|| f(&mut guard))) {
+            Ok(result) => result,
+            Err(payload) => {
+                drop(guard);
+                resume_unwind(payload);
+            }
+        }
     }
 }
 

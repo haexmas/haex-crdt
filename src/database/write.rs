@@ -7,13 +7,17 @@
 //! Tables ending in `_no_sync` pass through the transformer untouched, so the
 //! same call writes synced and device-local tables.
 //!
-//! [`Database::read`] runs a closure on the connection with
-//! `PRAGMA query_only` set, so a read path cannot write around the
+//! [`Database::read`] runs a closure on a restricted query view while
+//! `PRAGMA query_only` and a SQLite authorizer prevent writes around the
 //! transformer.
 
+use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use rusqlite::types::{ToSqlOutput, ValueRef};
-use rusqlite::{Connection, OptionalExtension, Row, ToSql, Transaction, TransactionBehavior};
+use rusqlite::{
+    Connection, OptionalExtension, Params, Row, ToSql, Transaction, TransactionBehavior,
+};
 use sqlparser::ast::Statement;
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 
 use super::Database;
 use crate::crdt::hlc::HlcService;
@@ -33,6 +37,37 @@ pub struct CrdtTransaction<'a> {
     hlc: &'a HlcService,
     written_bytes: usize,
     max_bytes: usize,
+}
+
+/// Read-only view of the database connection passed to [`Database::read`].
+///
+/// The view exposes query operations only. The underlying connection also has
+/// a SQLite authorizer installed while the callback runs, so SQL that attempts
+/// to write, change pragmas, or alter transaction state is rejected.
+pub struct ReadOnlyConnection<'c> {
+    conn: &'c Connection,
+}
+
+impl ReadOnlyConnection<'_> {
+    /// Runs a query expected to return one row.
+    pub fn query_row<T, P, F>(&self, sql: &str, params: P, f: F) -> rusqlite::Result<T>
+    where
+        P: Params,
+        F: FnOnce(&Row<'_>) -> rusqlite::Result<T>,
+    {
+        self.conn.query_row(sql, params, f)
+    }
+
+    /// Runs a query and maps every returned row.
+    pub fn query_map<T, P, F>(&self, sql: &str, params: P, f: F) -> rusqlite::Result<Vec<T>>
+    where
+        P: Params,
+        F: FnMut(&Row<'_>) -> rusqlite::Result<T>,
+    {
+        let mut statement = self.conn.prepare(sql)?;
+        let rows = statement.query_map(params, f)?.collect();
+        rows
+    }
 }
 
 impl CrdtTransaction<'_> {
@@ -131,12 +166,27 @@ impl Database {
         })
     }
 
-    /// Runs `f` on the connection with `PRAGMA query_only` set, so any write
-    /// inside `f` fails instead of bypassing the CRDT transformer.
-    pub fn read<R>(&self, f: impl FnOnce(&Connection) -> Result<R>) -> Result<R> {
+    /// Runs `f` on a read-only view of the connection. SQL writes, PRAGMA
+    /// changes, and transaction control inside `f` are rejected.
+    pub fn read<R>(&self, f: impl FnOnce(&ReadOnlyConnection<'_>) -> Result<R>) -> Result<R> {
         self.with_locked_conn(|conn| {
             let guard = QueryOnly::enable(conn)?;
-            f(guard.0)
+            let result = {
+                let read_only = match ReadOnlyConnection::enable(conn) {
+                    Ok(read_only) => read_only,
+                    Err(error) => {
+                        drop(guard);
+                        return Err(error);
+                    }
+                };
+                catch_unwind(AssertUnwindSafe(|| f(&read_only)))
+            };
+            let _ = conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+            drop(guard);
+            match result {
+                Ok(result) => result,
+                Err(payload) => resume_unwind(payload),
+            }
         })
     }
 
@@ -157,6 +207,20 @@ impl<'c> QueryOnly<'c> {
         conn.pragma_update(None, "query_only", true)
             .map_err(DatabaseError::from)?;
         Ok(QueryOnly(conn))
+    }
+}
+
+impl<'c> ReadOnlyConnection<'c> {
+    fn enable(conn: &'c Connection) -> Result<Self> {
+        conn.authorizer(Some(|context: AuthContext<'_>| match context.action {
+            AuthAction::Read { .. }
+            | AuthAction::Select
+            | AuthAction::Function { .. }
+            | AuthAction::Recursive => Authorization::Allow,
+            _ => Authorization::Deny,
+        }))
+        .map_err(DatabaseError::from)?;
+        Ok(ReadOnlyConnection { conn })
     }
 }
 
