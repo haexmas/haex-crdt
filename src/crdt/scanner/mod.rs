@@ -43,13 +43,13 @@ use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
 
 /// The serve-side per-page byte budget for a paginated pull. Sized equal to
-/// [`MAX_CRDT_TRANSACTION_BYTES`], the cap `execute_with_crdt` rejects one
-/// write's serialized parameters against, so a page is dimensioned for a
-/// transaction at that cap.
+/// [`MAX_CRDT_TRANSACTION_BYTES`], the default cap `Database::write` checks a
+/// transaction's serialized parameters against, so a page is dimensioned for
+/// a transaction at that cap.
 ///
 /// It is not a guarantee that any group fits, in three ways: a group of
 /// change records re-serializes more than the write's parameters did; the
-/// cap is enforced on the `execute_with_crdt` path only, so transactions
+/// cap is enforced on the `Database::write` path only, so transactions
 /// arriving through `apply_remote_changes` or a raw-connection write using
 /// the `current_hlc()` UDF are never size-checked at all; and for a
 /// consumer's own [`Paginable`] type the crate has never seen the
@@ -360,7 +360,7 @@ pub fn scan_table_for_local_changes(
 /// it even for [`ColumnChange`]: that cap counts one write's serialized
 /// parameters while each change record re-serializes its table name, PK
 /// JSON, column name, HLC, device id and sig, and it is checked on the
-/// `execute_with_crdt` path only — a transaction applied by
+/// `Database::write` path only — a transaction applied by
 /// `apply_remote_changes` or written straight through a raw connection
 /// never passes it. For a consumer's own [`Paginable`] type, whose
 /// `Serialize` impl the crate has never seen, there is nothing to relate a

@@ -117,7 +117,7 @@ impl CrdtTransaction<'_> {
     /// charges its parameters against the size limit and stamps the HLC.
     /// Returns the SQL to run.
     fn prepare(&mut self, sql: &str, params: &[&dyn ToSql]) -> Result<String> {
-        let (mut statement, _touched) = parse_crdt_write(sql)?;
+        let mut statement = parse_crdt_write(sql)?;
         if matches!(statement, Statement::Query(_)) {
             return Ok(sql.to_string());
         }
@@ -130,10 +130,8 @@ impl CrdtTransaction<'_> {
     /// saturating arithmetic. Returns an error if conversion fails or the
     /// updated count exceeds the limit; bytes already charged remain counted.
     fn charge(&mut self, params: &[&dyn ToSql]) -> Result<()> {
-        for param in params {
-            let bytes = param_bytes(*param).map_err(DatabaseError::from)?;
-            self.written_bytes = self.written_bytes.saturating_add(bytes);
-        }
+        let bytes = serialized_parameter_bytes(params).map_err(DatabaseError::from)?;
+        self.written_bytes = self.written_bytes.saturating_add(bytes);
         if self.written_bytes > self.max_bytes {
             return Err(DatabaseError::TransactionTooLarge {
                 bytes: self.written_bytes,
@@ -244,9 +242,19 @@ fn execution_error(sql: &str, source: rusqlite::Error) -> DatabaseError {
     }
 }
 
-/// Size of one parameter as SQLite stores it. Output that cannot be measured
-/// counts as over any limit, the same fail-closed stance as
-/// [`crate::db::core::execute::write_payload_too_large`].
+/// The canonical byte accounting for [`crate::DatabaseConfig::max_transaction_bytes`]:
+/// the sum of the stored sizes of all bind parameters — text and BLOB length,
+/// 8 bytes for an integer or real, 0 for NULL. SQL text, column names and HLC
+/// metadata do not count. A consumer that applies a transaction group from
+/// elsewhere measures it with the same function, so local writes and
+/// received groups are checked against the same size. Output that cannot be
+/// measured counts as over any limit.
+pub fn serialized_parameter_bytes(params: &[&dyn ToSql]) -> rusqlite::Result<usize> {
+    params.iter().try_fold(0usize, |total, param| {
+        Ok(total.saturating_add(param_bytes(*param)?))
+    })
+}
+
 fn param_bytes(param: &dyn ToSql) -> rusqlite::Result<usize> {
     Ok(match param.to_sql()? {
         ToSqlOutput::Borrowed(value) => value_bytes(value),

@@ -5,10 +5,11 @@ use rusqlite::params;
 
 use super::super::*;
 use super::{source, Fixture};
-use crate::crdt::columns::HLC_TIMESTAMP_COLUMN;
+use crate::crdt::columns::{COLUMN_HLCS_COLUMN, HLC_TIMESTAMP_COLUMN};
 use crate::crdt::scanner::ScanFilters;
 use crate::db::error::DatabaseError;
 use crate::error::Error;
+use crate::table_names::TABLE_CRDT_DIRTY_TABLES;
 
 const ITEMS: &str = "CREATE TABLE items (id TEXT PRIMARY KEY NOT NULL, body TEXT, data BLOB);";
 const CACHE: &str = "CREATE TABLE cache_no_sync (id TEXT PRIMARY KEY NOT NULL, body TEXT);";
@@ -339,4 +340,88 @@ fn a_consumer_error_from_the_closure_can_be_downcast() {
         }
         other => panic!("expected Error::Consumer, got {other:?}"),
     }
+}
+
+#[test]
+fn a_write_marks_the_table_dirty_and_records_column_hlcs() {
+    let (_fx, db) = open();
+    db.write(|tx| {
+        tx.execute("INSERT INTO items (id, body) VALUES ('i1', 'a')", params![])?;
+        Ok(())
+    })
+    .unwrap();
+
+    let (dirty, hlcs): (i64, String) = db
+        .read(|conn| {
+            let dirty = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM {TABLE_CRDT_DIRTY_TABLES} WHERE table_name = 'items'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(DatabaseError::from)?;
+            let hlcs = conn
+                .query_row(
+                    &format!("SELECT {COLUMN_HLCS_COLUMN} FROM items WHERE id = 'i1'"),
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(DatabaseError::from)?;
+            Ok((dirty, hlcs))
+        })
+        .unwrap();
+    assert_eq!(dirty, 1, "items must be marked dirty");
+    let hlcs: serde_json::Value = serde_json::from_str(&hlcs).unwrap();
+    assert!(
+        hlcs["body"].is_string(),
+        "body HLC must be recorded: {hlcs}"
+    );
+}
+
+#[test]
+fn an_update_advances_only_the_hlc_of_the_named_column() {
+    let (_fx, db) = open();
+    let column_hlcs = |db: &Database| -> serde_json::Value {
+        let raw: String = db
+            .read(|conn| {
+                Ok(conn
+                    .query_row(
+                        &format!("SELECT {COLUMN_HLCS_COLUMN} FROM items WHERE id = 'i1'"),
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(DatabaseError::from)?)
+            })
+            .unwrap();
+        serde_json::from_str(&raw).unwrap()
+    };
+    db.write(|tx| {
+        tx.execute(
+            "INSERT INTO items (id, body, data) VALUES ('i1', 'a', x'00')",
+            params![],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let before = column_hlcs(&db);
+
+    db.write(|tx| {
+        tx.execute("UPDATE items SET body = 'b' WHERE id = 'i1'", params![])?;
+        Ok(())
+    })
+    .unwrap();
+    let after = column_hlcs(&db);
+
+    assert_eq!(after["data"], before["data"], "data HLC must not change");
+    assert_ne!(after["body"], before["body"], "body HLC must advance");
+}
+
+#[test]
+fn serialized_parameter_bytes_counts_stored_sizes() {
+    let blob: Vec<u8> = vec![1, 2, 3];
+    let null: Option<i64> = None;
+    let bytes = serialized_parameter_bytes(params!["abcd", 42_i64, 1.5_f64, blob, null]).unwrap();
+    assert_eq!(bytes, 4 + 8 + 8 + 3);
 }

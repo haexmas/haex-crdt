@@ -153,27 +153,6 @@ impl HlcService {
         }
     }
 
-    /// Deprecated compatibility shim used by pre-extraction test code that
-    /// created HLC services with an arbitrary device-id *string* rather than
-    /// a UUID. Hashes the input with a stable derivation (BLAKE3 truncated
-    /// to 16 bytes) and delegates to [`Self::new_with_uuid`].
-    ///
-    /// Do NOT use in new code — take a `Uuid` and call `new_with_uuid`
-    /// directly. Wire-visible behavior is undefined if two call sites hash
-    /// different inputs to the same UUID (BLAKE3 collision resistance makes
-    /// this vanishingly unlikely, but it is nonetheless not a contract).
-    #[cfg(feature = "test-shims")]
-    #[deprecated(
-        note = "Take a Uuid and call new_with_uuid; this shim exists only to bridge haex-vault test fixtures."
-    )]
-    pub fn new_for_testing(device_id_str: &str) -> Self {
-        let hash = blake3::hash(device_id_str.as_bytes());
-        let bytes = hash.as_bytes();
-        let mut uuid_bytes = [0u8; 16];
-        uuid_bytes.copy_from_slice(&bytes[..16]);
-        Self::new_with_uuid(Uuid::from_bytes(uuid_bytes))
-    }
-
     /// Create an HLC service with a fixed device UUID. Useful for tests
     /// and for consumers that already hold a persisted UUID and want to
     /// skip the provider indirection at construction time.

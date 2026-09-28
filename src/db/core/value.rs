@@ -1,8 +1,8 @@
-//! Bidirectional conversion between `serde_json::Value` (the crate's public
-//! row / param format) and `rusqlite`'s `SqlValue` / `ValueRef`.
+//! Bidirectional conversion between `serde_json::Value` (the value format of
+//! [`crate::ColumnChange`]) and `rusqlite`'s `SqlValue` / `ValueRef`.
 //!
 //! - SQLite has no boolean type; JSON booleans map to `INTEGER 0/1` and back
-//!   to numbers on read (callers use `db::row::get_bool` to decode).
+//!   to numbers on read.
 //! - JSON arrays and objects are stored as JSON-encoded text.
 //! - BLOBs come back as base64-encoded strings (JSON has no binary type).
 

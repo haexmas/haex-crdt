@@ -47,7 +47,7 @@ mod install;
 mod write;
 
 pub use config::{DatabaseConfig, InstallCrdtOptions, SqlCipherKey, DEFAULT_TRIGGER_VERSION};
-pub use write::{CrdtTransaction, ReadOnlyConnection};
+pub use write::{serialized_parameter_bytes, CrdtTransaction, ReadOnlyConnection};
 
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
