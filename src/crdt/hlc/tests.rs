@@ -211,37 +211,6 @@ fn advance_past_remote_ok_on_empty_string() {
     assert!(result.is_ok(), "Expected Ok(()), got: {:?}", result);
 }
 
-/// The `new_for_testing` shim must derive its UUID deterministically
-/// from the input string: two constructions from the same string must
-/// yield HLC services with the same node id.
-#[cfg(feature = "test-shims")]
-#[allow(deprecated)]
-#[test]
-fn new_for_testing_is_deterministic() {
-    let svc_a = HlcService::new_for_testing("test-device-a");
-    let svc_b = HlcService::new_for_testing("test-device-a");
-    let ts_a = svc_a.new_timestamp().expect("timestamp a").to_string();
-    let ts_b = svc_b.new_timestamp().expect("timestamp b").to_string();
-    let node_a = hlc_node_id_suffix(&ts_a).expect("node id a");
-    let node_b = hlc_node_id_suffix(&ts_b).expect("node id b");
-    assert_eq!(
-        node_a, node_b,
-        "the shim must hash equal inputs to equal UUIDs"
-    );
-    // uhlc strips leading zeros; a 16-byte UUID hex is 1..=32 chars.
-    assert!(!node_a.is_empty(), "node id must be non-empty");
-    assert!(node_a.len() <= 32, "node id must be at most 16 bytes hex");
-    // Sanity check that we are not accidentally returning a constant:
-    // a different input must hash to a *different* node id.
-    let svc_c = HlcService::new_for_testing("test-device-b");
-    let ts_c = svc_c.new_timestamp().expect("timestamp c").to_string();
-    let node_c = hlc_node_id_suffix(&ts_c).expect("node id c");
-    assert_ne!(
-        node_a, node_c,
-        "different inputs must hash to different UUIDs"
-    );
-}
-
 /// Locks the `HlcError::DeviceStore` variant name at the type level.
 ///
 /// haex-vault (and other pre-extraction consumers) pattern-match on this

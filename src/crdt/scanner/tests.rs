@@ -406,7 +406,7 @@ fn sig_passes_through_as_raw_json_when_present() {
         &hlc,
         "INSERT INTO items (id, name) VALUES ('i1', 'a')",
     );
-    // A downstream PostWriteHook would normally write here. Simulate by
+    // A consumer's signing layer would normally write here. Simulate by
     // directly setting a mixed shape: a plain sig for `name`, an
     // arbitrary nested shape for a phantom column to prove the crate
     // does not enforce a schema.

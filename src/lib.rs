@@ -11,10 +11,9 @@
 //!
 //! # Public dependency version contract
 //!
-//! The post-write hook API exposes types from `rusqlite`, `sqlparser`, and
-//! `uhlc`. These crates are re-exported below so consumers can use the exact
-//! versions resolved by `haex-crdt`. Changing those versions may require
-//! downstream consumers to migrate their hook implementations.
+//! [`Database::write`], [`Database::read`] and the trait seams expose types
+//! from `rusqlite`, `sqlparser` and `uhlc`. These crates are re-exported below so
+//! consumers can use the exact versions resolved by `haex-crdt`.
 
 pub mod crdt;
 pub mod database;
@@ -25,11 +24,11 @@ pub mod migration;
 pub mod signature;
 pub mod table_names;
 
-/// Re-export used by [`PostWriteHook`] implementations to name transactions.
+/// Re-export for the `rusqlite` types in [`Database::write`] / [`Database::read`].
 pub use rusqlite;
-/// Re-export used by [`WriteContext`] consumers to inspect transformed SQL.
+/// Re-export for the statements the SQL parsing helpers return.
 pub use sqlparser;
-/// Re-export used by [`WriteContext`] consumers to inspect transaction HLCs.
+/// Re-export for the HLC timestamps in the public API.
 pub use uhlc;
 
 pub use device_id::{DatabaseBootstrap, StaticDeviceId};
@@ -64,15 +63,11 @@ pub use crdt::trigger::{
 
 pub use db::connection_context::ConnectionContext;
 pub use db::core::{
-    convert_value_ref_to_json, execute, execute_with_crdt, extract_primary_table_name_from_sql,
-    extract_table_names_from_sql, extract_table_names_from_statement, install_tx_hlc_hooks,
-    open_and_init_db, parse_single_statement, parse_sql_statements, register_current_hlc_udf,
-    select, select_with_crdt, statement_has_returning, strip_main_schema_prefix, with_connection,
-    write_payload_too_large, ValueConverter, DRIZZLE_STATEMENT_BREAKPOINT,
-    MAX_CRDT_TRANSACTION_BYTES,
-};
-pub use db::execute_hook::{
-    NoopPostWriteHook, PostWriteHook, TouchedColumns, TouchedTable, WriteContext,
+    convert_value_ref_to_json, extract_primary_table_name_from_sql, extract_table_names_from_sql,
+    extract_table_names_from_statement, install_tx_hlc_hooks, open_and_init_db,
+    parse_single_statement, parse_sql_statements, register_current_hlc_udf,
+    statement_has_returning, strip_main_schema_prefix, ValueConverter,
+    DRIZZLE_STATEMENT_BREAKPOINT, MAX_CRDT_TRANSACTION_BYTES,
 };
 pub use db::init::{
     discover_crdt_tables, ensure_triggers_for_all_tables, ensure_triggers_initialized,
@@ -80,13 +75,11 @@ pub use db::init::{
 };
 pub use db::lock::{DatabaseLock, DatabaseLockError};
 pub use db::migrations::{run_migrations, MigrationReport, CRATE_MIGRATIONS};
-pub use db::row::{get_bool, get_string};
-pub use db::DbConnection;
 pub use table_names::{
     TABLE_APP_MIGRATIONS, TABLE_CRDT_CONFIGS, TABLE_CRDT_DIRTY_TABLES, TABLE_CRDT_MIGRATIONS,
 };
 
 pub use database::{
-    CrdtTransaction, Database, DatabaseConfig, InstallCrdtOptions, SqlCipherKey,
-    DEFAULT_TRIGGER_VERSION,
+    serialized_parameter_bytes, CrdtTransaction, Database, DatabaseConfig, InstallCrdtOptions,
+    ReadOnlyConnection, SqlCipherKey, DEFAULT_TRIGGER_VERSION,
 };
