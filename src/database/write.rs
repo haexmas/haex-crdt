@@ -91,6 +91,9 @@ impl CrdtTransaction<'_> {
         Ok(sql)
     }
 
+    /// Adds parameter sizes to the transaction's cumulative byte count using
+    /// saturating arithmetic. Returns an error if conversion fails or the
+    /// updated count exceeds the limit; bytes already charged remain counted.
     fn charge(&mut self, params: &[&dyn ToSql]) -> Result<()> {
         for param in params {
             let bytes = param_bytes(*param).map_err(DatabaseError::from)?;
@@ -148,6 +151,8 @@ impl Database {
 struct QueryOnly<'c>(&'c Connection);
 
 impl<'c> QueryOnly<'c> {
+    /// Enables `PRAGMA query_only` and returns a guard that disables it on drop.
+    /// Returns an error if SQLite cannot enable the pragma.
     fn enable(conn: &'c Connection) -> Result<Self> {
         conn.pragma_update(None, "query_only", true)
             .map_err(DatabaseError::from)?;
@@ -156,6 +161,8 @@ impl<'c> QueryOnly<'c> {
 }
 
 impl Drop for QueryOnly<'_> {
+    /// Attempts to disable `PRAGMA query_only`, ignoring reset errors because
+    /// `Drop` cannot return them. A failed reset leaves the connection read-only.
     fn drop(&mut self) {
         // Drop cannot report the error. If resetting fails the connection
         // stays read-only, so later writes fail loudly rather than silently.
@@ -163,6 +170,8 @@ impl Drop for QueryOnly<'_> {
     }
 }
 
+/// Wraps a SQLite failure with the executed SQL and error text, leaving the
+/// table unspecified.
 fn execution_error(sql: &str, source: rusqlite::Error) -> DatabaseError {
     DatabaseError::ExecutionError {
         sql: sql.to_string(),
@@ -182,6 +191,8 @@ fn param_bytes(param: &dyn ToSql) -> rusqlite::Result<usize> {
     })
 }
 
+/// Returns the payload size used for transaction accounting: zero for NULL,
+/// eight bytes for numbers, and the byte length for text and BLOB values.
 fn value_bytes(value: ValueRef<'_>) -> usize {
     match value {
         ValueRef::Null => 0,
