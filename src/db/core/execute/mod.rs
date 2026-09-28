@@ -176,8 +176,8 @@ pub fn execute(
                 let table_name = extract_primary_table_name_from_sql(&sql).unwrap_or(None);
                 DatabaseError::ExecutionError {
                     sql: sql.clone(),
-                    reason: e.to_string(),
                     table: table_name,
+                    source: e,
                 }
             })?;
             vec![]
@@ -255,23 +255,20 @@ fn tx_scoped_hlc(tx: &Transaction, hlc_service: &HlcService) -> Result<Timestamp
         .query_row(&format!("SELECT {HLC_FUNCTION_NAME}()"), [], |row| {
             row.get(0)
         })
-        .map_err(|e| DatabaseError::HlcError {
-            reason: format!("Failed to read {HLC_FUNCTION_NAME}(): {e}"),
+        .map_err(|source| DatabaseError::SqliteStep {
+            step: format!("read {HLC_FUNCTION_NAME}()"),
+            source,
         })?;
 
-    let timestamp = Timestamp::from_str(&hlc_str).map_err(|e| DatabaseError::HlcError {
-        reason: format!("Invalid HLC from UDF: {e:?}"),
+    let timestamp = Timestamp::from_str(&hlc_str).map_err(|e| DatabaseError::InvalidHlc {
+        reason: format!("from {HLC_FUNCTION_NAME}(): {e:?}"),
     })?;
 
     hlc_service
         .update_with_timestamp(&timestamp)
-        .map_err(|e| DatabaseError::HlcError {
-            reason: e.to_string(),
-        })?;
+        .map_err(DatabaseError::from)?;
 
-    HlcService::persist_timestamp(tx, &timestamp).map_err(|e| DatabaseError::HlcError {
-        reason: e.to_string(),
-    })?;
+    HlcService::persist_timestamp(tx, &timestamp).map_err(DatabaseError::from)?;
 
     Ok(timestamp)
 }
@@ -294,7 +291,7 @@ fn execute_internal(
         .map_err(|e| DatabaseError::ExecutionError {
             sql: sql_str.clone(),
             table: None,
-            reason: format!("Execute failed: {e}"),
+            source: e,
         })?;
 
     Ok((hlc_timestamp, statement))
@@ -318,7 +315,7 @@ fn query_internal(
         .map_err(|e| DatabaseError::ExecutionError {
             sql: sql_str.clone(),
             table: None,
-            reason: e.to_string(),
+            source: e,
         })?;
     let num_columns = stmt.column_names().len();
 
@@ -327,21 +324,21 @@ fn query_internal(
         .map_err(|e| DatabaseError::ExecutionError {
             sql: sql_str.clone(),
             table: None,
-            reason: e.to_string(),
+            source: e,
         })?;
 
     let mut result_vec: Vec<Vec<JsonValue>> = Vec::new();
     while let Some(row) = rows.next().map_err(|e| DatabaseError::ExecutionError {
         sql: sql_str.clone(),
         table: None,
-        reason: e.to_string(),
+        source: e,
     })? {
         let mut row_values: Vec<JsonValue> = Vec::with_capacity(num_columns);
         for i in 0..num_columns {
             let value_ref = row.get_ref(i).map_err(|e| DatabaseError::ExecutionError {
                 sql: sql_str.clone(),
                 table: None,
-                reason: e.to_string(),
+                source: e,
             })?;
             row_values.push(convert_value_ref_to_json(value_ref)?);
         }

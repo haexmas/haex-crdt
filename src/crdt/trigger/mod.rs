@@ -20,7 +20,6 @@ use crate::crdt::columns::{
     COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN, DELETED_ROWS_TABLE, HLC_FUNCTION_NAME,
     HLC_TIMESTAMP_COLUMN, UUID_FUNCTION_NAME,
 };
-use crate::db::error::DatabaseError;
 use crate::table_names::{TABLE_CRDT_CONFIGS, TABLE_CRDT_DIRTY_TABLES};
 use rusqlite::{Connection, Result as RusqliteResult, Row, Transaction};
 use serde::Serialize;
@@ -48,12 +47,6 @@ pub enum CrdtSetupError {
     /// A table column name would be unsafe to interpolate into trigger SQL.
     #[error("column '{name}' is not a safe SQL identifier")]
     UnsafeIdentifier { name: String },
-}
-
-impl From<CrdtSetupError> for DatabaseError {
-    fn from(err: CrdtSetupError) -> Self {
-        DatabaseError::CrdtSetup(err.to_string())
-    }
 }
 
 #[derive(Debug, Serialize)]

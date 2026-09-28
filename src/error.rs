@@ -118,15 +118,34 @@ pub enum Error {
         source: crate::crdt::hlc::HlcError,
     },
 
-    // ---- catch-all -----------------------------------------------------------
-    #[error("{0}")]
-    Message(String),
+    // ---- database layer --------------------------------------------------------
+    /// A failure of the database layer, kept as its typed variant so callers
+    /// can match it (for example `VaultAlreadyOpenElsewhere` or
+    /// `TransactionTooLarge`) instead of parsing a message.
+    #[error(transparent)]
+    Database(#[from] crate::db::error::DatabaseError),
+
+    /// An error the consumer returned from one of its hooks or closures
+    /// (`DatabaseBootstrap`, `ApplyPolicy`, `SignatureProvider`,
+    /// `Database::write` / `Database::read`). Kept boxed so the consumer can
+    /// downcast it back to its own type.
+    #[error(transparent)]
+    Consumer(Box<dyn std::error::Error + Send + Sync>),
 }
 
-impl From<crate::db::error::DatabaseError> for Error {
-    fn from(err: crate::db::error::DatabaseError) -> Self {
-        // The db layer already renders a rich Display; keep the string here
-        // so callers see the same message the db layer would surface.
-        Error::Message(err.to_string())
+impl Error {
+    /// Wraps a consumer error, see [`Error::Consumer`].
+    pub fn consumer(err: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
+        Error::Consumer(err.into())
+    }
+
+    /// The SQLite error behind this error, if there is one, so a caller can
+    /// read its code (`rusqlite::Error::sqlite_error_code`).
+    pub fn sqlite_error(&self) -> Option<&rusqlite::Error> {
+        match self {
+            Error::Sqlite(source) => Some(source),
+            Error::Database(err) => err.sqlite_error(),
+            _ => None,
+        }
     }
 }

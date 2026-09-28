@@ -35,8 +35,9 @@ impl ValueConverter {
             JsonValue::String(s) => Ok(SqlValue::Text(s.clone())),
             JsonValue::Array(_) | JsonValue::Object(_) => serde_json::to_string(json_val)
                 .map(SqlValue::Text)
-                .map_err(|e| DatabaseError::SerializationError {
-                    reason: format!("Failed to serialize JSON param: {e}"),
+                .map_err(|source| DatabaseError::SerializationError {
+                    context: "JSON param".to_string(),
+                    source,
                 }),
         }
     }

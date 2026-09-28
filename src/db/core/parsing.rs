@@ -12,16 +12,16 @@ use sqlparser::parser::Parser;
 /// warning (mirrors haex-vault behavior; callers pass single statements).
 pub fn parse_single_statement(sql: &str) -> Result<Statement, DatabaseError> {
     let dialect = SQLiteDialect {};
-    let statements = Parser::parse_sql(&dialect, sql).map_err(|e| DatabaseError::ParseError {
-        reason: e.to_string(),
-        sql: sql.to_string(),
-    })?;
+    let statements =
+        Parser::parse_sql(&dialect, sql).map_err(|source| DatabaseError::ParseError {
+            sql: sql.to_string(),
+            source,
+        })?;
 
     statements
         .into_iter()
         .next()
-        .ok_or(DatabaseError::ParseError {
-            reason: "No SQL statement found".to_string(),
+        .ok_or_else(|| DatabaseError::EmptyStatement {
             sql: sql.to_string(),
         })
 }
@@ -31,9 +31,9 @@ pub fn parse_single_statement(sql: &str) -> Result<Statement, DatabaseError> {
 pub fn parse_sql_statements(sql: &str) -> Result<Vec<Statement>, DatabaseError> {
     let dialect = SQLiteDialect {};
 
-    Parser::parse_sql(&dialect, sql).map_err(|e| DatabaseError::ParseError {
-        reason: format!("Failed to parse SQL: {e}"),
+    Parser::parse_sql(&dialect, sql).map_err(|source| DatabaseError::ParseError {
         sql: sql.to_string(),
+        source,
     })
 }
 
@@ -69,9 +69,9 @@ mod tests {
     #[test]
     fn errors_on_empty_input() {
         // sqlparser returns an empty statement list for whitespace-only input;
-        // the wrapper must surface this as a ParseError, not silently succeed.
+        // the wrapper must surface this as an error, not silently succeed.
         let err = parse_single_statement("   ").unwrap_err();
-        assert!(matches!(err, DatabaseError::ParseError { .. }));
+        assert!(matches!(err, DatabaseError::EmptyStatement { .. }));
     }
 
     #[test]

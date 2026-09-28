@@ -55,12 +55,17 @@ pub(super) fn emit_row_changes(
             pk_json.push(',');
         }
         first = false;
-        let key_json = serde_json::to_string(&pk.name).map_err(|e| DatabaseError::QueryError {
-            reason: format!("serialize pk column name '{}': {e}", pk.name),
+        let key_json = serde_json::to_string(&pk.name).map_err(|source| {
+            DatabaseError::SerializationError {
+                context: format!("pk column name '{}'", pk.name),
+                source,
+            }
         })?;
-        let val_json = serde_json::to_string(&val).map_err(|e| DatabaseError::QueryError {
-            reason: format!("serialize pk column value for '{}': {e}", pk.name),
-        })?;
+        let val_json =
+            serde_json::to_string(&val).map_err(|source| DatabaseError::SerializationError {
+                context: format!("pk column value for '{}'", pk.name),
+                source,
+            })?;
         pk_json.push_str(&key_json);
         pk_json.push(':');
         pk_json.push_str(&val_json);

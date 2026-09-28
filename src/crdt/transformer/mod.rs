@@ -298,9 +298,9 @@ impl CrdtTransformer {
 
         let dialect = SQLiteDialect {};
         let mut statements =
-            Parser::parse_sql(&dialect, sql).map_err(|e| DatabaseError::ParseError {
-                reason: e.to_string(),
+            Parser::parse_sql(&dialect, sql).map_err(|source| DatabaseError::ParseError {
                 sql: sql.to_string(),
+                source,
             })?;
 
         if statements.is_empty() {

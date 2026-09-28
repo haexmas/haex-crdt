@@ -46,12 +46,12 @@ impl DatabaseBootstrap for WritingBootstrap {
             "CREATE TABLE IF NOT EXISTS bootstrap_marker (n INTEGER PRIMARY KEY)",
             [],
         )
-        .map_err(|e| crate::Error::Message(e.to_string()))?;
+        .map_err(crate::Error::from)?;
         tx.execute(
             "INSERT INTO bootstrap_marker (n) SELECT COALESCE(MAX(n), 0) + 1 FROM bootstrap_marker",
             [],
         )
-        .map_err(|e| crate::Error::Message(e.to_string()))?;
+        .map_err(crate::Error::from)?;
         Ok(self.uuid)
     }
 }
@@ -67,7 +67,7 @@ fn bootstrap_hook_may_write_and_writes_are_committed() {
             conn.query_row("SELECT COUNT(*) FROM bootstrap_marker", [], |r| {
                 r.get::<_, i64>(0)
             })
-            .map_err(|e| crate::Error::Message(e.to_string()))
+            .map_err(crate::Error::from)
         })
         .unwrap();
     assert_eq!(count, 1, "hook's write must be visible via db handle");
@@ -86,7 +86,7 @@ fn bootstrap_hook_may_write_and_writes_are_committed() {
             conn.query_row("SELECT COUNT(*) FROM bootstrap_marker", [], |r| {
                 r.get::<_, i64>(0)
             })
-            .map_err(|e| crate::Error::Message(e.to_string()))
+            .map_err(crate::Error::from)
         })
         .unwrap();
     assert_eq!(count, 2, "first-open write must persist across reopen");
@@ -102,9 +102,9 @@ impl DatabaseBootstrap for FailingBootstrap {
             "CREATE TABLE IF NOT EXISTS failing_marker (n INTEGER PRIMARY KEY)",
             [],
         )
-        .map_err(|e| crate::Error::Message(e.to_string()))?;
+        .map_err(crate::Error::from)?;
         tx.execute("INSERT INTO failing_marker (n) VALUES (1)", [])
-            .map_err(|e| crate::Error::Message(e.to_string()))?;
+            .map_err(crate::Error::from)?;
         Err(crate::Error::Hlc("hook chose to fail".to_string()))
     }
 }
@@ -130,7 +130,7 @@ fn bootstrap_hook_error_rolls_back_and_fails_open() {
                 [],
                 |r| r.get::<_, i64>(0),
             )
-            .map_err(|e| crate::Error::Message(e.to_string()))
+            .map_err(crate::Error::from)
         })
         .unwrap();
     assert_eq!(

@@ -9,6 +9,7 @@ mod no_sync;
 mod upsert_dirty_conflict;
 
 use super::*;
+use crate::db::error::DatabaseError;
 use rusqlite::functions::FunctionFlags;
 use rusqlite::Connection;
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -234,10 +234,9 @@ pub fn scan_table_for_local_changes(
     let (pk_columns, data_columns) = partition_columns(&schema);
 
     if pk_columns.is_empty() {
-        return Err(DatabaseError::ExecutionError {
-            sql: format!("PRAGMA table_info(\"{table_name}\")"),
-            reason: format!("Table '{table_name}' has no primary key"),
-            table: Some(table_name.to_string()),
+        return Err(DatabaseError::InvalidTable {
+            table: table_name.to_string(),
+            reason: "no primary key".to_string(),
         });
     }
 
@@ -258,13 +257,12 @@ pub fn scan_table_for_local_changes(
         .into_iter()
         .filter_map(|(column, present)| (!present).then_some(column))
         .collect();
-        return Err(DatabaseError::ExecutionError {
-            sql: format!("PRAGMA table_info(\"{table_name}\")"),
+        return Err(DatabaseError::InvalidTable {
+            table: table_name.to_string(),
             reason: format!(
-                "Table '{table_name}' is missing required CRDT metadata column(s): {}",
+                "missing required CRDT metadata column(s): {}",
                 missing_columns.join(", ")
             ),
-            table: Some(table_name.to_string()),
         });
     }
 
