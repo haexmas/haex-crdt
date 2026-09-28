@@ -334,9 +334,10 @@ fn process_row_group(
             JsonValue::String(s.change.hlc_timestamp.clone()),
         );
     }
-    let column_hlcs_json = serde_json::to_string(&column_hlcs_after).map_err(|e| {
+    let column_hlcs_json = serde_json::to_string(&column_hlcs_after).map_err(|source| {
         DatabaseError::SerializationError {
-            reason: format!("Failed to serialize column HLCs: {e}"),
+            context: "column HLCs".to_string(),
+            source,
         }
     })?;
 

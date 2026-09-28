@@ -37,38 +37,40 @@ pub fn open_and_init_db(
         OpenFlags::SQLITE_OPEN_READ_WRITE
     };
 
-    let conn =
-        Connection::open_with_flags(path, flags).map_err(|e| DatabaseError::ConnectionFailed {
+    let conn = Connection::open_with_flags(path, flags).map_err(|source| {
+        DatabaseError::ConnectionFailed {
             path: path.to_string(),
-            reason: e.to_string(),
-        })?;
+            source,
+        }
+    })?;
 
     // Database opens may legitimately race during first initialization. Let
     // SQLite wait for the other opener's short migration/config transaction
     // instead of surfacing a transient SQLITE_BUSY error to the caller.
     conn.busy_timeout(Duration::from_secs(5))
-        .map_err(|e| DatabaseError::ConnectionError {
-            reason: format!("failed to configure database busy timeout: {e}"),
+        .map_err(|source| DatabaseError::SqliteStep {
+            step: "configure database busy timeout".to_string(),
+            source,
         })?;
 
     conn.pragma_update(None, "key", key)
-        .map_err(|e| DatabaseError::PragmaError {
+        .map_err(|source| DatabaseError::PragmaFailed {
             pragma: "key".to_string(),
-            reason: e.to_string(),
+            source,
         })?;
 
     // Foreign-key enforcement (required for PRAGMA defer_foreign_keys to work).
     conn.pragma_update(None, "foreign_keys", "ON")
-        .map_err(|e| DatabaseError::PragmaError {
+        .map_err(|source| DatabaseError::PragmaFailed {
             pragma: "foreign_keys".to_string(),
-            reason: e.to_string(),
+            source,
         })?;
 
     let fk_enabled: i32 = conn
         .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
-        .map_err(|e| DatabaseError::PragmaError {
+        .map_err(|source| DatabaseError::PragmaFailed {
             pragma: "foreign_keys (verify)".to_string(),
-            reason: e.to_string(),
+            source,
         })?;
     if fk_enabled != 1 {
         return Err(DatabaseError::PragmaError {
@@ -83,8 +85,9 @@ pub fn open_and_init_db(
         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
         |_ctx| Ok(Uuid::new_v4().to_string()),
     )
-    .map_err(|e| DatabaseError::DatabaseError {
-        reason: format!("Failed to register {UUID_FUNCTION_NAME} function: {e}"),
+    .map_err(|source| DatabaseError::SqliteStep {
+        step: format!("register {UUID_FUNCTION_NAME} function"),
+        source,
     })?;
 
     register_current_hlc_udf(&conn, hlc_service, context.clone())?;
@@ -92,9 +95,9 @@ pub fn open_and_init_db(
 
     let journal_mode: String = conn
         .query_row("PRAGMA journal_mode=WAL;", [], |row| row.get(0))
-        .map_err(|e| DatabaseError::PragmaError {
+        .map_err(|source| DatabaseError::PragmaFailed {
             pragma: "journal_mode=WAL".to_string(),
-            reason: e.to_string(),
+            source,
         })?;
     if !journal_mode.eq_ignore_ascii_case("wal") {
         return Err(DatabaseError::PragmaError {
@@ -125,8 +128,9 @@ pub fn register_current_hlc_udf(
                 .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))
         },
     )
-    .map_err(|e| DatabaseError::DatabaseError {
-        reason: format!("Failed to register {HLC_FUNCTION_NAME} function: {e}"),
+    .map_err(|source| DatabaseError::SqliteStep {
+        step: format!("register {HLC_FUNCTION_NAME} function"),
+        source,
     })
 }
 
@@ -146,16 +150,18 @@ pub fn install_tx_hlc_hooks(
         ctx_commit.reset_tx_slot();
         false
     }))
-    .map_err(|e| DatabaseError::DatabaseError {
-        reason: format!("Failed to install commit_hook: {e}"),
+    .map_err(|source| DatabaseError::SqliteStep {
+        step: "install commit_hook".to_string(),
+        source,
     })?;
 
     let ctx_rollback = context.clone();
     conn.rollback_hook(Some(move || {
         ctx_rollback.reset_tx_slot();
     }))
-    .map_err(|e| DatabaseError::DatabaseError {
-        reason: format!("Failed to install rollback_hook: {e}"),
+    .map_err(|source| DatabaseError::SqliteStep {
+        step: "install rollback_hook".to_string(),
+        source,
     })?;
 
     let ctx_update = context;
@@ -164,8 +170,9 @@ pub fn install_tx_hlc_hooks(
             ctx_update.mark_write_pending();
         },
     ))
-    .map_err(|e| DatabaseError::DatabaseError {
-        reason: format!("Failed to install update_hook: {e}"),
+    .map_err(|source| DatabaseError::SqliteStep {
+        step: "install update_hook".to_string(),
+        source,
     })?;
     Ok(())
 }

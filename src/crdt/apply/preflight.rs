@@ -312,11 +312,9 @@ mod tests {
 
     fn assert_validation_error(err: Error, needle: &str) {
         match err {
-            // `DatabaseError::ValidationError` flattens through
-            // `From<DatabaseError> for Error`, so the variant is `Message`.
-            Error::Message(msg) => assert!(
-                msg.contains(needle),
-                "expected a validation error naming {needle:?}, got: {msg}"
+            Error::Database(DatabaseError::ValidationError { reason }) => assert!(
+                reason.contains(needle),
+                "expected a validation error naming {needle:?}, got: {reason}"
             ),
             other => panic!("expected a validation error, got {other:?}"),
         }

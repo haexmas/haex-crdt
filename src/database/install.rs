@@ -19,7 +19,7 @@ use serde_json::Value as JsonValue;
 
 use crate::crdt::hlc::HlcService;
 use crate::crdt::trigger::{
-    ensure_crdt_columns_and_triggers, get_table_schema, is_safe_identifier,
+    ensure_crdt_columns_and_triggers, get_table_schema, is_safe_identifier, CrdtSetupError,
 };
 use crate::database::config::InstallCrdtOptions;
 use crate::db::core::convert_value_ref_to_json;
@@ -70,14 +70,12 @@ pub fn install_crdt(
             });
         }
         // Reinstall path: refresh triggers, skip backfill.
-        ensure_crdt_columns_and_triggers(&tx, table_name)
-            .map_err(|e| DatabaseError::CrdtSetup(e.to_string()))?;
+        ensure_crdt_columns_and_triggers(&tx, table_name).map_err(DatabaseError::from)?;
         tx.commit().map_err(DatabaseError::from)?;
         return Ok(());
     }
 
-    ensure_crdt_columns_and_triggers(&tx, table_name)
-        .map_err(|e| DatabaseError::CrdtSetup(e.to_string()))?;
+    ensure_crdt_columns_and_triggers(&tx, table_name).map_err(DatabaseError::from)?;
 
     let touched = backfill_existing_rows(&tx, table_name, hlc, provider)?;
 
@@ -115,9 +113,9 @@ fn backfill_existing_rows(
         .collect();
 
     if pk_columns.is_empty() {
-        return Err(DatabaseError::CrdtSetup(format!(
-            "install_crdt: table '{table_name}' has no primary key — cannot backfill"
-        ))
+        return Err(DatabaseError::CrdtSetup(CrdtSetupError::PrimaryKeyMissing {
+            table_name: table_name.to_string(),
+        })
         .into());
     }
 
@@ -144,20 +142,12 @@ fn backfill_existing_rows(
         let mut pk_json_values = Vec::with_capacity(pk_columns.len());
         let mut pk_sql_values = Vec::with_capacity(pk_columns.len());
         for index in 0..pk_columns.len() {
-            pk_json_values.push(convert_value_ref_to_json(row.get_ref(index)?).map_err(|e| {
-                DatabaseError::SerializationError {
-                    reason: e.to_string(),
-                }
-            })?);
+            pk_json_values.push(convert_value_ref_to_json(row.get_ref(index)?)?);
             pk_sql_values.push(row.get(index)?);
         }
         let mut data_values = Vec::with_capacity(data_columns.len());
         for index in pk_columns.len()..selected_columns.len() {
-            data_values.push(convert_value_ref_to_json(row.get_ref(index)?).map_err(|e| {
-                DatabaseError::SerializationError {
-                    reason: e.to_string(),
-                }
-            })?);
+            data_values.push(convert_value_ref_to_json(row.get_ref(index)?)?);
         }
         let row_pks = serialize_row_pks(&pk_columns, &pk_json_values)?;
         legacy_rows.push((row_pks, pk_sql_values, data_values));
@@ -174,9 +164,7 @@ fn backfill_existing_rows(
     // share one causal instant").
     let hlc_ts = hlc
         .new_timestamp_and_persist(tx)
-        .map_err(|e| DatabaseError::HlcError {
-            reason: e.to_string(),
-        })?;
+        .map_err(DatabaseError::from)?;
     let hlc_str = hlc_ts.to_string();
 
     // Serialize the HLC metadata once — it is identical for every
@@ -241,15 +229,17 @@ fn serialize_row_pks(pk_columns: &[String], values: &[JsonValue]) -> Result<Stri
         if index > 0 {
             json.push(',');
         }
-        json.push_str(&serde_json::to_string(column).map_err(|e| {
+        json.push_str(&serde_json::to_string(column).map_err(|source| {
             DatabaseError::SerializationError {
-                reason: format!("serialize primary-key column '{column}': {e}"),
+                context: format!("primary-key column '{column}'"),
+                source,
             }
         })?);
         json.push(':');
-        json.push_str(&serde_json::to_string(value).map_err(|e| {
+        json.push_str(&serde_json::to_string(value).map_err(|source| {
             DatabaseError::SerializationError {
-                reason: format!("serialize primary-key value for '{column}': {e}"),
+                context: format!("primary-key value for '{column}'"),
+                source,
             }
         })?);
     }

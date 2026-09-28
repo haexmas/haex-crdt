@@ -86,7 +86,7 @@ fn count(db: &Database, sql: &'static str) -> i64 {
 
 /// Converts a raw SQLite error into the crate's public error type.
 fn map_err(e: haex_crdt::rusqlite::Error) -> haex_crdt::Error {
-    haex_crdt::Error::Message(e.to_string())
+    haex_crdt::Error::from(e)
 }
 
 #[test]

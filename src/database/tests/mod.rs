@@ -93,12 +93,15 @@ pub(super) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// Assert that `err` is `VaultAlreadyOpenElsewhere` (matched by message
-/// substring so the check survives future error-variant edits).
+/// Assert that `err` is the typed `VaultAlreadyOpenElsewhere` variant.
 pub(super) fn assert_already_open(err: &crate::Error) {
-    let msg = err.to_string();
     assert!(
-        msg.contains("already open"),
+        matches!(
+            err,
+            crate::Error::Database(
+                crate::db::error::DatabaseError::VaultAlreadyOpenElsewhere { .. }
+            )
+        ),
         "expected VaultAlreadyOpenElsewhere, got {err:?}",
     );
 }

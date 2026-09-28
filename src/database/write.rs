@@ -234,13 +234,13 @@ impl Drop for QueryOnly<'_> {
     }
 }
 
-/// Wraps a SQLite failure with the executed SQL and error text, leaving the
-/// table unspecified.
+/// Wraps a SQLite failure with the executed SQL, leaving the table
+/// unspecified.
 fn execution_error(sql: &str, source: rusqlite::Error) -> DatabaseError {
     DatabaseError::ExecutionError {
         sql: sql.to_string(),
         table: None,
-        reason: source.to_string(),
+        source,
     }
 }
 

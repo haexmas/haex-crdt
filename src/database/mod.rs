@@ -142,9 +142,7 @@ impl Database {
         };
 
         hlc.initialize_in_place(&conn, device_uuid)
-            .map_err(|e| DatabaseError::HlcError {
-                reason: e.to_string(),
-            })?;
+            .map_err(DatabaseError::from)?;
 
         ensure_triggers_initialized(&mut conn, config.trigger_version)?;
 
@@ -302,17 +300,9 @@ impl Database {
 fn map_lock_error(err: DatabaseLockError) -> Error {
     match err {
         DatabaseLockError::AlreadyHeld { path, source } => {
-            DatabaseError::VaultAlreadyOpenElsewhere {
-                path,
-                reason: source.to_string(),
-            }
-            .into()
+            DatabaseError::VaultAlreadyOpenElsewhere { path, source }.into()
         }
-        DatabaseLockError::Io { path, source } => DatabaseError::IoError {
-            path,
-            reason: source.to_string(),
-        }
-        .into(),
+        DatabaseLockError::Io { path, source } => DatabaseError::IoError { path, source }.into(),
     }
 }
 

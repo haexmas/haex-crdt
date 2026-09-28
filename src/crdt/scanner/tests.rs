@@ -178,7 +178,10 @@ fn scan_rejects_table_without_primary_key() {
     let err =
         scan_table_for_local_changes(&conn, "t", None, &dev.to_string(), ScanFilters::default())
             .unwrap_err();
-    assert!(matches!(err, DatabaseError::ExecutionError { .. }));
+    assert!(
+        matches!(err, DatabaseError::InvalidTable { .. }),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -194,8 +197,8 @@ fn scan_rejects_table_without_required_crdt_metadata() {
         scan_table_for_local_changes(&conn, "t", None, &dev.to_string(), ScanFilters::default())
             .unwrap_err();
     match err {
-        DatabaseError::ExecutionError { reason, table, .. } => {
-            assert_eq!(table.as_deref(), Some("t"));
+        DatabaseError::InvalidTable { reason, table } => {
+            assert_eq!(table, "t");
             assert!(reason.contains(HLC_TIMESTAMP_COLUMN));
             assert!(reason.contains(COLUMN_HLCS_COLUMN));
         }

@@ -328,7 +328,7 @@ pub fn compute_cutoff(
     };
 
     let current_timestamp =
-        Timestamp::from_str(&current_hlc_str).map_err(|e| DatabaseError::HlcError {
+        Timestamp::from_str(&current_hlc_str).map_err(|e| DatabaseError::InvalidHlc {
             reason: format!("cleanup: invalid HLC in config '{current_hlc_str}': {e:?}"),
         })?;
 

@@ -10,14 +10,6 @@ use crate::crdt::scanner::ScanFilters;
 use crate::db::error::DatabaseError;
 use crate::error::Error;
 
-/// `DatabaseError` reaches callers as `Error::Message` with its display
-/// text (see `crate::error`), so failures are recognised by that text, as in
-/// the other `Database` tests.
-fn assert_message(err: &Error, needle: &str) {
-    let msg = err.to_string();
-    assert!(msg.contains(needle), "expected `{needle}`, got {err:?}");
-}
-
 const ITEMS: &str = "CREATE TABLE items (id TEXT PRIMARY KEY NOT NULL, body TEXT, data BLOB);";
 const CACHE: &str = "CREATE TABLE cache_no_sync (id TEXT PRIMARY KEY NOT NULL, body TEXT);";
 
@@ -172,7 +164,16 @@ fn the_size_limit_counts_all_writes_of_a_transaction() {
         })
         .unwrap_err();
 
-    assert_message(&err, "transaction too large");
+    assert!(
+        matches!(
+            err,
+            Error::Database(DatabaseError::TransactionTooLarge {
+                bytes: 12,
+                limit: 10
+            })
+        ),
+        "got {err:?}"
+    );
     assert_eq!(count(&db, "items"), 0);
 }
 
@@ -188,7 +189,14 @@ fn writes_to_crdt_meta_columns_are_rejected() {
             Ok(())
         })
         .unwrap_err();
-    assert_message(&err, "meta column write is forbidden");
+    assert!(
+        matches!(
+            &err,
+            Error::Database(DatabaseError::CrdtMetaColumnWriteForbidden { column })
+                if column == HLC_TIMESTAMP_COLUMN
+        ),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -287,4 +295,48 @@ fn callback_panics_do_not_poison_the_connection() {
     })
     .unwrap();
     assert_eq!(count(&db, "items"), 1);
+}
+
+#[test]
+fn a_constraint_violation_keeps_its_sqlite_error_code() {
+    let (_fx, db) = open();
+    let insert = |id: &str| {
+        db.write(|tx| {
+            tx.execute("INSERT INTO items (id) VALUES (?1)", params![id])?;
+            Ok(())
+        })
+    };
+    insert("dup").unwrap();
+    let err = insert("dup").unwrap_err();
+
+    let code = err
+        .sqlite_error()
+        .and_then(rusqlite::Error::sqlite_error_code);
+    assert_eq!(
+        code,
+        Some(rusqlite::ErrorCode::ConstraintViolation),
+        "got {err:?}"
+    );
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("consumer failure {0}")]
+struct ConsumerFailure(u8);
+
+#[test]
+fn a_consumer_error_from_the_closure_can_be_downcast() {
+    let (_fx, db) = open();
+    let err = db
+        .write(|_tx| -> crate::Result<()> { Err(Error::consumer(ConsumerFailure(7))) })
+        .unwrap_err();
+
+    match err {
+        Error::Consumer(inner) => {
+            let failure = inner
+                .downcast_ref::<ConsumerFailure>()
+                .expect("the consumer's own error type survives");
+            assert_eq!(failure.0, 7);
+        }
+        other => panic!("expected Error::Consumer, got {other:?}"),
+    }
 }

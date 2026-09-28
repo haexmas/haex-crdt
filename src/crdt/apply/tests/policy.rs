@@ -93,7 +93,10 @@ fn wrong_column_decision_count_is_rejected_with_an_error() {
     )
     .unwrap_err();
     assert!(
-        matches!(err, Error::Message(_)),
+        matches!(
+            err,
+            Error::Database(crate::db::error::DatabaseError::ValidationError { .. })
+        ),
         "expected a validation error naming the mismatch, got {err:?}"
     );
 
@@ -227,7 +230,7 @@ impl ApplyPolicy for FailAfterRowPolicy {
         accept_all(&row)
     }
     fn after_row(&mut self, _tx: &Transaction<'_>, _written: RowWrite<'_>) -> Result<()> {
-        Err(Error::Message("deliberate after_row failure".to_string()))
+        Err(Error::consumer("deliberate after_row failure"))
     }
 }
 
@@ -244,7 +247,7 @@ fn after_row_failure_aborts_the_whole_batch() {
         &mut policy,
     )
     .unwrap_err();
-    assert!(matches!(err, Error::Message(_)));
+    assert!(matches!(err, Error::Consumer(_)), "got {err:?}");
 
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
@@ -283,9 +286,7 @@ impl ApplyPolicy for SideEffectThenFailBeforeCommitPolicy {
         _changes: &RemoteChanges,
         _outcome: &ApplyOutcome,
     ) -> Result<()> {
-        Err(Error::Message(
-            "deliberate before_commit failure".to_string(),
-        ))
+        Err(Error::consumer("deliberate before_commit failure"))
     }
 }
 
@@ -302,7 +303,7 @@ fn before_commit_failure_rolls_back_everything_including_policy_side_effects() {
         &mut policy,
     )
     .unwrap_err();
-    assert!(matches!(err, Error::Message(_)));
+    assert!(matches!(err, Error::Consumer(_)), "got {err:?}");
 
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
@@ -333,7 +334,7 @@ impl ApplyPolicy for FailBeginPolicy {
         Ok(())
     }
     fn begin(&mut self, _tx: &Transaction<'_>, _changes: &RemoteChanges) -> Result<()> {
-        Err(Error::Message("deliberate begin failure".to_string()))
+        Err(Error::consumer("deliberate begin failure"))
     }
     fn prepare_row(&mut self, _tx: &Transaction<'_>, _row: RowInput<'_>) -> Result<RowDecision> {
         unreachable!("begin fails before any row is processed")
@@ -354,7 +355,7 @@ fn fk_and_trigger_state_are_restored_after_an_error_from_begin() {
         &mut policy,
     )
     .unwrap_err();
-    assert!(matches!(err, Error::Message(_)));
+    assert!(matches!(err, Error::Consumer(_)), "got {err:?}");
 
     let fk_enabled: bool = conn
         .query_row("PRAGMA foreign_keys", [], |r| r.get(0))

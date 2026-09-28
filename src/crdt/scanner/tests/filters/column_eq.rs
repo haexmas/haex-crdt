@@ -209,7 +209,7 @@ fn missing_crdt_metadata_outranks_an_absent_filter_column() {
     )
     .unwrap_err();
     assert!(
-        matches!(err, DatabaseError::ExecutionError { .. }),
+        matches!(err, DatabaseError::InvalidTable { .. }),
         "the metadata error must outrank the absent-column fail-closed rule: {err:?}"
     );
 }
