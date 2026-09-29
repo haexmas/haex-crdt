@@ -63,6 +63,7 @@ use crate::crdt::columns::{
 use crate::crdt::hlc::{hlc_is_newer, HlcService};
 use crate::crdt::scanner::ColumnChange;
 use crate::crdt::trigger::get_table_schema;
+use crate::db::core::ValueConverter;
 use crate::db::error::DatabaseError;
 use crate::error::{Error, Result};
 use crate::signature::RemoteChanges;
@@ -236,6 +237,12 @@ fn process_row_group(
             return Ok(());
         }
     };
+    // A PK value that cannot be bound (a malformed `{"$blob_hex":…}` tag)
+    // names no row, the same as unparseable `row_pks`.
+    if ValueConverter::convert_params(&pk_values).is_err() {
+        skip_whole_group(outcome, &group, SkipReason::InvalidRowIdentity);
+        return Ok(());
+    }
 
     let existing = fetch_existing_hlcs(tx, table_name, &where_clause, &pk_values)?;
     let row_exists = existing.is_some();

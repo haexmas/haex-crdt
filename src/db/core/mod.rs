@@ -20,7 +20,7 @@ pub use extract::{
 pub use init::{install_tx_hlc_hooks, open_and_init_db, register_current_hlc_udf};
 pub use parsing::{parse_single_statement, parse_sql_statements, statement_has_returning};
 pub use prefix::strip_main_schema_prefix;
-pub use value::{convert_value_ref_to_json, ValueConverter};
+pub use value::{convert_value_ref_to_json, ValueConverter, BLOB_HEX_TAG};
 
 #[cfg(test)]
 mod tests;

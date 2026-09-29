@@ -23,6 +23,7 @@ use crate::crdt::trigger::{
 };
 use crate::database::config::InstallCrdtOptions;
 use crate::db::core::convert_value_ref_to_json;
+use crate::db::core::value::encode_hex;
 use crate::db::error::DatabaseError;
 use crate::db::migrations::migrate_legacy_metadata_columns;
 use crate::error::{Error, Result};
@@ -272,19 +273,9 @@ fn build_column_sigs_json(
         if bytes.is_empty() {
             continue;
         }
-        map.insert(col.clone(), JsonValue::String(hex(&bytes)));
+        map.insert(col.clone(), JsonValue::String(encode_hex(&bytes)));
     }
     Ok(serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string()))
-}
-
-/// Encode provider output as the opaque JSON string stored by the scanner.
-fn hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(s, "{b:02x}");
-    }
-    s
 }
 
 /// Mark a table for the next outbound scan after a successful backfill.

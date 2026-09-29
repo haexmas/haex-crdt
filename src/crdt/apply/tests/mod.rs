@@ -4,9 +4,11 @@
 //! 500-LoC cap: `lww` covers the write loop, `sig` covers the preflight
 //! contract, `delete` covers the delete-log fan-out + shadowing,
 //! `reserved_columns` covers the columns apply refuses to accept from a
-//! peer, `drift` covers the pre-transaction clock-drift gate, `policy`
+//! peer, `blob` covers BLOB values and keys across a scan → apply round
+//! trip, `drift` covers the pre-transaction clock-drift gate, `policy`
 //! covers the `ApplyPolicy` extension points themselves.
 
+mod blob;
 mod delete;
 mod drift;
 mod lww;

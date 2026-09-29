@@ -5,6 +5,7 @@
 //! against an in-memory SQLite database with test UDFs registered for
 //! `gen_uuid` and `current_hlc`.
 
+mod blob_pk;
 mod no_sync;
 mod upsert_dirty_conflict;
 

@@ -164,6 +164,19 @@ mod tests {
     }
 
     #[test]
+    fn blob_value_preimage_differs_from_text_spelling_the_tag() {
+        // The tagged BLOB object is a JSON object, the lookalike a JSON
+        // string, so the signed bytes keep the storage type apart.
+        let blob = change("t", "r", "c", "1", json!({"$blob_hex": "deadbeef"}));
+        let text = change("t", "r", "c", "1", json!(r#"{"$blob_hex":"deadbeef"}"#));
+        assert_eq!(
+            column_sig_preimage(&blob),
+            column_sig_preimage(&blob.clone())
+        );
+        assert_ne!(column_sig_preimage(&blob), column_sig_preimage(&text));
+    }
+
+    #[test]
     fn preimage_shape_length_prefixes_each_field() {
         // Minimal end-to-end shape check — five fields, each prefixed with
         // a big-endian u32 length. Total = 5 * 4 + sum(field lengths).
