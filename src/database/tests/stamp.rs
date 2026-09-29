@@ -21,6 +21,11 @@ const KNOWN_DEVICES: &str = "CREATE TABLE known_devices (
     local_note_no_sync TEXT
 );";
 
+const OPTED_IN_NO_SYNC: &str = "CREATE TABLE opted_in_no_sync (
+    installation_uuid TEXT PRIMARY KEY NOT NULL,
+    body TEXT
+);";
+
 /// Registers this installation once, the way a consumer would in its hook.
 struct RegisteringBootstrap {
     uuid: Uuid,
@@ -33,6 +38,22 @@ impl DatabaseBootstrap for RegisteringBootstrap {
              (installation_uuid, vault_device_uuid, alias, first_seen, local_note_no_sync) \
              VALUES ('inst-1', ?1, 'laptop', '2026-09-29', 'local')",
             [self.uuid.to_string()],
+        )
+        .map_err(crate::Error::from)?;
+        Ok(self.uuid)
+    }
+}
+
+struct RegisteringOptedInBootstrap {
+    uuid: Uuid,
+}
+
+impl DatabaseBootstrap for RegisteringOptedInBootstrap {
+    fn bootstrap(&self, tx: &rusqlite::Transaction<'_>) -> crate::Result<Uuid> {
+        tx.execute(
+            "INSERT OR IGNORE INTO opted_in_no_sync \
+             (installation_uuid, body) VALUES ('inst-1', 'bootstrap')",
+            [],
         )
         .map_err(crate::Error::from)?;
         Ok(self.uuid)
@@ -133,5 +154,52 @@ fn reopen_does_not_restamp() {
         dirty_at(&db),
         None,
         "nothing to stamp, nothing marked dirty"
+    );
+}
+
+/// A table ending in `_no_sync` can still be explicitly opted into CRDT via
+/// `install_crdt`. A later open must stamp rows that were inserted while the
+/// HLC was not initialized.
+#[test]
+fn explicitly_opted_in_no_sync_table_is_stamped_on_reopen() {
+    let mut fx = Fixture::with_source(source(&[("0001_opted_in_no_sync", OPTED_IN_NO_SYNC)]));
+    fx.config.bootstrap = Arc::new(RegisteringOptedInBootstrap { uuid: fx.device });
+    let db = Database::open(fx.config.clone()).unwrap();
+
+    db.install_crdt("opted_in_no_sync", InstallCrdtOptions::default())
+        .unwrap();
+    db.with_locked_conn(|conn| {
+        conn.execute(
+            "INSERT INTO opted_in_no_sync (installation_uuid, body) VALUES ('inst-2', 'later')",
+            [],
+        )
+        .map_err(crate::Error::from)
+    })
+    .unwrap();
+    drop(db);
+
+    let db = Database::open(DatabaseConfig {
+        create_if_missing: false,
+        ..fx.config
+    })
+    .unwrap();
+    let (row_hlc, map): (Option<String>, Option<String>) = db
+        .with_locked_conn(|conn| {
+            conn.query_row(
+                &format!(
+                    "SELECT {HLC_TIMESTAMP_COLUMN}, {COLUMN_HLCS_COLUMN} \
+                     FROM opted_in_no_sync WHERE installation_uuid = 'inst-2'"
+                ),
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(crate::Error::from)
+        })
+        .unwrap();
+
+    let row_hlc = row_hlc.expect("reopen must stamp the opted-in row");
+    assert_eq!(
+        serde_json::from_str::<JsonValue>(&map.unwrap()).unwrap(),
+        serde_json::json!({"body": row_hlc}),
     );
 }
