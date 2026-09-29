@@ -19,7 +19,7 @@ use crate::signature::SignatureProvider;
 /// `ensure_triggers_initialized` when the config leaves it unset. Bump the
 /// crate-side default in lockstep with any trigger-shape change so open
 /// upgrades the DB in place.
-pub const DEFAULT_TRIGGER_VERSION: i32 = 3;
+pub const DEFAULT_TRIGGER_VERSION: i32 = 4;
 
 /// SQLCipher encryption key, passed verbatim to `PRAGMA key = ?`. The wrapper
 /// is a passthrough newtype — the consumer decides whether to hand a

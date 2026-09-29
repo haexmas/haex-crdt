@@ -7,6 +7,7 @@
 
 mod blob_pk;
 mod no_sync;
+mod null_column_hlcs;
 mod upsert_dirty_conflict;
 
 use super::*;

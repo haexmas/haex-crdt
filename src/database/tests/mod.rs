@@ -6,6 +6,8 @@
 //! - [`install_crdt`] — `install_crdt` semantics: empty, backfill, sig
 //!   binding, reinstall refuse/allow, unsafe identifier
 //! - [`delegates`] — method delegates (apply/scan/cleanup)
+//! - [`stamp`] — open stamps rows the bootstrap hook wrote before the HLC
+//!   existed
 //! - [`write`] — `write` / `read`: one HLC per transaction, rollback, size
 //!   limit, BLOB parameters, read-only guard
 //!
@@ -27,6 +29,7 @@ use crate::signature::{AuthorId, NoopSignatureProvider, SignatureProvider};
 mod delegates;
 mod install_crdt;
 mod open;
+mod stamp;
 mod write;
 
 pub(super) fn source(entries: &[(&str, &str)]) -> Arc<StaticMigrationSource> {

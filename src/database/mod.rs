@@ -41,9 +41,14 @@
 //!    `haex_crdt_configs_no_sync` — or seed it on first open — using the
 //!    UUID the bootstrap hook returned.
 //! 5. Ensure CRDT triggers are at the requested `trigger_version`.
+//! 6. Stamp rows written before the HLC existed — by the bootstrap hook or
+//!    a data-seeding migration — with one fresh HLC and a full column-HLC
+//!    map, and mark their tables dirty, so they sync like any other row.
+//!    Rows that already carry an HLC are left alone.
 
 pub mod config;
 mod install;
+mod stamp;
 mod write;
 
 pub use config::{DatabaseConfig, InstallCrdtOptions, SqlCipherKey, DEFAULT_TRIGGER_VERSION};
@@ -145,6 +150,8 @@ impl Database {
             .map_err(DatabaseError::from)?;
 
         ensure_triggers_initialized(&mut conn, config.trigger_version)?;
+
+        stamp::stamp_unstamped_rows(&mut conn, &hlc)?;
 
         Ok(Database {
             inner: Arc::new(DatabaseInner {

@@ -285,11 +285,15 @@ fn generate_update_trigger_sql(
             .join(" AND ")
     };
 
+    // `json_set` on a NULL map returns NULL, which would swallow every
+    // column HLC of a row whose map was never initialised (a row written
+    // before the HLC existed, or by a raw INSERT that bypassed the insert
+    // trigger). Start from an empty map instead.
     let mut update_statements: Vec<String> = Vec::new();
     for col in cols_to_track {
         update_statements.push(format!(
             "UPDATE \"{table_name}\"
-            SET {COLUMN_HLCS_COLUMN} = json_set({COLUMN_HLCS_COLUMN}, '$.{col}', NEW.\"{HLC_TIMESTAMP_COLUMN}\")
+            SET {COLUMN_HLCS_COLUMN} = json_set(COALESCE({COLUMN_HLCS_COLUMN}, '{{}}'), '$.{col}', NEW.\"{HLC_TIMESTAMP_COLUMN}\")
             WHERE {pk_where} AND NEW.\"{col}\" IS NOT OLD.\"{col}\";"
         ));
     }

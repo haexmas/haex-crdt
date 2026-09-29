@@ -214,7 +214,7 @@ fn backfill_existing_rows(
 }
 
 /// Build the shared per-column HLC map for a backfill batch.
-fn build_column_hlcs_json(data_columns: &[String], hlc_str: &str) -> String {
+pub(super) fn build_column_hlcs_json(data_columns: &[String], hlc_str: &str) -> String {
     let mut map = serde_json::Map::with_capacity(data_columns.len());
     for col in data_columns {
         map.insert(col.clone(), JsonValue::String(hlc_str.to_string()));
@@ -279,7 +279,7 @@ fn build_column_sigs_json(
 }
 
 /// Mark a table for the next outbound scan after a successful backfill.
-fn mark_dirty(tx: &Transaction<'_>, table_name: &str) -> Result<()> {
+pub(super) fn mark_dirty(tx: &Transaction<'_>, table_name: &str) -> Result<()> {
     tx.execute(
         &format!(
             "INSERT INTO {TABLE_CRDT_DIRTY_TABLES} (table_name, last_modified) \
