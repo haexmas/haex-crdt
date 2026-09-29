@@ -429,13 +429,14 @@ pub fn paginate_changes<T: Paginable>(changes: Vec<T>, page_budget: usize) -> (V
 ///
 /// This is the same predicate the trigger installer applies to pick its
 /// tracked columns, so what fires a trigger and what ships cannot drift
-/// apart.
+/// apart. `Database::open` stamps rows written before the HLC existed with
+/// a column-HLC entry for exactly these columns.
 ///
 /// [`crate::crdt::apply::apply_remote_changes`] refuses this same set on
 /// the way in. The two sets must stay identical: if apply accepted what
 /// the scanner withholds, a column that never leaves one device could
 /// still be written on another.
-fn partition_columns(schema: &[ColumnInfo]) -> (Vec<&ColumnInfo>, Vec<&ColumnInfo>) {
+pub(crate) fn partition_columns(schema: &[ColumnInfo]) -> (Vec<&ColumnInfo>, Vec<&ColumnInfo>) {
     let pk_columns: Vec<&ColumnInfo> = schema.iter().filter(|c| c.is_pk).collect();
     let data_columns: Vec<&ColumnInfo> = schema
         .iter()
