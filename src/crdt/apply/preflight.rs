@@ -46,7 +46,7 @@
 //! interleaved apply log.
 
 use crate::crdt::apply::policy::ApplyPolicy;
-use crate::crdt::apply::preimage::column_sig_preimage;
+use crate::crdt::apply::preimage::{column_sig_preimage, legacy_column_sig_preimage};
 use crate::crdt::hlc::{remote_hlc_drift, MAX_REMOTE_HLC_DRIFT};
 use crate::crdt::scanner::ColumnChange;
 use crate::crdt::trigger::is_safe_identifier;
@@ -149,7 +149,10 @@ pub fn verify_all_signatures(
             continue;
         };
         let preimage = column_sig_preimage(change);
-        if provider.verify_column(&preimage, sig).is_err() {
+        let verified = provider.verify_column(&preimage, sig).is_ok()
+            || legacy_column_sig_preimage(change)
+                .is_some_and(|legacy| provider.verify_column(&legacy, sig).is_ok());
+        if !verified {
             return Err(Error::SignatureVerificationFailed {
                 first_failed_change: idx,
             });

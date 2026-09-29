@@ -11,8 +11,10 @@ use std::sync::Arc;
 use serde_json::{json, Value as JsonValue};
 
 use super::{change, create_crdt_table, make_fixture};
-use crate::crdt::apply::{apply_remote_changes, column_sig_preimage, SignatureApplyPolicy};
-use crate::crdt::columns::COLUMN_SIGS_COLUMN;
+use crate::crdt::apply::{
+    apply_remote_changes, column_sig_preimage, column_sig_preimage_from_parts, SignatureApplyPolicy,
+};
+use crate::crdt::columns::{COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN, HLC_TIMESTAMP_COLUMN};
 use crate::crdt::scanner::ColumnChange;
 use crate::error::{Error, Result};
 use crate::signature::{AuthorId, NoopSignatureProvider, RemoteChanges, SignatureProvider};
@@ -254,4 +256,102 @@ fn preimage_is_deterministic_and_field_sensitive() {
 
     let c3 = change("items", "r1", "title", HLC1, json!("v"));
     assert_ne!(column_sig_preimage(&c1), column_sig_preimage(&c3));
+}
+
+struct LegacyBlobSignatureProvider {
+    legacy_preimage: Vec<u8>,
+}
+
+impl SignatureProvider for LegacyBlobSignatureProvider {
+    fn sign_column(&self, _preimage: &[u8]) -> Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+
+    fn verify_column(&self, preimage: &[u8], _sig: &JsonValue) -> Result<()> {
+        if preimage == self.legacy_preimage {
+            Ok(())
+        } else {
+            Err(Error::UnexpectedSignatureUnderNoop)
+        }
+    }
+
+    fn author_id(&self) -> AuthorId {
+        AuthorId::anonymous()
+    }
+}
+
+#[test]
+fn legacy_blob_value_signature_is_accepted_after_encoding_migration() {
+    let (mut conn, hlc, _dev) = make_fixture();
+    create_crdt_table(&conn, "items", "body BLOB");
+    let value = json!({"$blob_hex": "deadbeef"});
+    let legacy_preimage =
+        column_sig_preimage_from_parts("items", r#"{"id":"r1"}"#, "body", HLC1, &json!("3q2+7w=="));
+    let provider = LegacyBlobSignatureProvider { legacy_preimage };
+
+    apply_remote_changes(
+        &mut conn,
+        vec![signed(
+            change("items", "r1", "body", HLC1, value),
+            json!("legacy"),
+        )],
+        &hlc,
+        &mut SignatureApplyPolicy::new(&provider),
+    )
+    .expect("legacy BLOB value signature must remain valid");
+
+    let stored: Vec<u8> = conn
+        .query_row("SELECT body FROM items WHERE id = 'r1'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(stored, b"\xde\xad\xbe\xef");
+}
+
+#[test]
+fn legacy_blob_primary_key_signature_is_accepted_after_encoding_migration() {
+    let (mut conn, hlc, _dev) = make_fixture();
+    conn.execute_batch(&format!(
+        "CREATE TABLE items (
+             id BLOB PRIMARY KEY NOT NULL,
+             body TEXT,
+             {HLC_TIMESTAMP_COLUMN} TEXT,
+             {COLUMN_HLCS_COLUMN} TEXT NOT NULL DEFAULT '{{}}',
+             {COLUMN_SIGS_COLUMN} TEXT NOT NULL DEFAULT '{{}}'
+         );"
+    ))
+    .unwrap();
+    let row_pks = r#"{"id":{"$blob_hex":"deadbeef"}}"#;
+    let legacy_preimage = column_sig_preimage_from_parts(
+        "items",
+        r#"{"id":"3q2+7w=="}"#,
+        "body",
+        HLC1,
+        &json!("value"),
+    );
+    let provider = LegacyBlobSignatureProvider { legacy_preimage };
+
+    apply_remote_changes(
+        &mut conn,
+        vec![signed(
+            ColumnChange {
+                table_name: "items".to_string(),
+                row_pks: row_pks.to_string(),
+                column_name: "body".to_string(),
+                hlc_timestamp: HLC1.to_string(),
+                value: json!("value"),
+                device_id: String::new(),
+                sig: None,
+            },
+            json!("legacy"),
+        )],
+        &hlc,
+        &mut SignatureApplyPolicy::new(&provider),
+    )
+    .expect("legacy BLOB primary-key signature must remain valid");
+
+    let stored: Vec<u8> = conn
+        .query_row("SELECT id FROM items", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(stored, b"\xde\xad\xbe\xef");
 }
