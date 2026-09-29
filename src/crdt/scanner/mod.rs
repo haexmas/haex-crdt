@@ -70,6 +70,10 @@ pub struct ColumnChange {
     pub row_pks: String,
     pub column_name: String,
     pub hlc_timestamp: String,
+    /// The column's value: NULL, number and TEXT map to the plain JSON
+    /// counterpart; a BLOB is the tagged object `{"$blob_hex":"<lowercase
+    /// hex>"}` ([`crate::BLOB_HEX_TAG`]), which apply decodes back to a
+    /// BLOB.
     pub value: JsonValue,
     pub device_id: String,
     /// Raw entry from the column-signature map keyed by `column_name` if
@@ -197,6 +201,10 @@ pub struct ScanFilters<'a> {
 /// must produce PK JSON in the same order or `HashSet::contains` will
 /// miss composite-PK rows declared in non-alphabetical order like
 /// `(col_b, col_a)`.
+///
+/// PK values use the same encoding as [`ColumnChange::value`], so a BLOB
+/// key is spelled `{"id":{"$blob_hex":"deadbeef"}}` — the form the
+/// BEFORE-DELETE trigger writes into the delete log as well.
 pub fn scan_table_for_local_changes(
     conn: &Connection,
     table_name: &str,

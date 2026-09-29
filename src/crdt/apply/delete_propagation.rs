@@ -21,6 +21,7 @@ use serde_json::Value as JsonValue;
 use crate::crdt::columns::{COLUMN_HLCS_COLUMN, DELETED_ROWS_TABLE, HLC_TIMESTAMP_COLUMN};
 use crate::crdt::hlc::compare_hlc_strings;
 use crate::crdt::trigger::{get_table_schema, is_safe_identifier};
+use crate::db::core::ValueConverter;
 use crate::db::error::DatabaseError;
 
 use super::grouping::build_pk_where_from_map;
@@ -98,10 +99,12 @@ pub fn load_delete_shadow_map(tx: &Transaction<'_>) -> Result<DeleteShadowMap, D
 /// serializer- and order-agnostic) carries a shadowing HLC.
 ///
 /// Match is type-strict (`serde_json::Value` equality): a PK serialized as
-/// a JSON number on one side and a string on the other will NOT match. In
-/// practice the delete-tracked tables use TEXT (UUID) PKs, so this is safe
-/// today. A miss here fails toward NOT suppressing (status-quo
-/// resurrection), never toward a wrong suppression of a valid write.
+/// a JSON number on one side and a string on the other will NOT match. A
+/// BLOB PK is the tagged `{"$blob_hex":…}` object on both sides — the
+/// scanner and the BEFORE-DELETE trigger spell it identically — so it
+/// matches like any other value. A miss here fails toward NOT suppressing
+/// (status-quo resurrection), never toward a wrong suppression of a valid
+/// write.
 pub fn insert_suppressed_by_deletes(
     insert_pks: &serde_json::Map<String, JsonValue>,
     insert_hlc: &str,
@@ -186,8 +189,13 @@ pub fn propagate_deleted_rows_to_target_tables(
             Some(parts) => parts,
             None => continue,
         };
-        let sql_params: Vec<rusqlite::types::Value> =
-            values.iter().map(json_to_sql_value).collect();
+        // Same conversion the write path bound the row's PKs with, so a
+        // BLOB key (`{"$blob_hex":…}`) matches the stored BLOB. A malformed
+        // tag makes the entry malformed: skip it.
+        let sql_params = match ValueConverter::convert_params(&values) {
+            Ok(params) => params,
+            Err(_) => continue,
+        };
         let param_refs: Vec<&dyn rusqlite::ToSql> = sql_params
             .iter()
             .map(|v| v as &dyn rusqlite::ToSql)
@@ -214,30 +222,6 @@ pub fn propagate_deleted_rows_to_target_tables(
         tx.execute(&delete_sql, param_refs.as_slice())?;
     }
     Ok(())
-}
-
-/// Convert `serde_json::Value` PK values into `rusqlite::types::Value`. Only
-/// the PK-viable variants are covered — bool/object/array PKs are extremely
-/// unusual and fall back to text via `to_string`, which is safe for the
-/// equality comparisons this module builds but may not round-trip. Delete-
-/// tracked tables use TEXT UUIDs today so this is a defensive fallback.
-fn json_to_sql_value(v: &JsonValue) -> rusqlite::types::Value {
-    use rusqlite::types::Value;
-    match v {
-        JsonValue::Null => Value::Null,
-        JsonValue::Bool(b) => Value::Integer(if *b { 1 } else { 0 }),
-        JsonValue::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Value::Integer(i)
-            } else if let Some(f) = n.as_f64() {
-                Value::Real(f)
-            } else {
-                Value::Text(n.to_string())
-            }
-        }
-        JsonValue::String(s) => Value::Text(s.clone()),
-        other => Value::Text(other.to_string()),
-    }
 }
 
 #[cfg(test)]

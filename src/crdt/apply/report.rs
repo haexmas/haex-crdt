@@ -92,8 +92,9 @@ pub enum SkipReason {
     MissingTable,
     /// The table exists but does not carry both CRDT metadata columns.
     MissingCrdtMetadata,
-    /// The row's PK map failed to parse, or did not name exactly the
-    /// table's PK columns.
+    /// The row's PK map failed to parse, did not name exactly the table's
+    /// PK columns, or carried a PK value that cannot be bound (a malformed
+    /// `{"$blob_hex":…}` tag).
     InvalidRowIdentity,
     /// The column is not present in the local table's schema.
     UnknownColumn,

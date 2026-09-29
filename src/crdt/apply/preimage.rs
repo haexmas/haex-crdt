@@ -29,6 +29,9 @@
 use serde_json::Value as JsonValue;
 
 use crate::crdt::scanner::ColumnChange;
+use crate::db::core::ValueConverter;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use rusqlite::types::Value as SqlValue;
 
 /// Build the canonical signature preimage for `change` — the byte sequence
 /// the provider signs on the local side and verifies on the remote side.
@@ -96,6 +99,60 @@ pub fn column_sig_preimage_from_parts(
     ])
 }
 
+/// Build the preimage used before BLOBs switched from base64 strings to tagged
+/// hexadecimal objects. This is only for verifying signatures persisted by
+/// older versions; new signatures always use [`column_sig_preimage`].
+pub(crate) fn legacy_column_sig_preimage(change: &ColumnChange) -> Option<Vec<u8>> {
+    let legacy_value = legacy_blob_value(&change.value);
+    let legacy_row_pks = legacy_blob_row_pks(&change.row_pks);
+    if legacy_value.is_none() && legacy_row_pks.is_none() {
+        return None;
+    }
+
+    let value = legacy_value.as_ref().unwrap_or(&change.value);
+    let row_pks = legacy_row_pks.as_deref().unwrap_or(&change.row_pks);
+    Some(column_sig_preimage_from_parts(
+        &change.table_name,
+        row_pks,
+        &change.column_name,
+        &change.hlc_timestamp,
+        value,
+    ))
+}
+
+fn legacy_blob_value(value: &JsonValue) -> Option<JsonValue> {
+    let SqlValue::Blob(bytes) = ValueConverter::json_to_rusqlite_value(value).ok()? else {
+        return None;
+    };
+    Some(JsonValue::String(STANDARD.encode(bytes)))
+}
+
+fn legacy_blob_row_pks(row_pks: &str) -> Option<String> {
+    let JsonValue::Object(values) = serde_json::from_str(row_pks).ok()? else {
+        return None;
+    };
+
+    let replacements: Vec<(String, String)> = values
+        .values()
+        .filter_map(|value| {
+            let legacy_value = legacy_blob_value(value)?;
+            Some((
+                serde_json::to_string(value).ok()?,
+                serde_json::to_string(&legacy_value).ok()?,
+            ))
+        })
+        .collect();
+    if replacements.is_empty() {
+        return None;
+    }
+
+    let mut legacy = row_pks.to_string();
+    for (current, old) in replacements {
+        legacy = legacy.replace(&current, &old);
+    }
+    Some(legacy)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,6 +218,19 @@ mod tests {
             column_sig_preimage(&one),
             column_sig_preimage_from_parts("t", "r", "c", "1", &two.value),
         );
+    }
+
+    #[test]
+    fn blob_value_preimage_differs_from_text_spelling_the_tag() {
+        // The tagged BLOB object is a JSON object, the lookalike a JSON
+        // string, so the signed bytes keep the storage type apart.
+        let blob = change("t", "r", "c", "1", json!({"$blob_hex": "deadbeef"}));
+        let text = change("t", "r", "c", "1", json!(r#"{"$blob_hex":"deadbeef"}"#));
+        assert_eq!(
+            column_sig_preimage(&blob),
+            column_sig_preimage(&blob.clone())
+        );
+        assert_ne!(column_sig_preimage(&blob), column_sig_preimage(&text));
     }
 
     #[test]

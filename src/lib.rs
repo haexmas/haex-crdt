@@ -66,7 +66,7 @@ pub use db::core::{
     convert_value_ref_to_json, extract_primary_table_name_from_sql, extract_table_names_from_sql,
     extract_table_names_from_statement, install_tx_hlc_hooks, open_and_init_db,
     parse_single_statement, parse_sql_statements, register_current_hlc_udf,
-    statement_has_returning, strip_main_schema_prefix, ValueConverter,
+    statement_has_returning, strip_main_schema_prefix, ValueConverter, BLOB_HEX_TAG,
     DRIZZLE_STATEMENT_BREAKPOINT, MAX_CRDT_TRANSACTION_BYTES,
 };
 pub use db::init::{

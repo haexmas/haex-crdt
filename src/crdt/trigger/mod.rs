@@ -20,6 +20,7 @@ use crate::crdt::columns::{
     COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN, DELETED_ROWS_TABLE, HLC_FUNCTION_NAME,
     HLC_TIMESTAMP_COLUMN, UUID_FUNCTION_NAME,
 };
+use crate::db::core::BLOB_HEX_TAG;
 use crate::table_names::{TABLE_CRDT_CONFIGS, TABLE_CRDT_DIRTY_TABLES};
 use rusqlite::{Connection, Result as RusqliteResult, Row, Transaction};
 use serde::Serialize;
@@ -345,9 +346,20 @@ fn generate_update_trigger_sql(
 fn generate_delete_trigger_sql(table_name: &str, pks: &[String]) -> String {
     let trigger_name = DELETE_TRIGGER_TPL.replace("{TABLE_NAME}", table_name);
 
+    // `json_object` refuses a BLOB argument ("JSON cannot hold BLOB
+    // values"), so a BLOB key is spelled as the tagged object the scanner
+    // emits for it: `{"$blob_hex":"<lowercase hex>"}` (see
+    // `crate::db::core::value::BLOB_HEX_TAG`). The nested `json_object`
+    // keeps its JSON subtype through the CASE, so it embeds as an object.
     let row_pks_json = pks
         .iter()
-        .map(|name| format!("'{name}', OLD.\"{name}\""))
+        .map(|name| {
+            format!(
+                "'{name}', CASE WHEN typeof(OLD.\"{name}\") = 'blob' \
+                 THEN json_object('{BLOB_HEX_TAG}', lower(hex(OLD.\"{name}\"))) \
+                 ELSE OLD.\"{name}\" END"
+            )
+        })
         .collect::<Vec<_>>()
         .join(", ");
 
