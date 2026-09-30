@@ -7,17 +7,25 @@
 //!
 //! The `write_pending` flag prevents a stray read-only `SELECT current_hlc()`
 //! from poisoning the HLC of a later write transaction: the cache is only
-//! reused when the update_hook has observed at least one row-level
+//! reused when the preupdate_hook has observed at least one row-level
 //! INSERT/UPDATE/DELETE in the current transaction.
 
 use crate::crdt::hlc::{HlcError, HlcService};
+use std::collections::BTreeSet;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
 use uhlc::Timestamp;
+
+/// Called with the names of the tables a transaction changed, when that
+/// transaction commits. See [`crate::Database::observe_committed_changes`].
+pub type ChangeObserver = Arc<dyn Fn(&BTreeSet<String>) + Send + Sync>;
 
 #[derive(Clone)]
 pub struct ConnectionContext {
     tx_hlc_slot: Arc<Mutex<Option<Timestamp>>>,
     write_pending: Arc<Mutex<bool>>,
+    changed_tables: Arc<Mutex<BTreeSet<String>>>,
+    observer: Arc<Mutex<Option<ChangeObserver>>>,
 }
 
 impl ConnectionContext {
@@ -25,13 +33,64 @@ impl ConnectionContext {
         ConnectionContext {
             tx_hlc_slot: Arc::new(Mutex::new(None)),
             write_pending: Arc::new(Mutex::new(false)),
+            changed_tables: Arc::new(Mutex::new(BTreeSet::new())),
+            observer: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Installs (or, with `None`, removes) the observer told about committed changes.
+    pub fn set_observer(&self, observer: Option<ChangeObserver>) {
+        if let Ok(mut slot) = self.observer.lock() {
+            *slot = observer;
+        }
+    }
+
+    /// Remembers that `table` changed in the current transaction. Called from the
+    /// connection's `preupdate_hook`.
+    pub fn record_change(&self, table: &str) {
+        // The crate's own bookkeeping (HLC state, dirty marks, migration journals) is no
+        // consumer data.
+        if table.starts_with("haex_crdt_") || table.starts_with("haex_app_migrations_") {
+            return;
+        }
+        if let Ok(mut tables) = self.changed_tables.lock() {
+            if !tables.contains(table) {
+                tables.insert(table.to_string());
+            }
+        }
+    }
+
+    /// Hands the tables changed in the current transaction to the observer and forgets them.
+    /// Called from the `commit_hook`, so it must never panic: a poisoned mutex or a panicking
+    /// observer is swallowed.
+    pub fn publish_changes(&self) {
+        let changed = match self.changed_tables.lock() {
+            Ok(mut tables) => std::mem::take(&mut *tables),
+            Err(_) => return,
+        };
+        if changed.is_empty() {
+            return;
+        }
+        let observer = match self.observer.lock() {
+            Ok(slot) => slot.clone(),
+            Err(_) => return,
+        };
+        if let Some(observer) = observer {
+            let _ = catch_unwind(AssertUnwindSafe(|| observer(&changed)));
+        }
+    }
+
+    /// Forgets the tables changed in the current transaction. Called from the `rollback_hook`.
+    pub fn discard_changes(&self) {
+        if let Ok(mut tables) = self.changed_tables.lock() {
+            tables.clear();
         }
     }
 
     /// Returns the HLC for the current transaction. Before any write, each
     /// call draws a fresh timestamp — read-only probes therefore never pin a
     /// value that a later write transaction could inherit. Once
-    /// [`Self::mark_write_pending`] fires from the update_hook, subsequent
+    /// [`Self::mark_write_pending`] fires from the preupdate_hook, subsequent
     /// calls within the same transaction return the first cached value until
     /// commit or rollback.
     pub fn current_or_new_tx_hlc(&self, hlc_service: &HlcService) -> Result<Timestamp, HlcError> {
@@ -54,7 +113,7 @@ impl ConnectionContext {
     }
 
     /// Signals that a row-level write happened in the current transaction.
-    /// Called from the connection's `update_hook` on every INSERT/UPDATE/DELETE
+    /// Called from the connection's `preupdate_hook` on every INSERT/UPDATE/DELETE
     /// so the next `current_or_new_tx_hlc` call can safely treat the cached
     /// slot as transaction-scoped instead of a stale read-only probe.
     pub fn mark_write_pending(&self) {

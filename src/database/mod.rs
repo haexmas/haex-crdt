@@ -85,6 +85,7 @@ pub struct Database {
 
 struct DatabaseInner {
     conn: Mutex<Connection>,
+    context: ConnectionContext,
     hlc: HlcService,
     signature_provider: Arc<dyn SignatureProvider>,
     #[allow(dead_code)] // kept for future re-check / diagnostics
@@ -126,7 +127,7 @@ impl Database {
             config.key.as_str(),
             config.create_if_missing,
             hlc.clone(),
-            ctx,
+            ctx.clone(),
         )?;
 
         run_migrations(&mut conn, config.migration_source.as_ref())?;
@@ -156,6 +157,7 @@ impl Database {
         Ok(Database {
             inner: Arc::new(DatabaseInner {
                 conn: Mutex::new(conn),
+                context: ctx,
                 hlc,
                 signature_provider: config.signature_provider,
                 migration_source: config.migration_source,
@@ -164,6 +166,25 @@ impl Database {
                 lock,
             }),
         })
+    }
+
+    /// Tells `observer` which tables each committed transaction changed, whatever wrote them: a
+    /// [`Self::write`], a remote batch applied by the apply pipeline, or raw SQL through
+    /// [`Self::with_connection`]. Replaces the previous observer.
+    ///
+    /// The observer runs on the writing thread inside SQLite's commit hook, with the connection
+    /// still locked: it must return quickly, must not touch this `Database`, and should only
+    /// queue the names for another thread. It sees every table, including `_no_sync` tables, but not
+    /// the crate's own bookkeeping tables (`haex_crdt_*`, `haex_app_migrations_*`); a consumer
+    /// that wants fewer filters them. Tables are
+    /// reported per transaction, deduplicated. A commit that SQLite then fails to finish (a full
+    /// disk) has still been reported, so treat a report as "may have changed". A panic in the
+    /// observer is swallowed.
+    pub fn observe_committed_changes(
+        &self,
+        observer: impl Fn(&std::collections::BTreeSet<String>) + Send + Sync + 'static,
+    ) {
+        self.inner.context.set_observer(Some(Arc::new(observer)));
     }
 
     /// The HLC service this store owns. Callers that want to observe the

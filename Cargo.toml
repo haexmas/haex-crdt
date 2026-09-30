@@ -23,6 +23,7 @@ rusqlite = { version = "0.40", features = [
     "bundled-sqlcipher-vendored-openssl",
     "functions",
     "hooks",
+    "preupdate_hook",
 ] }
 uhlc = "0.9"
 uuid = { version = "1", features = ["v4", "serde"] }
