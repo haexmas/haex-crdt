@@ -134,11 +134,11 @@ pub fn register_current_hlc_udf(
     })
 }
 
-/// Wires commit_hook, rollback_hook and update_hook so the per-transaction
+/// Wires commit_hook, rollback_hook and preupdate_hook so the per-transaction
 /// HLC slot behaves correctly:
 ///
 /// - `commit_hook` / `rollback_hook` clear the slot at end-of-transaction.
-/// - `update_hook` flips the write-pending flag on the first row-level
+/// - `preupdate_hook` flips the write-pending flag on the first row-level
 ///   INSERT/UPDATE/DELETE, so a stray read-only `SELECT current_hlc()`
 ///   cannot poison the HLC of a later write. It also records the table, which
 ///   `commit_hook` hands to the change observer and `rollback_hook` discards.
@@ -168,14 +168,14 @@ pub fn install_tx_hlc_hooks(
     })?;
 
     let ctx_update = context;
-    conn.update_hook(Some(
-        move |_action, _db: &str, table: &str, _row_id: i64| {
+    conn.preupdate_hook(Some(
+        move |_action, _db: &str, table: &str, _case: &rusqlite::hooks::PreUpdateCase| {
             ctx_update.mark_write_pending();
             ctx_update.record_change(table);
         },
     ))
     .map_err(|source| DatabaseError::SqliteStep {
-        step: "install update_hook".to_string(),
+        step: "install preupdate_hook".to_string(),
         source,
     })?;
     Ok(())

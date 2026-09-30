@@ -16,8 +16,7 @@ use uuid::Uuid;
 
 type Seen = Arc<Mutex<Vec<BTreeSet<String>>>>;
 
-/// A store with two device-local tables, `alpha_no_sync` and `beta_no_sync`, and an observer that
-/// collects every report.
+/// A store with device-local tables and an observer that collects every report.
 fn open_observed() -> (TempDir, Database, Seen) {
     let dir = TempDir::new().expect("tempdir");
     let mut migrations = BTreeMap::new();
@@ -25,7 +24,12 @@ fn open_observed() -> (TempDir, Database, Seen) {
         MigrationName::from("0001_tables"),
         "CREATE TABLE alpha_no_sync (id TEXT PRIMARY KEY NOT NULL, body TEXT);\n\
          --> statement-breakpoint\n\
-         CREATE TABLE beta_no_sync (id TEXT PRIMARY KEY NOT NULL, body TEXT);"
+         CREATE TABLE beta_no_sync (id TEXT PRIMARY KEY NOT NULL, body TEXT);
+         --> statement-breakpoint
+         CREATE TABLE gamma_no_sync (
+             id TEXT PRIMARY KEY NOT NULL,
+             body TEXT
+         ) WITHOUT ROWID;"
             .to_string(),
     );
     let db = Database::open(DatabaseConfig {
@@ -119,6 +123,20 @@ fn raw_sql_and_a_read_are_told_apart() {
     })
     .expect("read");
     assert_eq!(seen.lock().unwrap().len(), 1, "a read reports nothing");
+}
+
+#[test]
+fn a_without_rowid_write_is_reported() {
+    let (_dir, db, seen) = open_observed();
+
+    db.with_connection(|conn| {
+        conn.execute("INSERT INTO gamma_no_sync (id, body) VALUES ('g', '1')", [])
+            .map_err(haex_crdt::db::error::DatabaseError::from)?;
+        Ok(())
+    })
+    .expect("raw write");
+
+    assert_eq!(*seen.lock().unwrap(), vec![names(&["gamma_no_sync"])]);
 }
 
 #[test]

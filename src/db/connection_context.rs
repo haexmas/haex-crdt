@@ -7,7 +7,7 @@
 //!
 //! The `write_pending` flag prevents a stray read-only `SELECT current_hlc()`
 //! from poisoning the HLC of a later write transaction: the cache is only
-//! reused when the update_hook has observed at least one row-level
+//! reused when the preupdate_hook has observed at least one row-level
 //! INSERT/UPDATE/DELETE in the current transaction.
 
 use crate::crdt::hlc::{HlcError, HlcService};
@@ -46,7 +46,7 @@ impl ConnectionContext {
     }
 
     /// Remembers that `table` changed in the current transaction. Called from the
-    /// connection's `update_hook`.
+    /// connection's `preupdate_hook`.
     pub fn record_change(&self, table: &str) {
         // The crate's own bookkeeping (HLC state, dirty marks, migration journals) is no
         // consumer data.
@@ -90,7 +90,7 @@ impl ConnectionContext {
     /// Returns the HLC for the current transaction. Before any write, each
     /// call draws a fresh timestamp — read-only probes therefore never pin a
     /// value that a later write transaction could inherit. Once
-    /// [`Self::mark_write_pending`] fires from the update_hook, subsequent
+    /// [`Self::mark_write_pending`] fires from the preupdate_hook, subsequent
     /// calls within the same transaction return the first cached value until
     /// commit or rollback.
     pub fn current_or_new_tx_hlc(&self, hlc_service: &HlcService) -> Result<Timestamp, HlcError> {
@@ -113,7 +113,7 @@ impl ConnectionContext {
     }
 
     /// Signals that a row-level write happened in the current transaction.
-    /// Called from the connection's `update_hook` on every INSERT/UPDATE/DELETE
+    /// Called from the connection's `preupdate_hook` on every INSERT/UPDATE/DELETE
     /// so the next `current_or_new_tx_hlc` call can safely treat the cached
     /// slot as transaction-scoped instead of a stale read-only probe.
     pub fn mark_write_pending(&self) {
