@@ -31,6 +31,7 @@ mod signature_policy;
 mod write;
 
 pub use engine::apply_remote_changes;
+pub(crate) use engine::toggle_triggers;
 pub use policy::ApplyPolicy;
 pub use policy_types::{
     ColumnDecision, ConstraintDecision, IndexedChange, RowDecision, RowInput, RowWrite,

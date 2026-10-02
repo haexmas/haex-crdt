@@ -47,11 +47,14 @@
 //!    Rows that already carry an HLC are left alone.
 
 pub mod config;
+pub mod guard;
 mod install;
+pub mod schema;
 mod stamp;
 mod write;
 
 pub use config::{DatabaseConfig, InstallCrdtOptions, SqlCipherKey, DEFAULT_TRIGGER_VERSION};
+pub use guard::{GuardedWriteOptions, QueryRows, SqlAuthorizer, SqlGuard, SqlProgress};
 pub use write::{serialized_parameter_bytes, CrdtTransaction, ReadOnlyConnection};
 
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};

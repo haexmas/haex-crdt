@@ -34,6 +34,10 @@ view exposes `query_row` and `query_map`; SQLite's `query_only` mode and an
 authorizer reject writes, PRAGMA changes, and transaction control, so a read
 path cannot bypass the CRDT transformer.
 
+`db.write_guarded(&guard, |tx| { ... })` and `db.read_guarded(&guard, |connection| { ... })` do the same for SQL from a less trusted caller. The `SqlGuard` carries a SQLite authorizer and an optional progress callback; both are active only while the caller's statement is prepared and stepped, never around the crate's own statements (reading and persisting the HLC, trigger setup, the foreign key check). Trigger bodies are authorized with the trigger name (`z_dirty_<table>_*`) as accessor. On reads the authorizer is combined with the read-only rule. A denial is `SqlGuardDenied`, a second statement in the SQL `MultipleStatements`, and a progress callback returning `true` interrupts the statement (`SqlGuardInterrupted`) and rolls the whole transaction back. `query_with_columns` returns the column names also for an empty result.
+
+`db.write_guarded_with(&guard, GuardedWriteOptions { schema_mode, local }, ...)` is for migrations. In every guarded write a `CREATE TABLE` or `ALTER TABLE` of a synced table recreates its triggers in the same transaction (under the new name after `RENAME TO`). Schema mode switches foreign keys off before the transaction and runs `PRAGMA foreign_key_check` before the commit; `tx.copy_rows_verbatim("INSERT INTO __new_x (...) SELECT ... FROM x")` copies a table rebuild with the CRDT columns unchanged and the triggers off, so Drizzle's rebuild sequence neither re-stamps rows nor writes delete markers. Local mode creates tables without CRDT columns and triggers; writes to a table without CRDT columns pass through unstamped, tables with them are still stamped.
+
 ## rusqlite version contract
 
 `write` and `read` take and hand out `rusqlite` types (`ToSql`, `Row`), and

@@ -10,6 +10,10 @@
 //!   existed
 //! - [`write`] — `write` / `read`: one HLC per transaction, rollback, size
 //!   limit, BLOB parameters, read-only guard
+//! - [`guarded`] — `write_guarded` / `read_guarded`: authorizer window,
+//!   typed denial, statement tail, progress interrupt, column names
+//! - [`guarded_schema`] — schema changes in a guarded write: triggers,
+//!   schema mode, verbatim rebuild, local mode
 //!
 //! Tests use a temp-file SQLCipher DB rather than `:memory:` —
 //! `Database::open` insists on WAL journaling which `:memory:` cannot provide.
@@ -27,6 +31,8 @@ use crate::migration::{MigrationName, StaticMigrationSource};
 use crate::signature::{AuthorId, NoopSignatureProvider, SignatureProvider};
 
 mod delegates;
+mod guarded;
+mod guarded_schema;
 mod install_crdt;
 mod open;
 mod stamp;

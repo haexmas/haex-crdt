@@ -142,7 +142,9 @@ pub fn apply_remote_changes(
     Ok(outcome)
 }
 
-fn toggle_triggers(tx: &Transaction<'_>, value: &str) -> Result<()> {
+/// Sets the `triggers_enabled` gate every CRDT trigger consults to `value`
+/// (`'0'` or `'1'`).
+pub(crate) fn toggle_triggers(tx: &Transaction<'_>, value: &str) -> Result<()> {
     tx.execute(
         &format!(
             "INSERT INTO {TABLE_CRDT_CONFIGS} (key, type, value) \

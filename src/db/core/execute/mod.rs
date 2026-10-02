@@ -12,7 +12,7 @@ use crate::db::core::parsing::parse_single_statement;
 use crate::db::core::prefix::strip_main_schema_prefix;
 use crate::db::error::DatabaseError;
 use rusqlite::Transaction;
-use sqlparser::ast::{AssignmentTarget, ObjectName, Statement, TableFactor};
+use sqlparser::ast::{AssignmentTarget, ObjectName, SetExpr, Statement, TableFactor};
 use std::str::FromStr;
 use uhlc::Timestamp;
 
@@ -29,8 +29,20 @@ pub const MAX_CRDT_TRANSACTION_BYTES: usize = 100 * 1024 * 1024;
 /// over this write — an attacker could then mint a valid signature over an
 /// arbitrary HLC. Hard rejection is the only safe choice. `ON CONFLICT … DO
 /// UPDATE` assignments are checked by the transformer itself.
+///
+/// Also rejects an `INSERT` or `UPDATE` behind a `WITH` clause: sqlparser
+/// reads it as a query, so neither the meta column check nor the
+/// transformer would see the write and it would run unstamped.
 pub(crate) fn parse_crdt_write(sql: &str) -> Result<Statement, DatabaseError> {
     let statement = parse_single_statement(sql)?;
+    if let Statement::Query(query) = &statement {
+        if matches!(*query.body, SetExpr::Insert(_) | SetExpr::Update(_)) {
+            return Err(DatabaseError::UnsupportedStatement {
+                reason: "an INSERT or UPDATE behind a WITH clause cannot be stamped".to_string(),
+                sql: sql.to_string(),
+            });
+        }
+    }
     if let Some(column) = explicitly_written_columns(&statement)
         .into_iter()
         .find(|c| is_crdt_meta_column(c))
@@ -41,16 +53,19 @@ pub(crate) fn parse_crdt_write(sql: &str) -> Result<Statement, DatabaseError> {
 }
 
 /// Stamps `statement` with the transaction-scoped HLC through the CRDT
-/// transformer and returns the HLC together with the SQL to run.
+/// transformer and returns the HLC, the SQL to run and — for a `CREATE
+/// TABLE` or `ALTER TABLE` on a synced table — the (lowercased) name of the
+/// table whose schema the statement changes.
 pub(crate) fn transform_write(
     tx: &Transaction,
     hlc_service: &HlcService,
     statement: &mut Statement,
-) -> Result<(Timestamp, String), DatabaseError> {
+) -> Result<(Timestamp, String, Option<String>), DatabaseError> {
     let hlc_timestamp = tx_scoped_hlc(tx, hlc_service)?;
-    CrdtTransformer::new().transform_execute_statement(statement, &hlc_timestamp)?;
+    let schema_changed =
+        CrdtTransformer::new().transform_execute_statement(statement, &hlc_timestamp)?;
     let sql = strip_main_schema_prefix(&statement.to_string());
-    Ok((hlc_timestamp, sql))
+    Ok((hlc_timestamp, sql, schema_changed))
 }
 
 /// Reads the transaction-scoped HLC, aligns [`HlcService`] with it, and

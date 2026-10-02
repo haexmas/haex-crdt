@@ -8,8 +8,9 @@ use sqlparser::dialect::SQLiteDialect;
 use sqlparser::parser::Parser;
 
 /// Parses exactly one SQL statement, erroring if the input is empty or
-/// unparseable. Trailing statements after the first are dropped without
-/// warning (mirrors haex-vault behavior; callers pass single statements).
+/// unparseable. Only whitespace, comments and semicolons may follow the
+/// statement; a second statement is a [`DatabaseError::MultipleStatements`]
+/// error instead of being dropped.
 pub fn parse_single_statement(sql: &str) -> Result<Statement, DatabaseError> {
     let dialect = SQLiteDialect {};
     let statements =
@@ -18,12 +19,18 @@ pub fn parse_single_statement(sql: &str) -> Result<Statement, DatabaseError> {
             source,
         })?;
 
-    statements
-        .into_iter()
+    let mut statements = statements.into_iter();
+    let first = statements
         .next()
         .ok_or_else(|| DatabaseError::EmptyStatement {
             sql: sql.to_string(),
-        })
+        })?;
+    if statements.next().is_some() {
+        return Err(DatabaseError::MultipleStatements {
+            sql: sql.to_string(),
+        });
+    }
+    Ok(first)
 }
 
 /// Parses one or more SQL statements while preserving the original SQL text,

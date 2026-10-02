@@ -113,3 +113,13 @@ fn strip_main_schema_preserves_string_literals() {
     assert!(!result.contains("main.users"));
     assert!(result.contains("%main.table%"));
 }
+
+#[test]
+fn parse_single_statement_refuses_a_second_statement_but_not_a_trailing_comment() {
+    use crate::db::error::DatabaseError;
+
+    let err = parse_single_statement("SELECT 1; DELETE FROM t").unwrap_err();
+    assert!(matches!(err, DatabaseError::MultipleStatements { .. }));
+    assert!(parse_single_statement("SELECT 1; -- done\n").is_ok());
+    assert!(parse_single_statement("SELECT 1 /* x */ ;").is_ok());
+}
