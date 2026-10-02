@@ -406,3 +406,54 @@ fn a_denied_alter_keeps_the_tables_triggers() {
     assert_eq!(triggers(&db, "items"), crdt_triggers("items"));
     assert_eq!(columns(&db, "items").len(), 5);
 }
+
+#[test]
+fn a_temporary_table_never_touches_the_synced_tables_triggers() {
+    let (_fx, db) = open();
+    run(
+        &db,
+        GuardedWriteOptions::default(),
+        &["CREATE TEMP TABLE items (id TEXT PRIMARY KEY NOT NULL, body TEXT)"],
+    )
+    .unwrap();
+    assert_eq!(triggers(&db, "items"), crdt_triggers("items"));
+
+    let err = run(
+        &db,
+        GuardedWriteOptions::default(),
+        &["ALTER TABLE items ADD COLUMN extra TEXT"],
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            database_error(err),
+            DatabaseError::UnsupportedStatement { .. }
+        ),
+        "refused while a temporary table shadows the synced one"
+    );
+    assert_eq!(triggers(&db, "items"), crdt_triggers("items"));
+}
+
+#[test]
+fn copy_rows_verbatim_copies_only_between_main_tables() {
+    let (_fx, db) = open();
+    let err = db
+        .write_guarded_with(&allow_all(), SCHEMA, |tx| {
+            tx.execute(
+                "CREATE TABLE __new_items (id TEXT PRIMARY KEY NOT NULL, body TEXT)",
+                params![],
+            )?;
+            tx.copy_rows_verbatim(
+                "INSERT INTO __new_items (id, body) SELECT id, body FROM temp.items",
+                params![],
+            )
+        })
+        .unwrap_err();
+    assert!(
+        matches!(
+            database_error(err),
+            DatabaseError::UnsupportedStatement { .. }
+        ),
+        "refused"
+    );
+}

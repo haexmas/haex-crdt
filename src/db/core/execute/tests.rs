@@ -73,6 +73,27 @@ fn a_meta_column_inside_a_tuple_assignment_is_rejected() {
 }
 
 #[test]
+fn an_insert_or_update_behind_a_with_clause_is_rejected() {
+    for sql in [
+        format!("WITH c AS (SELECT 1) UPDATE items SET {HLC_TIMESTAMP_COLUMN} = 'forged'"),
+        format!(
+            "WITH c AS (SELECT 1) INSERT INTO items (id, {HLC_TIMESTAMP_COLUMN}) VALUES ('i1', 'f')"
+        ),
+        "WITH c AS (SELECT 1) UPDATE items SET name = 'x'".to_string(),
+    ] {
+        assert!(
+            matches!(
+                parse_crdt_write(&sql),
+                Err(DatabaseError::UnsupportedStatement { .. })
+            ),
+            "{sql}"
+        );
+    }
+    assert!(parse_crdt_write("WITH c AS (SELECT 1) SELECT * FROM c").is_ok());
+    assert!(parse_crdt_write("WITH c AS (SELECT 1) DELETE FROM items").is_ok());
+}
+
+#[test]
 fn ordinary_writes_parse() {
     assert!(parse_crdt_write("INSERT INTO items (id, name) VALUES ('i1', 'a')").is_ok());
     assert!(parse_crdt_write("UPDATE items SET name = 'b' WHERE id = 'i1'").is_ok());

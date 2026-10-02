@@ -344,6 +344,28 @@ fn a_progress_interrupt_rolls_back_the_transaction() {
 }
 
 #[test]
+fn a_progress_interrupt_is_a_typed_error_on_read() {
+    let (_fx, db) = open();
+    let guard = SqlGuard {
+        progress: Some((100, Arc::new(|| true))),
+        ..allow_all()
+    };
+
+    let err = db
+        .read_guarded(&guard, |conn| {
+            conn.query_with_columns(SLOW_QUERY, [], |row| row.get::<_, i64>(0))
+        })
+        .unwrap_err();
+    assert!(
+        matches!(
+            database_error(err),
+            DatabaseError::SqlGuardInterrupted { .. }
+        ),
+        "interrupt reported as such"
+    );
+}
+
+#[test]
 fn a_query_with_no_rows_still_reports_its_columns() {
     let (_fx, db) = open();
     let written = db

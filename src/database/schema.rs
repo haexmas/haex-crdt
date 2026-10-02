@@ -61,7 +61,9 @@ impl SchemaChange {
     /// reported as schema-modified.
     pub(crate) fn of(statement: &Statement, table: String) -> Option<Self> {
         match statement {
-            Statement::CreateTable(_) => Some(SchemaChange::Created { table }),
+            Statement::CreateTable(create) if !create.temporary => {
+                Some(SchemaChange::Created { table })
+            }
             Statement::AlterTable(alter) => Some(SchemaChange::Altered {
                 table,
                 renamed_to: renamed_to(&alter.operations),
@@ -176,13 +178,13 @@ pub(crate) fn rewrite_rebuild_copy(tx: &Transaction, statement: &mut Statement) 
         ));
     }
     let target = match &insert.table {
-        TableObject::TableName(name) => last_ident(name),
+        TableObject::TableName(name) => main_table(name),
         _ => None,
     };
     let source = insert.source.as_ref().and_then(|query| match &*query.body {
         SetExpr::Select(select) if select.from.len() == 1 && select.from[0].joins.is_empty() => {
             match &select.from[0].relation {
-                TableFactor::Table { name, .. } => last_ident(name),
+                TableFactor::Table { name, .. } => main_table(name),
                 _ => None,
             }
         }
@@ -190,7 +192,7 @@ pub(crate) fn rewrite_rebuild_copy(tx: &Transaction, statement: &mut Statement) 
     });
     let (Some(target), Some(source)) = (target, source) else {
         return Err(unsupported(
-            "expected INSERT INTO <table> (…) SELECT … FROM <table>",
+            "expected INSERT INTO <table> (…) SELECT … FROM <table> on main tables",
         ));
     };
     let wildcard = insert
@@ -288,7 +290,34 @@ pub(crate) fn foreign_key_check(tx: &Transaction) -> Result<()> {
 /// The stored name of `table` (matched without regard to case) when it
 /// exists and carries the row-level HLC column — the crate's definition of
 /// a synced table (see [`crate::discover_crdt_tables`]).
+///
+/// Fails when a temporary table of the same name shadows it: unqualified
+/// SQL, the trigger setup and `DROP TRIGGER` would then reach the temporary
+/// table or drop the synced table's triggers.
 fn crdt_table(tx: &Transaction, table: &str) -> Result<Option<String>> {
+    let Some(actual) = main_crdt_table(tx, table)? else {
+        return Ok(None);
+    };
+    let shadowed = tx
+        .query_row(
+            "SELECT 1 FROM sqlite_temp_master WHERE type = 'table' AND name = ?1 COLLATE NOCASE",
+            [table],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(DatabaseError::from)?
+        .is_some();
+    if shadowed {
+        return Err(DatabaseError::UnsupportedStatement {
+            sql: actual,
+            reason: "a temporary table shadows this synced table".to_string(),
+        }
+        .into());
+    }
+    Ok(Some(actual))
+}
+
+fn main_crdt_table(tx: &Transaction, table: &str) -> Result<Option<String>> {
     Ok(tx
         .query_row(
             &format!(
@@ -310,6 +339,15 @@ fn renamed_to(operations: &[AlterTableOperation]) -> Option<String> {
         } => last_ident(name),
         _ => None,
     })
+}
+
+/// The table name when `name` is unqualified or qualified with `main`.
+fn main_table(name: &ObjectName) -> Option<String> {
+    match name.0.as_slice() {
+        [_] => last_ident(name),
+        [schema, _] if schema.as_ident()?.value.eq_ignore_ascii_case("main") => last_ident(name),
+        _ => None,
+    }
 }
 
 fn last_ident(name: &ObjectName) -> Option<String> {

@@ -12,7 +12,7 @@ use crate::db::core::parsing::parse_single_statement;
 use crate::db::core::prefix::strip_main_schema_prefix;
 use crate::db::error::DatabaseError;
 use rusqlite::Transaction;
-use sqlparser::ast::{AssignmentTarget, ObjectName, Statement, TableFactor};
+use sqlparser::ast::{AssignmentTarget, ObjectName, SetExpr, Statement, TableFactor};
 use std::str::FromStr;
 use uhlc::Timestamp;
 
@@ -29,8 +29,20 @@ pub const MAX_CRDT_TRANSACTION_BYTES: usize = 100 * 1024 * 1024;
 /// over this write — an attacker could then mint a valid signature over an
 /// arbitrary HLC. Hard rejection is the only safe choice. `ON CONFLICT … DO
 /// UPDATE` assignments are checked by the transformer itself.
+///
+/// Also rejects an `INSERT` or `UPDATE` behind a `WITH` clause: sqlparser
+/// reads it as a query, so neither the meta column check nor the
+/// transformer would see the write and it would run unstamped.
 pub(crate) fn parse_crdt_write(sql: &str) -> Result<Statement, DatabaseError> {
     let statement = parse_single_statement(sql)?;
+    if let Statement::Query(query) = &statement {
+        if matches!(*query.body, SetExpr::Insert(_) | SetExpr::Update(_)) {
+            return Err(DatabaseError::UnsupportedStatement {
+                reason: "an INSERT or UPDATE behind a WITH clause cannot be stamped".to_string(),
+                sql: sql.to_string(),
+            });
+        }
+    }
     if let Some(column) = explicitly_written_columns(&statement)
         .into_iter()
         .find(|c| is_crdt_meta_column(c))

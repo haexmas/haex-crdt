@@ -94,15 +94,29 @@ impl ReadOnlyConnection<'_> {
 
     /// Like [`Self::query_map`], with the column names (also when no row
     /// comes back) and typed errors: [`DatabaseError::SqlGuardDenied`],
+    /// [`DatabaseError::SqlGuardInterrupted`],
     /// [`DatabaseError::MultipleStatements`].
     pub fn query_with_columns<T, P, F>(&self, sql: &str, params: P, f: F) -> Result<QueryRows<T>>
     where
         P: Params,
         F: FnMut(&Row<'_>) -> rusqlite::Result<T>,
     {
-        Ok(self
-            .guarded(|| query_rows(self.conn, sql, params, f))
-            .map_err(|source| statement_error(sql, source))?)
+        let run = || query_rows(self.conn, sql, params, f);
+        let result = match self.guard {
+            None => run(),
+            Some(guard) => {
+                let (result, interrupted) = run_guarded(self.conn, guard, GuardScope::Read, run)
+                    .map_err(DatabaseError::from)?;
+                if interrupted {
+                    return Err(DatabaseError::SqlGuardInterrupted {
+                        sql: sql.to_string(),
+                    }
+                    .into());
+                }
+                result
+            }
+        };
+        Ok(result.map_err(|source| statement_error(sql, source))?)
     }
 
     /// Runs `run` inside the guard window of [`Database::read_guarded`], or
