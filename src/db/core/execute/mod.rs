@@ -41,16 +41,19 @@ pub(crate) fn parse_crdt_write(sql: &str) -> Result<Statement, DatabaseError> {
 }
 
 /// Stamps `statement` with the transaction-scoped HLC through the CRDT
-/// transformer and returns the HLC together with the SQL to run.
+/// transformer and returns the HLC, the SQL to run and — for a `CREATE
+/// TABLE` or `ALTER TABLE` on a synced table — the (lowercased) name of the
+/// table whose schema the statement changes.
 pub(crate) fn transform_write(
     tx: &Transaction,
     hlc_service: &HlcService,
     statement: &mut Statement,
-) -> Result<(Timestamp, String), DatabaseError> {
+) -> Result<(Timestamp, String, Option<String>), DatabaseError> {
     let hlc_timestamp = tx_scoped_hlc(tx, hlc_service)?;
-    CrdtTransformer::new().transform_execute_statement(statement, &hlc_timestamp)?;
+    let schema_changed =
+        CrdtTransformer::new().transform_execute_statement(statement, &hlc_timestamp)?;
     let sql = strip_main_schema_prefix(&statement.to_string());
-    Ok((hlc_timestamp, sql))
+    Ok((hlc_timestamp, sql, schema_changed))
 }
 
 /// Reads the transaction-scoped HLC, aligns [`HlcService`] with it, and

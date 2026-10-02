@@ -141,6 +141,37 @@ pub enum DatabaseError {
     /// the whole statement — no silent stripping.
     #[error("CRDT meta column write is forbidden: '{column}' is managed by the CRDT layer and must not be set by callers")]
     CrdtMetaColumnWriteForbidden { column: String },
+
+    /// The SQL holds more than one statement. Only whitespace and comments
+    /// may follow the first one; a second statement is refused instead of
+    /// being dropped.
+    #[error("Only one SQL statement is allowed - SQL: {sql}")]
+    MultipleStatements { sql: String },
+
+    /// The [`crate::SqlGuard`] authorizer (or, in
+    /// [`crate::Database::read_guarded`], the read-only rule) refused the
+    /// statement while SQLite prepared it.
+    #[error("Statement not authorized: {source} - SQL: {sql}")]
+    SqlGuardDenied {
+        sql: String,
+        #[source]
+        source: rusqlite::Error,
+    },
+
+    /// The [`crate::SqlGuard`] progress callback asked SQLite to stop the
+    /// statement. The surrounding guarded write cannot commit any more.
+    #[error("Statement interrupted by the progress callback - SQL: {sql}")]
+    SqlGuardInterrupted { sql: String },
+
+    /// The write transaction was rolled back — by an interrupt or by SQLite
+    /// after a failed statement — and can neither run statements nor commit.
+    #[error("Transaction aborted: {reason}")]
+    TransactionAborted { reason: String },
+
+    /// `PRAGMA foreign_key_check` found rows without a parent at the end of
+    /// a schema-mode write; the transaction was rolled back.
+    #[error("Foreign key check failed in tables {tables:?}")]
+    ForeignKeyCheckFailed { tables: Vec<String> },
 }
 
 impl DatabaseError {
@@ -151,6 +182,7 @@ impl DatabaseError {
             DatabaseError::Sqlite(source)
             | DatabaseError::SqliteStep { source, .. }
             | DatabaseError::ExecutionError { source, .. }
+            | DatabaseError::SqlGuardDenied { source, .. }
             | DatabaseError::ConnectionFailed { source, .. }
             | DatabaseError::PragmaFailed { source, .. }
             | DatabaseError::Hlc(HlcError::Database(source))

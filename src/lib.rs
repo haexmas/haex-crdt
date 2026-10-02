@@ -9,6 +9,28 @@
 //! the CRDT implementation itself (triggers, scanner, apply pipeline, HLC
 //! service) is ported from `haex-vault` in a follow-up step.
 //!
+//! # Guarded SQL
+//!
+//! [`Database::write_guarded`] and [`Database::read_guarded`] run SQL from a
+//! less trusted caller (for example an extension) on the same paths as
+//! [`Database::write`] and [`Database::read`], with a consumer [`SqlGuard`]:
+//! a SQLite authorizer and an optional progress callback that are installed
+//! only while the caller's statement is prepared and stepped, never around the
+//! crate's own statements. Denials, interrupts and a second statement in the
+//! SQL are typed errors ([`db::error::DatabaseError::SqlGuardDenied`],
+//! [`db::error::DatabaseError::SqlGuardInterrupted`],
+//! [`db::error::DatabaseError::MultipleStatements`]); an interrupt rolls the
+//! whole transaction back. [`CrdtTransaction::query_with_columns`] reports the
+//! column names also for an empty result.
+//!
+//! [`Database::write_guarded_with`] takes [`GuardedWriteOptions`]: schema mode
+//! for migrations (foreign keys off, `foreign_key_check` before the commit,
+//! [`CrdtTransaction::copy_rows_verbatim`] for a table rebuild that keeps
+//! every row's CRDT metadata) and local mode for device-local tables without
+//! CRDT columns. In every guarded write a `CREATE TABLE` or `ALTER TABLE`
+//! recreates the table's triggers in the same transaction. See
+//! [`database::guard`] and [`database::schema`].
+//!
 //! # Public dependency version contract
 //!
 //! [`Database::write`], [`Database::read`] and the trait seams expose types
@@ -80,6 +102,9 @@ pub use table_names::{
 };
 
 pub use database::{
-    serialized_parameter_bytes, CrdtTransaction, Database, DatabaseConfig, InstallCrdtOptions,
-    ReadOnlyConnection, SqlCipherKey, DEFAULT_TRIGGER_VERSION,
+    serialized_parameter_bytes, CrdtTransaction, Database, DatabaseConfig, GuardedWriteOptions,
+    InstallCrdtOptions, QueryRows, ReadOnlyConnection, SqlAuthorizer, SqlCipherKey, SqlGuard,
+    SqlProgress, DEFAULT_TRIGGER_VERSION,
 };
+/// Re-export of the authorizer types a [`SqlGuard`] works with.
+pub use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
