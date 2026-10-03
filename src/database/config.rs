@@ -21,6 +21,10 @@ use crate::signature::SignatureProvider;
 /// upgrades the DB in place.
 pub const DEFAULT_TRIGGER_VERSION: i32 = 4;
 
+/// Default of [`DatabaseConfig::max_value_bytes`]: SQLite's own default for
+/// `SQLITE_LIMIT_LENGTH`, so a consumer that does not lower it sees no change.
+pub const MAX_VALUE_BYTES: usize = 1_000_000_000;
+
 /// SQLCipher encryption key, passed verbatim to `PRAGMA key = ?`. The wrapper
 /// is a passthrough newtype — the consumer decides whether to hand a
 /// passphrase (`"correct horse battery staple"`) or a raw-hex spelling
@@ -98,6 +102,18 @@ pub struct DatabaseConfig {
     /// storage, not in CRDT columns. Defaults to
     /// [`crate::MAX_CRDT_TRANSACTION_BYTES`].
     pub max_transaction_bytes: usize,
+    /// Upper bound for one string or BLOB value, and for one row, on the
+    /// connection (`SQLITE_LIMIT_LENGTH`). A statement that would build or
+    /// read a larger value fails with
+    /// [`crate::db::error::DatabaseError::ValueTooLarge`] before the value is
+    /// allocated. Unlike [`Self::max_transaction_bytes`] it also bounds values
+    /// SQL computes itself (`zeroblob`, `randomblob`, `printf`, `replace`,
+    /// `group_concat`). A [`crate::SqlGuard`] can lower it for one statement.
+    /// It also bounds the rows of `sqlite_master`, so it must leave room for
+    /// the SQL of every table and trigger.
+    /// Defaults to [`MAX_VALUE_BYTES`]; SQLite caps it at its compile-time
+    /// maximum.
+    pub max_value_bytes: usize,
 }
 
 /// Options controlling [`super::Database::install_crdt`]. Defaults to a fresh
@@ -133,6 +149,7 @@ mod tests {
             migration_source: Arc::new(StaticMigrationSource(BTreeMap::new())),
             trigger_version: DEFAULT_TRIGGER_VERSION,
             max_transaction_bytes: crate::MAX_CRDT_TRANSACTION_BYTES,
+            max_value_bytes: MAX_VALUE_BYTES,
         }
     }
 

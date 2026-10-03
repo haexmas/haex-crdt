@@ -356,6 +356,12 @@ impl Database {
         self.inner.max_transaction_bytes
     }
 
+    /// The upper bound for one value or row, see
+    /// [`super::DatabaseConfig::max_value_bytes`].
+    pub fn max_value_bytes(&self) -> usize {
+        self.inner.max_value_bytes
+    }
+
     /// The transaction behind [`Self::write`] and [`Self::write_guarded_with`]:
     /// the caller holds the connection lock; in schema mode foreign keys are
     /// already off.
