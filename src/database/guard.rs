@@ -19,6 +19,9 @@
 //!   [`DatabaseError::SqlGuardInterrupted`], and the guarded write can no
 //!   longer commit ([`DatabaseError::TransactionAborted`]): everything rolls
 //!   back.
+//! - [`SqlGuard::max_value_bytes`] lowers the connection's limit for one
+//!   value or row while the caller's statement runs; a larger value is
+//!   [`DatabaseError::ValueTooLarge`], before SQLite allocates it.
 //! - SQL with a second statement after the first is refused with
 //!   [`DatabaseError::MultipleStatements`]; whitespace and comments are fine.
 //! - [`CrdtTransaction::query_with_columns`] and
@@ -34,6 +37,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+use rusqlite::limits::Limit;
 use rusqlite::{Connection, ErrorCode};
 
 use super::{CrdtTransaction, Database, ReadOnlyConnection};
@@ -59,6 +63,18 @@ pub struct SqlGuard {
     /// `instructions` virtual machine steps of the caller's statement; `true`
     /// interrupts it. Use it for a runtime limit.
     pub progress: Option<(i32, SqlProgress)>,
+    /// Upper bound for one string or BLOB value, and for one row, while the
+    /// caller's statement runs (`SQLITE_LIMIT_LENGTH`): a larger value is
+    /// [`DatabaseError::ValueTooLarge`]. It only lowers
+    /// [`crate::DatabaseConfig::max_value_bytes`], never raises it. `None`
+    /// keeps the database's limit.
+    pub max_value_bytes: Option<usize>,
+}
+
+/// A byte count as a value for `sqlite3_limit` (SQLite caps it further at
+/// its compile-time maximum).
+pub(crate) fn limit_value(bytes: usize) -> i32 {
+    i32::try_from(bytes).unwrap_or(i32::MAX)
 }
 
 /// Modes of [`Database::write_guarded_with`]. The default is a plain
@@ -167,12 +183,15 @@ pub(crate) fn run_guarded<T>(
     run: impl FnOnce() -> rusqlite::Result<T>,
 ) -> rusqlite::Result<(rusqlite::Result<T>, bool)> {
     let interrupted = Arc::new(AtomicBool::new(false));
-    if let Err(error) = install(conn, guard, scope, &interrupted) {
-        let _ = uninstall(conn, scope);
-        return Err(error);
-    }
+    let previous_limit = match install(conn, guard, scope, &interrupted) {
+        Ok(previous_limit) => previous_limit,
+        Err(error) => {
+            let _ = uninstall(conn, scope, None);
+            return Err(error);
+        }
+    };
     let outcome = catch_unwind(AssertUnwindSafe(run));
-    let restored = uninstall(conn, scope);
+    let restored = uninstall(conn, scope, previous_limit);
     let result = match outcome {
         Ok(result) => result,
         Err(payload) => resume_unwind(payload),
@@ -181,12 +200,14 @@ pub(crate) fn run_guarded<T>(
     Ok((result, interrupted.load(Ordering::SeqCst)))
 }
 
+/// Installs the guard. Returns the value limit to put back, when the guard
+/// lowered it; that happens last, so a failed install leaves it untouched.
 fn install(
     conn: &Connection,
     guard: &SqlGuard,
     scope: GuardScope,
     interrupted: &Arc<AtomicBool>,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<Option<i32>> {
     let authorizer = Arc::clone(&guard.authorizer);
     match scope {
         GuardScope::Write => {
@@ -213,19 +234,33 @@ fn install(
             }),
         )?;
     }
-    Ok(())
+    let Some(bytes) = guard.max_value_bytes else {
+        return Ok(None);
+    };
+    let current = conn.limit(Limit::SQLITE_LIMIT_LENGTH)?;
+    conn.set_limit(Limit::SQLITE_LIMIT_LENGTH, current.min(limit_value(bytes)))?;
+    Ok(Some(current))
 }
 
-fn uninstall(conn: &Connection, scope: GuardScope) -> rusqlite::Result<()> {
+fn uninstall(
+    conn: &Connection,
+    scope: GuardScope,
+    previous_limit: Option<i32>,
+) -> rusqlite::Result<()> {
+    let limit = previous_limit.map_or(Ok(0), |previous| {
+        conn.set_limit(Limit::SQLITE_LIMIT_LENGTH, previous)
+    });
     conn.progress_handler(0, None::<fn() -> bool>)?;
     match scope {
-        GuardScope::Write => conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>),
-        GuardScope::Read => install_read_only(conn),
+        GuardScope::Write => conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?,
+        GuardScope::Read => install_read_only(conn)?,
     }
+    limit.map(drop)
 }
 
 /// Maps a SQLite failure of a statement to a typed error: a denial by the
-/// authorizer, a statement tail, or else an execution error carrying the SQL.
+/// authorizer, a statement tail, a value over the length limit, or else an
+/// execution error carrying the SQL.
 pub(crate) fn statement_error(sql: &str, source: rusqlite::Error) -> DatabaseError {
     if matches!(source, rusqlite::Error::MultipleStatement) {
         return DatabaseError::MultipleStatements {
@@ -236,6 +271,11 @@ pub(crate) fn statement_error(sql: &str, source: rusqlite::Error) -> DatabaseErr
         return DatabaseError::SqlGuardDenied {
             sql: sql.to_string(),
             source,
+        };
+    }
+    if source.sqlite_error_code() == Some(ErrorCode::TooBig) {
+        return DatabaseError::ValueTooLarge {
+            sql: sql.to_string(),
         };
     }
     DatabaseError::ExecutionError {

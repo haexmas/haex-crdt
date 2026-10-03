@@ -66,6 +66,7 @@ impl Fixture {
             migration_source,
             trigger_version: DEFAULT_TRIGGER_VERSION,
             max_transaction_bytes: crate::MAX_CRDT_TRANSACTION_BYTES,
+            max_value_bytes: crate::MAX_VALUE_BYTES,
         };
         Fixture {
             _tmp: tmp,

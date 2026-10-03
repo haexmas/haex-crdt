@@ -104,7 +104,7 @@ pub use table_names::{
 pub use database::{
     serialized_parameter_bytes, CrdtTransaction, Database, DatabaseConfig, GuardedWriteOptions,
     InstallCrdtOptions, QueryRows, ReadOnlyConnection, SqlAuthorizer, SqlCipherKey, SqlGuard,
-    SqlProgress, DEFAULT_TRIGGER_VERSION,
+    SqlProgress, DEFAULT_TRIGGER_VERSION, MAX_VALUE_BYTES,
 };
 /// Re-export of the authorizer types a [`SqlGuard`] works with.
 pub use rusqlite::hooks::{AuthAction, AuthContext, Authorization};

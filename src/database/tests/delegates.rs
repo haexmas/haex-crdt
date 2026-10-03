@@ -8,6 +8,8 @@ use super::{source, Fixture};
 use crate::crdt::cleanup::RetentionPolicy;
 use crate::crdt::hlc::device_uuid_to_hlc_node;
 use crate::crdt::scanner::ColumnChange;
+use crate::db::error::DatabaseError;
+use crate::error::Error;
 
 #[test]
 fn store_apply_remote_changes_uses_the_configured_signature_provider() {
@@ -28,6 +30,33 @@ fn store_apply_remote_changes_uses_the_configured_signature_provider() {
     }];
     let report = db.apply_remote_changes(changes).unwrap();
     assert_eq!(report.report.applied, 1);
+}
+
+#[test]
+fn store_apply_remote_value_over_limit_is_a_typed_error() {
+    let mut fx = Fixture::with_source(source(&[(
+        "0001_items",
+        "CREATE TABLE items (id TEXT PRIMARY KEY NOT NULL, body TEXT);",
+    )]));
+    fx.config.max_value_bytes = 100_000;
+    let db = Database::open(fx.config).unwrap();
+
+    let err = db
+        .apply_remote_changes(vec![ColumnChange {
+            table_name: "items".to_string(),
+            row_pks: r#"{"id":"r1"}"#.to_string(),
+            column_name: "body".to_string(),
+            hlc_timestamp: "9999999999999999/abcdef0000000000000000000000".to_string(),
+            value: json!("x".repeat(200_000)),
+            device_id: String::new(),
+            sig: None,
+        }])
+        .unwrap_err();
+
+    assert!(
+        matches!(err, Error::Database(DatabaseError::ValueTooLarge { .. })),
+        "got {err:?}"
+    );
 }
 
 #[test]

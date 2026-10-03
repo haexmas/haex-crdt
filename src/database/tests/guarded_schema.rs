@@ -39,6 +39,7 @@ fn allow_all() -> SqlGuard {
     SqlGuard {
         authorizer: Arc::new(|_: &AuthContext<'_>| Authorization::Allow),
         progress: None,
+        max_value_bytes: None,
     }
 }
 
@@ -391,6 +392,7 @@ fn a_denied_alter_keeps_the_tables_triggers() {
             _ => Authorization::Allow,
         }),
         progress: None,
+        max_value_bytes: None,
     };
     db.write_guarded(&guard, |tx| {
         let err = tx

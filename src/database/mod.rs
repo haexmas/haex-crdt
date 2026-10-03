@@ -53,7 +53,9 @@ pub mod schema;
 mod stamp;
 mod write;
 
-pub use config::{DatabaseConfig, InstallCrdtOptions, SqlCipherKey, DEFAULT_TRIGGER_VERSION};
+pub use config::{
+    DatabaseConfig, InstallCrdtOptions, SqlCipherKey, DEFAULT_TRIGGER_VERSION, MAX_VALUE_BYTES,
+};
 pub use guard::{GuardedWriteOptions, QueryRows, SqlAuthorizer, SqlGuard, SqlProgress};
 pub use write::{serialized_parameter_bytes, CrdtTransaction, ReadOnlyConnection};
 
@@ -95,6 +97,7 @@ struct DatabaseInner {
     migration_source: Arc<dyn MigrationSource>,
     device_uuid: Uuid,
     max_transaction_bytes: usize,
+    max_value_bytes: usize,
     /// Advisory file lock guarding the DB from cross-process concurrent
     /// mounts. Held for the lifetime of every clone of this `Database`;
     /// dropping the last clone releases the OS-level lock via `Drop`.
@@ -133,6 +136,12 @@ impl Database {
             ctx.clone(),
         )?;
 
+        conn.set_limit(
+            rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH,
+            guard::limit_value(config.max_value_bytes),
+        )
+        .map_err(DatabaseError::from)?;
+
         run_migrations(&mut conn, config.migration_source.as_ref())?;
 
         // Run the consumer bootstrap hook inside a fresh transaction the
@@ -166,6 +175,7 @@ impl Database {
                 migration_source: config.migration_source,
                 device_uuid,
                 max_transaction_bytes: config.max_transaction_bytes,
+                max_value_bytes: config.max_value_bytes,
                 lock,
             }),
         })

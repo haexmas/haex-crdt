@@ -163,6 +163,12 @@ pub enum DatabaseError {
     #[error("Statement interrupted by the progress callback - SQL: {sql}")]
     SqlGuardInterrupted { sql: String },
 
+    /// A string or BLOB value, or a row, would have exceeded the length
+    /// limit: [`crate::DatabaseConfig::max_value_bytes`], or the lower
+    /// [`crate::SqlGuard::max_value_bytes`] of a guarded statement.
+    #[error("Value or row larger than the length limit - SQL: {sql}")]
+    ValueTooLarge { sql: String },
+
     /// The write transaction was rolled back — by an interrupt or by SQLite
     /// after a failed statement — and can neither run statements nor commit.
     #[error("Transaction aborted: {reason}")]

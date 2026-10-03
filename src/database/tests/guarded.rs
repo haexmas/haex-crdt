@@ -36,6 +36,7 @@ fn allow_all() -> SqlGuard {
     SqlGuard {
         authorizer: Arc::new(|_: &AuthContext<'_>| Authorization::Allow),
         progress: None,
+        max_value_bytes: None,
     }
 }
 
@@ -52,6 +53,7 @@ fn recording() -> (SqlGuard, AuthLog) {
             Authorization::Allow
         }),
         progress: None,
+        max_value_bytes: None,
     };
     (guard, log)
 }
@@ -71,6 +73,7 @@ fn deny_table(table: &'static str) -> SqlGuard {
             _ => Authorization::Allow,
         }),
         progress: None,
+        max_value_bytes: None,
     }
 }
 
@@ -387,4 +390,97 @@ fn a_query_with_no_rows_still_reports_its_columns() {
         .unwrap();
     assert_eq!(read.columns, vec!["body", "key"]);
     assert!(read.rows.is_empty());
+}
+
+#[test]
+fn a_value_over_the_guard_limit_is_a_typed_error_and_the_limit_is_restored() {
+    let (_fx, db) = open();
+    let guard = SqlGuard {
+        max_value_bytes: Some(1000),
+        ..allow_all()
+    };
+
+    let err = db
+        .read_guarded(&guard, |conn| {
+            conn.query_with_columns("SELECT zeroblob(4000)", [], |row| row.get::<_, Vec<u8>>(0))
+        })
+        .unwrap_err();
+    assert!(
+        matches!(database_error(err), DatabaseError::ValueTooLarge { .. }),
+        "refused before the value exists"
+    );
+    let small = db
+        .read_guarded(&guard, |conn| {
+            conn.query_with_columns("SELECT length(zeroblob(500))", [], |row| {
+                row.get::<_, i64>(0)
+            })
+        })
+        .unwrap();
+    assert_eq!(small.rows, vec![500]);
+
+    let err = db
+        .write_guarded(&guard, |tx| {
+            tx.execute(
+                "INSERT INTO items (id, body) VALUES ('a', randomblob(4000))",
+                params![],
+            )?;
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(
+        matches!(database_error(err), DatabaseError::ValueTooLarge { .. }),
+        "computed values count too"
+    );
+    assert_eq!(count(&db, "items"), 0);
+
+    // Outside the guard the database's limit applies again.
+    db.write(|tx| {
+        tx.execute(
+            "INSERT INTO items (id, body) VALUES ('a', randomblob(4000))",
+            params![],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(count(&db, "items"), 1);
+}
+
+#[test]
+fn the_database_limit_bounds_every_write_and_a_guard_cannot_raise_it() {
+    // The limit also bounds rows of sqlite_master, so it leaves room for the
+    // SQL of the tables and triggers.
+    let mut fx = Fixture::with_source(source(&[("0001_items", ITEMS), ("0002_secret", SECRET)]));
+    fx.config.max_value_bytes = 100_000;
+    let db = Database::open(fx.config.clone()).unwrap();
+    assert_eq!(db.max_value_bytes(), 100_000);
+
+    let err = db
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO items (id, body) VALUES ('a', randomblob(200000))",
+                params![],
+            )?;
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(
+        matches!(database_error(err), DatabaseError::ValueTooLarge { .. }),
+        "plain writes are bounded"
+    );
+
+    let raised = SqlGuard {
+        max_value_bytes: Some(10_000_000),
+        ..allow_all()
+    };
+    let err = db
+        .read_guarded(&raised, |conn| {
+            conn.query_with_columns("SELECT randomblob(200000)", [], |row| {
+                row.get::<_, Vec<u8>>(0)
+            })
+        })
+        .unwrap_err();
+    assert!(
+        matches!(database_error(err), DatabaseError::ValueTooLarge { .. }),
+        "a guard only lowers the limit"
+    );
 }

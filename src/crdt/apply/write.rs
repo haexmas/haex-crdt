@@ -50,7 +50,7 @@ pub(super) fn in_row_savepoint(
         Ok(changed) => Ok(WriteOutcome::SqlFailure(
             rusqlite::Error::StatementChangedRows(changed),
         )),
-        Err(e) => Ok(WriteOutcome::SqlFailure(e)),
+        Err(source) => Ok(WriteOutcome::SqlFailure(source)),
     }
 }
 
@@ -141,7 +141,15 @@ pub(super) fn write_update(
 
     let param_refs: Vec<&dyn rusqlite::ToSql> =
         params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
-    in_row_savepoint(tx, || tx.execute(&sql, &*param_refs))
+    match in_row_savepoint(tx, || tx.execute(&sql, &*param_refs))? {
+        WriteOutcome::Written => Ok(WriteOutcome::Written),
+        WriteOutcome::SqlFailure(source)
+            if source.sqlite_error_code() == Some(rusqlite::ErrorCode::TooBig) =>
+        {
+            Err(DatabaseError::ValueTooLarge { sql })
+        }
+        WriteOutcome::SqlFailure(source) => Ok(WriteOutcome::SqlFailure(source)),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -192,7 +200,15 @@ pub(super) fn write_insert(
     );
     let param_refs: Vec<&dyn rusqlite::ToSql> =
         values.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
-    in_row_savepoint(tx, || tx.execute(&sql, &*param_refs))
+    match in_row_savepoint(tx, || tx.execute(&sql, &*param_refs))? {
+        WriteOutcome::Written => Ok(WriteOutcome::Written),
+        WriteOutcome::SqlFailure(source)
+            if source.sqlite_error_code() == Some(rusqlite::ErrorCode::TooBig) =>
+        {
+            Err(DatabaseError::ValueTooLarge { sql })
+        }
+        WriteOutcome::SqlFailure(source) => Ok(WriteOutcome::SqlFailure(source)),
+    }
 }
 
 /// Serialise the column-signature JSON map for a fresh INSERT — only staged
