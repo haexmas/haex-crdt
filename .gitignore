@@ -3,6 +3,7 @@ Cargo.lock
 
 # spaex
 .spaex/manifest.json.lock
+.spaex/install.lock
 .spaex/composer.log
 .spaex/.stale
 
