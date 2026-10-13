@@ -2,15 +2,21 @@
   "compounds": [
     {
       "molecules": [
+        "com.github.haexmas.atoms.ast-grep",
         "com.github.haexmas.atoms.coding-guideline-rust",
         "com.github.haexmas.atoms.general-coding",
+        "com.github.haexmas.atoms.graphify-first-authoring",
+        "com.github.haexmas.atoms.nix-devshell-base",
+        "com.github.haexmas.atoms.nix-rust",
         "com.github.haexmas.atoms.ponytail",
+        "com.github.haexmas.atoms.spaex-constitution",
         "com.github.haexmas.atoms.speckit"
       ],
-      "revision": "6c1f15ebd79c846985ecf47a6cbae8f3da24b315",
+      "revision": "1e201c4984e1799e1180e40a1fe1e1b2b9250e66",
       "source": "https://github.com/haexmas/atoms"
     }
   ],
   "identity": "com.github.haexmas.haex-crdt",
+  "spaex_min_version": ">=5.0.0",
   "spaex_version": "4"
 }

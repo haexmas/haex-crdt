@@ -5,3 +5,13 @@ Cargo.lock
 .spaex/manifest.json.lock
 .spaex/composer.log
 .spaex/.stale
+
+# graphify knowledge-graph output, regenerated locally
+graphify-out/
+
+# direnv's per-checkout cache (flake profile symlinks). Every worktree gets
+# its own on `direnv allow`; never meant to be committed.
+.direnv/
+
+# Repository-local git worktrees
+.worktrees/
