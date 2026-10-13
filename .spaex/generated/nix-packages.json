@@ -1,0 +1,6 @@
+[
+  "cargo",
+  "clippy",
+  "rustc",
+  "rustfmt"
+]
