@@ -1,13 +1,13 @@
 //! `haex-crdt` — SQLite + SQLCipher storage with column-level LWW CRDT sync.
 //!
 //! This crate is the extraction target for the CRDT/storage layer currently
-//! living inside `haex-vault`. See the extraction plan
+//! living inside `haex-vault 2.x (Legacy)`. See the extraction plan
 //! (`haex-vault/docs/plans/2026-09-04-haex-crdt-extraction-plan.md`) for scope,
 //! trait boundaries, and the sequence by which modules move here.
 //!
 //! Public surface is a working skeleton: types and trait shapes are in place;
 //! the CRDT implementation itself (triggers, scanner, apply pipeline, HLC
-//! service) is ported from `haex-vault` in a follow-up step.
+//! service) is ported from `haex-vault 2.x (Legacy)` in a follow-up step.
 //!
 //! # Guarded SQL
 //!
