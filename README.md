@@ -1,17 +1,17 @@
 # haex-crdt
 
-SQLite + SQLCipher storage with column-level LWW CRDT sync (uhlc-based Hybrid Logical Clocks). Extracted from `haex-vault`; consumed by `holzi`, which supersedes `haex-vault`.
+SQLite + SQLCipher storage with column-level LWW CRDT sync (uhlc-based Hybrid Logical Clocks). Extracted from haex-vault 2.x (Legacy); consumed by `haex-vault` 3.x, which supersedes it.
 
 **Status**: `v0.3.0`. Trait foundation, HLC service, SQL transformers, trigger installer, scanner, cleanup, migration engine, apply pipeline, public `Database` facade, cross-process file locking, and the plan §8 end-to-end acceptance test all land. Dual-licensed **MIT OR Apache-2.0**. Consume via `haex-crdt = { git = "https://github.com/haexmas/haex-crdt", tag = "v0.3.0" }`.
 
-**Ownership**: source lived in `haex-vault`. This repository is the extraction target; `holzi` depends on it. The haex-vault-only surface (the JSON `DbConnection` layer with `execute` / `execute_with_crdt` / `select` / `select_with_crdt`, `PostWriteHook`, the `test-shims` feature) has been removed; the write path is `Database::write`, the read path `Database::read`.
+**Ownership**: source lived in haex-vault 2.x (Legacy). This repository is the extraction target; `haex-vault` 3.x depends on it. The surface only haex-vault 2.x needed (the JSON `DbConnection` layer with `execute` / `execute_with_crdt` / `select` / `select_with_crdt`, `PostWriteHook`, the `test-shims` feature) has been removed; the write path is `Database::write`, the read path `Database::read`.
 
 ## Scope
 
 Provided by this crate:
 
 - Encrypted SQLite storage (SQLCipher).
-- A migration engine with two journals — crate-owned CRDT bookkeeping and consumer-owned schema, per [plan §4.3](../holzi/docs/plans/2026-09-04-haex-crdt-extraction-plan.md).
+- A migration engine with two journals — crate-owned CRDT bookkeeping and consumer-owned schema, per [plan §4.3](../haex-vault/docs/plans/2026-09-04-haex-crdt-extraction-plan.md).
 - HLC service (uhlc-based Hybrid Logical Clocks with SQLite-persisted state).
 - Column-level LWW CRDT infrastructure: schema transformer, trigger installer, scanner, apply pipeline.
 - Cleanup / retention utilities for deleted-row logs.
@@ -59,7 +59,7 @@ Opening the same DB file from **two processes** is rejected. As the very first s
 
 ## Roadmap
 
-Extracted from [plan §5](../holzi/docs/plans/2026-09-04-haex-crdt-extraction-plan.md). Each slice ends with `cargo test` green.
+Extracted from [plan §5](../haex-vault/docs/plans/2026-09-04-haex-crdt-extraction-plan.md). Each slice ends with `cargo test` green.
 
 - [x] **Batch A** — trait foundation, HLC service, transformers, error types (this slice).
 - [x] **Batch B** — trigger installer, scanner, cleanup ported and trimmed to the CRDT-generic surface.
@@ -73,13 +73,13 @@ Extracted from [plan §5](../holzi/docs/plans/2026-09-04-haex-crdt-extraction-pl
 
 ## Sequence deviation from plan §7
 
-The [extraction plan §7](../holzi/docs/plans/2026-09-04-haex-crdt-extraction-plan.md) proposes a three-step sequence:
+The [extraction plan §7](../haex-vault/docs/plans/2026-09-04-haex-crdt-extraction-plan.md) proposes a three-step sequence:
 
 1. Introduce traits inside `haex-vault` first (in-place refactor, no new repo).
 2. Cut a sub-crate under a `haex-vault` Cargo workspace.
 3. Move the sub-crate to a standalone repo, preserving git history via `git filter-repo`.
 
-This repository skipped Steps 1 and 2 by explicit operator direction. Tradeoff: no git history from `haex-vault` (clean-start), no continuous-integration safety net during the extraction (haex-vault's tests aren't re-running against the moving code), and trait shapes are validated by the ported tests here rather than by the existing haex-vault test suite. Trait ergonomics may need adjustment when `haex-vault` and `holzi` first integrate.
+This repository skipped Steps 1 and 2 by explicit operator direction. Tradeoff: no git history from haex-vault 2.x (clean-start), no continuous-integration safety net during the extraction (haex-vault 2.x's tests aren't re-running against the moving code), and trait shapes are validated by the ported tests here rather than by the existing haex-vault 2.x test suite. Trait ergonomics may need adjustment when haex-vault 2.x and `haex-vault` 3.x first integrate.
 
 ## License
 

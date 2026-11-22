@@ -17,7 +17,7 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         # Blanket allow, not a per-package predicate: `cudatoolkit` (pulled
-        # in by consumers like `com.github.haexmas.atoms.holzi` for local
+        # in by consumers like `com.github.haexmas.atoms.haex-vault` for local
         # CUDA builds) is a meta-package bundling several separately
         # unfree-licensed sub-derivations (cuda_nvcc, cuda_cuobjdump, ...),
         # so scoping to one name is not enough and the set of names is not

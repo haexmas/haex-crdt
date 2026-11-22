@@ -44,7 +44,7 @@ use crate::error::Result;
 /// - Enforcing uniqueness per (DB file × replica) is the consumer's job.
 ///   Consumers that legitimately serve different UUIDs to the same DB file
 ///   for different logical replicas (per-installation UUID lookup, as in
-///   haex-vault and holzi) are directly supported: the crate does not
+///   haex-vault 2.x and 3.x) are directly supported: the crate does not
 ///   store or arbitrate the device UUID.
 pub trait DatabaseBootstrap: Send + Sync {
     /// Performs consumer-owned initialization and returns this open's device UUID.
@@ -53,7 +53,7 @@ pub trait DatabaseBootstrap: Send + Sync {
 
 /// Test / simple-consumer implementation. Returns a fixed UUID and does not
 /// touch the transaction. Consumers with real per-installation lookup
-/// (haex-vault, holzi) implement the trait themselves.
+/// (haex-vault 2.x and 3.x) implement the trait themselves.
 pub struct StaticDeviceId(pub Uuid);
 
 impl DatabaseBootstrap for StaticDeviceId {
