@@ -2,7 +2,7 @@
 //!
 //! This crate is the extraction target for the CRDT/storage layer currently
 //! living inside `haex-vault`. See the extraction plan
-//! (`holzi/docs/plans/2026-09-04-haex-crdt-extraction-plan.md`) for scope,
+//! (`haex-vault/docs/plans/2026-09-04-haex-crdt-extraction-plan.md`) for scope,
 //! trait boundaries, and the sequence by which modules move here.
 //!
 //! Public surface is a working skeleton: types and trait shapes are in place;

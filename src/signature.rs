@@ -52,7 +52,7 @@ pub type RemoteChanges = Vec<ColumnChange>;
 ///   end-to-end and decodes it internally.
 /// - **Consumers using [`NoopSignatureProvider`] MUST deliver remote changes
 ///   over an already-authenticated transport.** The no-op provider performs
-///   no transport attestation. `haex-vault` uses an MLS group; `holzi` v1
+///   no transport attestation. haex-vault 2.x uses an MLS group; haex-vault 3.x v1
 ///   uses an authenticated iroh channel between attested devices.
 pub trait SignatureProvider: Send + Sync {
     /// Sign a canonical preimage for a local column write. Called by the

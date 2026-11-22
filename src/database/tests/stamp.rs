@@ -1,6 +1,6 @@
 //! Open lifecycle step 6: rows the bootstrap hook writes before the HLC
 //! exists are stamped with an HLC and a full column-HLC map, so the scanner
-//! ships them whole. Shape mirrors holzi's device registry, the row that
+//! ships them whole. Shape mirrors haex-vault's device registry, the row that
 //! motivated the pass.
 
 use std::collections::BTreeSet;
