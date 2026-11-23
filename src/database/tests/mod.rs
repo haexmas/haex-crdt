@@ -7,6 +7,7 @@
 //!   binding, reinstall refuse/allow, unsafe identifier
 //! - [`migration_triggers`] — tables a later migration creates get CRDT triggers
 //! - [`clock`] — a remote timestamp survives a restart
+//! - [`no_sync_edit`] — a `_no_sync`-only edit cannot shield a row from a remote delete
 //! - [`delegates`] — method delegates (apply/scan/cleanup)
 //! - [`stamp`] — open stamps rows the bootstrap hook wrote before the HLC
 //!   existed
@@ -38,6 +39,7 @@ mod guarded;
 mod guarded_schema;
 mod install_crdt;
 mod migration_triggers;
+mod no_sync_edit;
 mod open;
 mod stamp;
 mod write;

@@ -58,6 +58,29 @@ fn test_update_adds_hlc_assignment() {
 }
 
 #[test]
+fn update_of_only_no_sync_columns_leaves_the_row_hlc_alone() {
+    for sql in [
+        "UPDATE items SET cache_no_sync = 'x' WHERE id = 'x'",
+        "UPDATE items SET cache_no_sync = 'x', other_no_sync = 'y' WHERE id = 'x'",
+        "UPDATE items SET (cache_no_sync, other_no_sync) = ('x', 'y') WHERE id = 'x'",
+    ] {
+        let result = parse_and_transform_execute(sql);
+        assert!(
+            !result.contains(HLC_TIMESTAMP_COLUMN),
+            "a `_no_sync`-only UPDATE must not stamp the row HLC. Got: {result}"
+        );
+    }
+}
+
+#[test]
+fn update_mixing_synced_and_no_sync_columns_still_stamps_the_row_hlc() {
+    let result = parse_and_transform_execute(
+        "UPDATE items SET name = 'foo', cache_no_sync = 'x' WHERE id = 'x'",
+    );
+    assert!(result.contains(HLC_TIMESTAMP_COLUMN), "Got: {result}");
+}
+
+#[test]
 fn test_create_table_adds_crdt_columns() {
     let result = parse_and_transform_execute("CREATE TABLE items (id TEXT PRIMARY KEY, name TEXT)");
     assert!(result.contains(HLC_TIMESTAMP_COLUMN), "Got: {result}");
