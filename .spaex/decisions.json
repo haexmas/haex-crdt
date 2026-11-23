@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "checked": {
-    "source_hash": "88556e4b97ca04f67d7dc5e5139c365b46fe6526e7027b4ab727d91efc6b7827",
+    "source_hash": "de4880978c612170d2973fbabeae4f4706a37a5fefc088e50f839590fd88c6c4",
     "prompt_hash": "aad1b9eb44b8d38d2bb92a30d9806c85710edad91159543012d0d3a0c686372a"
   },
   "decisions": {
@@ -46,6 +46,48 @@
       },
       "asked_at": "2026-11-22T23:32:50Z",
       "answered_at": "2026-11-22T23:32:50Z"
+    },
+    "c087a2d64bb582e4a92f0e0c7f5e987ad36e7c5f767f6a08654ca7c595e5e022": {
+      "kind": "duplicate",
+      "summary": "Both passages forbid speculative or premature abstraction while permitting abstraction grounded in real, evidenced shared behavior \u2014 the same design principle restated independently in general-coding and ponytail.",
+      "passages": [
+        {
+          "scoped_id": "com.github.haexmas.atoms.general-coding/general-coding",
+          "text_hash": "8613b227dbf67ae438c4504cb917f472a3794cb67d9198fb012bbdbaf84f2637",
+          "text": "- Do not abstract two things merely because they look similar. First establish\n  that they have the same behavior, ownership, change reason, and invariants.\n  A small amount of local duplication is preferable to a premature generic\n  abstraction that couples unrelated callers."
+        },
+        {
+          "scoped_id": "com.github.haexmas.atoms.ponytail/ponytail",
+          "text_hash": "762e24a72676f77dd6c37bbe977676817ac4012c63ec2d09cff09a3b67f565eb",
+          "text": "- Do not introduce speculative abstractions or abstractions solely because a\n  change might be reusable. A concrete, domain-owned abstraction that\n  improves cohesion, removes real duplication, or makes a branch independently\n  testable is not premature; use it when the code evidence supports it, even\n  when the task did not name the extraction. Keep it as small as possible."
+        }
+      ],
+      "choice": {
+        "kind": "keep_all"
+      },
+      "asked_at": "2026-11-23T10:38:34Z",
+      "answered_at": "2026-11-23T10:38:34Z"
+    },
+    "c97355e811a5542df4696e34001394201a40d3853da7953789e3adc1601b4aeb": {
+      "kind": "duplicate",
+      "summary": "Both fragments require test bodies to live in dedicated files separate from production code, carving out the same exception for a language test-module declaration \u2014 the rust-testing fragment restates the general-coding rule verbatim for Rust.",
+      "passages": [
+        {
+          "scoped_id": "com.github.haexmas.atoms.coding-guideline-rust/rust-testing",
+          "text_hash": "a1218443de08bc595174335b4ccde4044b7707b16718b710d48a58334f1519c3",
+          "text": "- Put focused unit-test implementations in dedicated files separate from\n  production code. For module-private unit tests, a small declaration such as\n  `#[cfg(test)] mod tests;` may remain in the module under test, with the test\n  implementation in the separate test file. Use integration tests under\n  `tests/` to exercise the public API as an external consumer would. Use\n  documentation tests for public examples that should compile and remain\n  correct."
+        },
+        {
+          "scoped_id": "com.github.haexmas.atoms.general-coding/general-coding",
+          "text_hash": "2e66d07f47a07bcc5c5a7ea82b9c9d617b778f1e446d92e2fdc19739960dba91",
+          "text": "- Test code MUST be maintained in files separate from production code in every\n  language. This applies to unit, integration, contract, and end-to-end tests.\n  A language-required test-module declaration or registration may remain in\n  the production file, but test bodies and test-only helpers MUST live in\n  dedicated test files. Do not place inline test modules or test functions in\n  production files. Follow the repository's convention for test-file placement\n  and naming."
+        }
+      ],
+      "choice": {
+        "kind": "keep_all"
+      },
+      "asked_at": "2026-11-23T10:38:34Z",
+      "answered_at": "2026-11-23T10:38:34Z"
     }
   }
 }
