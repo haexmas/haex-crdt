@@ -1,11 +1,9 @@
 //! An edit confined to a `_no_sync` column is device-local state: it must not
 //! make the row look newer than a remote delete.
 
-use std::time::Duration;
-
 use super::super::*;
 use super::{source, Fixture};
-use crate::crdt::columns::DELETED_ROWS_TABLE;
+use crate::crdt::columns::{DELETED_ROWS_TABLE, HLC_TIMESTAMP_COLUMN};
 
 const ITEMS: (&str, &str) = (
     "0001_items",
@@ -27,6 +25,23 @@ fn sync(from: &Database, to: &Database, table: &str) {
     to.apply_remote_changes(changes).unwrap();
 }
 
+fn advance_past_delete(delete_source: &Database, replica: &Database) {
+    let delete_hlc = delete_source
+        .with_locked_conn(|conn| {
+            conn.query_row(
+                &format!(
+                    "SELECT {HLC_TIMESTAMP_COLUMN} FROM {DELETED_ROWS_TABLE} \
+                     WHERE table_name = 'items' LIMIT 1"
+                ),
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(crate::Error::from)
+        })
+        .unwrap();
+    replica.inner.hlc.advance_past_remote(&delete_hlc).unwrap();
+}
+
 fn replicas() -> (Fixture, Database, Fixture, Database) {
     let fa = Fixture::with_source(source(&[ITEMS]));
     let fb = Fixture::with_source(source(&[ITEMS]));
@@ -44,7 +59,7 @@ fn local_only_edit_does_not_shield_a_row_from_a_remote_delete() {
 
     a.write(|tx| tx.execute("DELETE FROM items WHERE id = 'r1'", &[]))
         .unwrap();
-    std::thread::sleep(Duration::from_millis(20));
+    advance_past_delete(&a, &b);
     b.write(|tx| tx.execute("UPDATE items SET cache_no_sync = 'x' WHERE id = 'r1'", &[]))
         .unwrap();
 
@@ -62,7 +77,7 @@ fn edit_of_a_synced_column_after_the_delete_still_keeps_the_row() {
 
     a.write(|tx| tx.execute("DELETE FROM items WHERE id = 'r1'", &[]))
         .unwrap();
-    std::thread::sleep(Duration::from_millis(20));
+    advance_past_delete(&a, &b);
     b.write(|tx| tx.execute("UPDATE items SET title = 'newer' WHERE id = 'r1'", &[]))
         .unwrap();
 
