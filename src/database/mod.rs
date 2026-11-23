@@ -74,7 +74,7 @@ use crate::crdt::scanner::{
 use crate::db::connection_context::ConnectionContext;
 use crate::db::core::open_and_init_db;
 use crate::db::error::DatabaseError;
-use crate::db::init::ensure_triggers_initialized;
+use crate::db::init::{ensure_triggers_for_all_tables, ensure_triggers_initialized};
 use crate::db::lock::{DatabaseLock, DatabaseLockError};
 use crate::db::migrations::{run_migrations, MigrationReport};
 use crate::error::{Error, Result};
@@ -163,6 +163,7 @@ impl Database {
             .map_err(DatabaseError::from)?;
 
         ensure_triggers_initialized(&mut conn, config.trigger_version)?;
+        ensure_triggers_for_all_tables(&mut conn)?;
 
         stamp::stamp_unstamped_rows(&mut conn, &hlc)?;
 
@@ -217,8 +218,14 @@ impl Database {
     /// Re-run the migration engine. `Database::open` already calls this once,
     /// so callers only need it after they mutate the connection out-of-band
     /// (e.g. a test that resets state) or when driving a redundant retry.
+    /// Tables the migrations created get their CRDT triggers before this
+    /// returns.
     pub fn apply_migrations(&self) -> Result<MigrationReport> {
-        self.with_locked_conn(|conn| run_migrations(conn, self.inner.migration_source.as_ref()))
+        self.with_locked_conn(|conn| {
+            let report = run_migrations(conn, self.inner.migration_source.as_ref())?;
+            ensure_triggers_for_all_tables(conn)?;
+            Ok(report)
+        })
     }
 
     /// Install CRDT metadata + triggers on `table_name`, backfilling any
