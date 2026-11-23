@@ -82,10 +82,8 @@ jobs:
         include:
           - features: "default"
             flags: ""
-            run_e2e: false
           - features: "raw-connection"
             flags: "--features raw-connection"
-            run_e2e: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -96,8 +94,5 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: test-${{ matrix.features }}
-      - name: cargo test --lib
-        run: cargo test --lib ${{ matrix.flags }}
-      - name: cargo test --test end_to_end (plan §8 acceptance)
-        if: matrix.run_e2e
-        run: cargo test --features raw-connection --test end_to_end
+      - name: cargo test (lib, integration targets incl. plan §8 acceptance, doctests)
+        run: cargo test ${{ matrix.flags }}
