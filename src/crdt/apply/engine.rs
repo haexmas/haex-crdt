@@ -114,28 +114,61 @@ pub fn apply_remote_changes(
             .into_iter()
             .partition(|((table_name, _), _)| table_name == DELETED_ROWS_TABLE);
 
-        for (phase, groups) in [log_groups, data_groups].into_iter().enumerate() {
-            let shadow = load_delete_shadow_map(&tx)?;
-            for ((table_name, row_pks_str), group) in groups {
-                process_row_group(
-                    &tx,
-                    policy,
-                    &table_name,
-                    &row_pks_str,
-                    group,
-                    &shadow,
-                    &mut outcome,
-                    &mut max_accepted_hlc,
-                )?;
-            }
-            if phase == 0 {
-                let inbound_delete_ids = collect_inbound_delete_log_ids(&changes, &outcome);
-                propagate_deleted_rows_to_target_tables(
-                    &tx,
-                    &inbound_delete_ids,
-                    &mut outcome.report,
-                )?;
-            }
+        let log_shadow = load_delete_shadow_map(&tx)?;
+        for ((table_name, row_pks_str), group) in log_groups {
+            process_row_group(
+                &tx,
+                policy,
+                &table_name,
+                &row_pks_str,
+                group,
+                &log_shadow,
+                &mut outcome,
+                &mut max_accepted_hlc,
+            )?;
+        }
+
+        let inbound_delete_ids = collect_inbound_delete_log_ids(&changes, &outcome);
+        let delete_targets = collect_inbound_delete_targets(&tx, &inbound_delete_ids)?;
+        let shadow = load_delete_shadow_map(&tx)?;
+        let (target_updates, remaining_groups): (Vec<_>, Vec<_>) = data_groups
+            .into_iter()
+            .partition(|((table_name, row_pks), _)| {
+                canonical_row_key(table_name, row_pks)
+                    .is_some_and(|key| delete_targets.contains(&key))
+            });
+
+        // Apply updates to rows targeted by this batch's deletes first. The
+        // fan-out then sees their final row HLC and preserves a newer update,
+        // including the row's unchanged columns. Other writes wait until the
+        // deletes have released any UNIQUE values they may reuse.
+        for ((table_name, row_pks_str), group) in target_updates {
+            process_row_group(
+                &tx,
+                policy,
+                &table_name,
+                &row_pks_str,
+                group,
+                &shadow,
+                &mut outcome,
+                &mut max_accepted_hlc,
+            )?;
+        }
+
+        propagate_deleted_rows_to_target_tables(&tx, &inbound_delete_ids, &mut outcome.report)?;
+
+        let shadow = load_delete_shadow_map(&tx)?;
+        for ((table_name, row_pks_str), group) in remaining_groups {
+            process_row_group(
+                &tx,
+                policy,
+                &table_name,
+                &row_pks_str,
+                group,
+                &shadow,
+                &mut outcome,
+                &mut max_accepted_hlc,
+            )?;
         }
         policy.before_commit(&tx, &changes, &outcome)?;
         toggle_triggers(&tx, "1")?;
@@ -155,6 +188,37 @@ pub fn apply_remote_changes(
     }
 
     Ok(outcome)
+}
+
+fn collect_inbound_delete_targets(
+    tx: &Transaction<'_>,
+    delete_ids: &HashSet<String>,
+) -> Result<HashSet<(String, String)>> {
+    let mut targets = HashSet::new();
+    for id in delete_ids {
+        let target = tx.query_row(
+            &format!("SELECT table_name, row_pks FROM \"{DELETED_ROWS_TABLE}\" WHERE id = ?1"),
+            [id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        );
+        let (table_name, row_pks) = match target {
+            Ok(target) => target,
+            Err(rusqlite::Error::QueryReturnedNoRows) => continue,
+            Err(error) => return Err(Error::Sqlite(error)),
+        };
+        if let Some(key) = canonical_row_key(&table_name, &row_pks) {
+            targets.insert(key);
+        }
+    }
+    Ok(targets)
+}
+
+fn canonical_row_key(table_name: &str, row_pks: &str) -> Option<(String, String)> {
+    let row_pks = serde_json::from_str::<serde_json::Map<String, JsonValue>>(row_pks).ok()?;
+    Some((
+        table_name.to_string(),
+        serde_json::to_string(&row_pks).ok()?,
+    ))
 }
 
 /// Sets the `triggers_enabled` gate every CRDT trigger consults to `value`

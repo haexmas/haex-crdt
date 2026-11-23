@@ -361,8 +361,17 @@ fn older_insert_and_newer_delete_in_one_batch_leave_no_row() {
 #[test]
 fn newer_reinsert_survives_an_older_delete_in_one_batch() {
     let (mut conn, hlc, _dev) = make_fixture();
-    create_crdt_table(&conn, "items", "body TEXT");
-    insert_target(&mut conn, &hlc);
+    create_crdt_table(&conn, "items", "body TEXT, note TEXT");
+    apply_remote_changes(
+        &mut conn,
+        vec![
+            change("items", "r1", "body", HLC1, json!("original")),
+            change("items", "r1", "note", HLC1, json!("preserve me")),
+        ],
+        &hlc,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
+    )
+    .unwrap();
 
     let mut batch = vec![change("items", "r1", "body", HLC3, json!("again"))];
     batch.extend(delete_log_batch("del-1", "items", "r1", HLC2));
@@ -374,8 +383,11 @@ fn newer_reinsert_survives_an_older_delete_in_one_batch() {
     )
     .unwrap();
 
-    let body: String = conn
-        .query_row("SELECT body FROM items WHERE id = 'r1'", [], |r| r.get(0))
+    let (body, note): (String, String) = conn
+        .query_row("SELECT body, note FROM items WHERE id = 'r1'", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
         .unwrap();
     assert_eq!(body, "again");
+    assert_eq!(note, "preserve me");
 }
