@@ -25,14 +25,10 @@
 //! names carry the suffix too. There is no way for the two sides to
 //! disagree about which columns participate.
 //!
-//! Enforcement differs by scope, deliberately. At **column** scope the
-//! rule is absolute. At **table** scope it governs the automatic path only
-//! — `CrdtTransformer` leaves such a table's DDL and writes alone, but
-//! trigger discovery keys on the presence of [`HLC_TIMESTAMP_COLUMN`]
-//! rather than on the name (see [`crate::db::init`]), so a consumer can
-//! still opt a `_no_sync` table in explicitly with `install_crdt`; this
-//! crate's own tests do exactly that. There is no per-column equivalent of
-//! that opt-in, so nothing overrides the column rule.
+//! The rule is absolute at both scopes. `CrdtTransformer` leaves a
+//! `_no_sync` table's DDL and writes alone, and `install_crdt` refuses such
+//! a table with a validation error, so no table carrying the suffix is
+//! ever given CRDT metadata.
 
 /// Hybrid Logical Clock timestamp for the row (row-scoped). The `_no_sync`
 /// suffix keeps this structural CRDT metadata out of both the trigger

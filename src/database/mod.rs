@@ -224,6 +224,9 @@ impl Database {
     /// Install CRDT metadata + triggers on `table_name`, backfilling any
     /// pre-existing rows so they immediately participate in LWW (plan §6).
     ///
+    /// Refuses a table whose name ends in `_no_sync`: such tables are never
+    /// synchronized and never carry CRDT metadata.
+    ///
     /// See [`InstallCrdtOptions`] for the reinstall knob.
     pub fn install_crdt(&self, table_name: &str, opts: InstallCrdtOptions) -> Result<()> {
         let provider = Arc::clone(&self.inner.signature_provider);

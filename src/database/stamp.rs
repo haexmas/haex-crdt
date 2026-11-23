@@ -36,10 +36,8 @@ pub(super) fn stamp_unstamped_rows(conn: &mut Connection, hlc: &HlcService) -> R
     // unstamped row. Collected first so a clean database issues no HLC.
     let mut pending: Vec<(String, Vec<String>)> = Vec::new();
     for table_name in discover_crdt_tables(&tx)? {
-        // `discover_crdt_tables` identifies opt-in `_no_sync` tables by their
-        // CRDT metadata columns. Tables that remain local never have those
-        // columns, while a table installed explicitly through `install_crdt`
-        // must still be stamped on a later open.
+        // `discover_crdt_tables` identifies CRDT tables by their metadata
+        // columns; tables that remain local never have those columns.
         if table_name == DELETED_ROWS_TABLE || !is_safe_identifier(&table_name) {
             continue;
         }

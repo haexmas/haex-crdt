@@ -357,6 +357,6 @@ fn last_ident(name: &ObjectName) -> Option<String> {
         .map(|ident| ident.value.clone())
 }
 
-fn is_no_sync(table: &str) -> bool {
+pub(crate) fn is_no_sync(table: &str) -> bool {
     table.to_ascii_lowercase().ends_with(NO_SYNC_SUFFIX)
 }

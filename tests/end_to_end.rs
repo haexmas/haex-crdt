@@ -9,7 +9,8 @@
 //!   `haex_crdt_migrations_no_sync`)
 //! - (c) Consumer-owned toy migration runs (journaled in
 //!   `haex_app_migrations_no_sync`)
-//! - (d) Store A is pre-populated *before* `install_crdt` runs so the
+//! - (d) The plain `toy` table is created on both stores. Store A is
+//!   pre-populated *before* `install_crdt` runs so the
 //!   backfill contract is exercised on it; the scanner then returns the
 //!   backfilled rows
 //! - (d′) Store B calls `install_crdt` on the empty toy table so the CRDT
@@ -43,18 +44,27 @@ use haex_crdt::{
 use tempfile::TempDir;
 use uuid::Uuid;
 
-/// Wraps the plan §8 migration set: one consumer migration creating a plain
-/// `toy_no_sync` table that both stores share. Suffixed `_no_sync` so the
-/// migration engine's `CrdtTransformer` leaves the CREATE TABLE verbatim —
-/// the CRDT metadata is added later via `install_crdt` per the plan's
-/// (d)/(d′) flow.
+/// Wraps the plan §8 migration set: one consumer migration creating a
+/// device-local `toy_local_no_sync` table. It only exercises the consumer
+/// journal; the synced `toy` table is created on the raw connection, behind
+/// the migration engine, so its CRDT metadata is added by `install_crdt` per
+/// the plan's (d)/(d′) flow.
 fn migration_source() -> Arc<StaticMigrationSource> {
     let mut m = BTreeMap::new();
     m.insert(
         MigrationName::from("0001_toy"),
-        "CREATE TABLE toy_no_sync (id TEXT PRIMARY KEY NOT NULL, body TEXT);".to_string(),
+        "CREATE TABLE toy_local_no_sync (id TEXT PRIMARY KEY NOT NULL, body TEXT);".to_string(),
     );
     Arc::new(StaticMigrationSource(m))
+}
+
+/// Creates the plain, not yet CRDT-managed `toy` table on `db`.
+fn create_toy(db: &Database) {
+    db.with_connection(|conn| {
+        conn.execute_batch("CREATE TABLE toy (id TEXT PRIMARY KEY NOT NULL, body TEXT)")
+            .map_err(map_err)
+    })
+    .expect("create toy table");
 }
 
 /// Builds the database configuration shared by both acceptance-test stores.
@@ -159,9 +169,12 @@ fn two_devices_sync_backfilled_and_fresh_writes_end_to_end() {
 
     // ---------- (d) pre-populate A, then install_crdt (backfill) --------
 
+    create_toy(&db_a);
+    create_toy(&db_b);
+
     db_a.with_connection(|conn| {
         conn.execute(
-            "INSERT INTO toy_no_sync (id, body) VALUES (?1, ?2)",
+            "INSERT INTO toy (id, body) VALUES (?1, ?2)",
             params!["legacy-1", "legacy body one"],
         )
         .map(|_| ())
@@ -170,7 +183,7 @@ fn two_devices_sync_backfilled_and_fresh_writes_end_to_end() {
     .expect("seed legacy row on device_a");
     db_a.with_connection(|conn| {
         conn.execute(
-            "INSERT INTO toy_no_sync (id, body) VALUES (?1, ?2)",
+            "INSERT INTO toy (id, body) VALUES (?1, ?2)",
             params!["legacy-2", "legacy body two"],
         )
         .map(|_| ())
@@ -178,13 +191,13 @@ fn two_devices_sync_backfilled_and_fresh_writes_end_to_end() {
     })
     .expect("seed second legacy row on device_a");
 
-    db_a.install_crdt("toy_no_sync", InstallCrdtOptions::default())
+    db_a.install_crdt("toy", InstallCrdtOptions::default())
         .expect("install_crdt on device_a with legacy rows");
 
     // Backfill contract: scanner now returns one change per (legacy row ×
     // data column). Two rows × one data column (`body`) = two changes.
     let backfilled = db_a
-        .scan_table_for_local_changes("toy_no_sync", None, ScanFilters::default())
+        .scan_table_for_local_changes("toy", None, ScanFilters::default())
         .expect("scan backfilled changes on device_a");
     assert_eq!(
         backfilled.len(),
@@ -195,7 +208,7 @@ fn two_devices_sync_backfilled_and_fresh_writes_end_to_end() {
 
     // ---------- (d′) install_crdt on empty B ------------------------------
 
-    db_b.install_crdt("toy_no_sync", InstallCrdtOptions::default())
+    db_b.install_crdt("toy", InstallCrdtOptions::default())
         .expect("install_crdt on empty toy table for device_b");
 
     // ---------- (e) fresh write on A → scan → apply on B → readback ------
@@ -208,7 +221,7 @@ fn two_devices_sync_backfilled_and_fresh_writes_end_to_end() {
     db_a.with_connection(|conn| {
         conn.execute(
             &format!(
-                "INSERT INTO toy_no_sync (id, body, {HLC_TIMESTAMP_COLUMN}) \
+                "INSERT INTO toy (id, body, {HLC_TIMESTAMP_COLUMN}) \
                  VALUES (?1, ?2, current_hlc())"
             ),
             params!["fresh-1", "fresh body from device_a"],
@@ -220,7 +233,7 @@ fn two_devices_sync_backfilled_and_fresh_writes_end_to_end() {
 
     // Scan A again — must include the fresh row alongside the backfilled ones.
     let all_local = db_a
-        .scan_table_for_local_changes("toy_no_sync", None, ScanFilters::default())
+        .scan_table_for_local_changes("toy", None, ScanFilters::default())
         .expect("scan after fresh write");
     let fresh_change = all_local
         .iter()
@@ -254,7 +267,7 @@ fn two_devices_sync_backfilled_and_fresh_writes_end_to_end() {
     let (body_on_b, hlc_on_b) = db_b
         .with_connection(|conn| {
             conn.query_row(
-                &format!("SELECT body, {HLC_TIMESTAMP_COLUMN} FROM toy_no_sync WHERE id = ?1"),
+                &format!("SELECT body, {HLC_TIMESTAMP_COLUMN} FROM toy WHERE id = ?1"),
                 ["fresh-1"],
                 |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
             )
@@ -271,11 +284,9 @@ fn two_devices_sync_backfilled_and_fresh_writes_end_to_end() {
     // Legacy row from the backfill also landed.
     let legacy_on_b: String = db_b
         .with_connection(|conn| {
-            conn.query_row(
-                "SELECT body FROM toy_no_sync WHERE id = ?1",
-                ["legacy-1"],
-                |r| r.get::<_, String>(0),
-            )
+            conn.query_row("SELECT body FROM toy WHERE id = ?1", ["legacy-1"], |r| {
+                r.get::<_, String>(0)
+            })
             .map_err(map_err)
         })
         .expect("readback legacy row on device_b");
