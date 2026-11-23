@@ -10,15 +10,16 @@
 //!     IMMEDIATE tx {
 //!         disable triggers
 //!         policy.begin(tx, &changes)
-//!         load delete-shadow map
-//!         for each (table, row) in HLC-ordered groups:
+//!         for the delete-log groups, then the remaining groups
+//!         (each phase loads the delete-shadow map first), HLC-ordered:
 //!             core structural checks + eligibility classification
 //!             policy.prepare_row(tx, row) -> RowDecision
 //!             LWW-filter + same-batch-supersede the accepted columns
 //!             delete-shadow check (insert path)
 //!             INSERT (savepoint) or UPDATE (savepoint)
 //!             policy.after_row(tx, written) on a successful write
-//!         propagate inbound delete-log entries into target tables
+//!         (after the delete-log groups: propagate inbound delete-log
+//!          entries into target tables)
 //!         policy.before_commit(tx, &changes, &outcome)
 //!         enable triggers
 //!         commit
@@ -105,23 +106,37 @@ pub fn apply_remote_changes(
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         toggle_triggers(&tx, "0")?;
         policy.begin(&tx, &changes)?;
-        let shadow = load_delete_shadow_map(&tx)?;
 
-        for ((table_name, row_pks_str), group) in row_groups {
-            process_row_group(
-                &tx,
-                policy,
-                &table_name,
-                &row_pks_str,
-                group,
-                &shadow,
-                &mut outcome,
-                &mut max_accepted_hlc,
-            )?;
+        // Delete-log rows land and fan out first, so a delete and an insert
+        // reusing its UNIQUE value in one batch cannot collide; the shadow map
+        // is reloaded afterwards so it covers the entries just written.
+        let (log_groups, data_groups): (Vec<_>, Vec<_>) = row_groups
+            .into_iter()
+            .partition(|((table_name, _), _)| table_name == DELETED_ROWS_TABLE);
+
+        for (phase, groups) in [log_groups, data_groups].into_iter().enumerate() {
+            let shadow = load_delete_shadow_map(&tx)?;
+            for ((table_name, row_pks_str), group) in groups {
+                process_row_group(
+                    &tx,
+                    policy,
+                    &table_name,
+                    &row_pks_str,
+                    group,
+                    &shadow,
+                    &mut outcome,
+                    &mut max_accepted_hlc,
+                )?;
+            }
+            if phase == 0 {
+                let inbound_delete_ids = collect_inbound_delete_log_ids(&changes, &outcome);
+                propagate_deleted_rows_to_target_tables(
+                    &tx,
+                    &inbound_delete_ids,
+                    &mut outcome.report,
+                )?;
+            }
         }
-
-        let inbound_delete_ids = collect_inbound_delete_log_ids(&changes, &outcome);
-        propagate_deleted_rows_to_target_tables(&tx, &inbound_delete_ids, &mut outcome.report)?;
         policy.before_commit(&tx, &changes, &outcome)?;
         toggle_triggers(&tx, "1")?;
         tx.commit()?;

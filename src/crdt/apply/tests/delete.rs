@@ -303,3 +303,79 @@ fn delete_target_without_crdt_metadata_is_skipped() {
         .unwrap();
     assert_eq!(deletes, 1, "malformed target must not abort the batch");
 }
+
+#[test]
+fn delete_and_insert_reusing_a_unique_value_apply_in_one_batch() {
+    let (mut conn, hlc, _dev) = make_fixture();
+    create_crdt_table(&conn, "items", "code TEXT UNIQUE");
+    apply_remote_changes(
+        &mut conn,
+        vec![change("items", "r1", "code", HLC1, json!("X"))],
+        &hlc,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
+    )
+    .unwrap();
+
+    let mut batch = vec![change("items", "r2", "code", HLC3, json!("X"))];
+    batch.extend(delete_log_batch("del-1", "items", "r1", HLC3));
+    apply_remote_changes(
+        &mut conn,
+        batch,
+        &hlc,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
+    )
+    .unwrap();
+
+    let ids: Vec<String> = conn
+        .prepare("SELECT id FROM items ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(ids, vec!["r2".to_string()]);
+}
+
+#[test]
+fn older_insert_and_newer_delete_in_one_batch_leave_no_row() {
+    let (mut conn, hlc, _dev) = make_fixture();
+    create_crdt_table(&conn, "items", "body TEXT");
+
+    let mut batch = vec![change("items", "r1", "body", HLC1, json!("old"))];
+    batch.extend(delete_log_batch("del-1", "items", "r1", HLC2));
+    let outcome = apply_remote_changes(
+        &mut conn,
+        batch,
+        &hlc,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
+    )
+    .unwrap();
+
+    let items: i64 = conn
+        .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(items, 0);
+    assert_eq!(outcome.report.skipped_shadowed_by_delete, 1);
+}
+
+#[test]
+fn newer_reinsert_survives_an_older_delete_in_one_batch() {
+    let (mut conn, hlc, _dev) = make_fixture();
+    create_crdt_table(&conn, "items", "body TEXT");
+    insert_target(&mut conn, &hlc);
+
+    let mut batch = vec![change("items", "r1", "body", HLC3, json!("again"))];
+    batch.extend(delete_log_batch("del-1", "items", "r1", HLC2));
+    apply_remote_changes(
+        &mut conn,
+        batch,
+        &hlc,
+        &mut SignatureApplyPolicy::new(&NoopSignatureProvider),
+    )
+    .unwrap();
+
+    let body: String = conn
+        .query_row("SELECT body FROM items WHERE id = 'r1'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(body, "again");
+}
