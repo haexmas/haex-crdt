@@ -30,6 +30,8 @@ use crate::error::{Error, Result};
 use crate::signature::SignatureProvider;
 use crate::table_names::TABLE_CRDT_DIRTY_TABLES;
 
+use super::schema::is_no_sync;
+
 use crate::crdt::apply::column_sig_preimage_from_parts;
 use crate::crdt::columns::{COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN, HLC_TIMESTAMP_COLUMN};
 
@@ -46,6 +48,15 @@ pub fn install_crdt(
     if !is_safe_identifier(table_name) {
         return Err(DatabaseError::ValidationError {
             reason: format!("install_crdt: unsafe table identifier '{table_name}'"),
+        }
+        .into());
+    }
+
+    if is_no_sync(table_name) {
+        return Err(DatabaseError::ValidationError {
+            reason: format!(
+                "install_crdt: '{table_name}' ends in `_no_sync` and is never synchronized"
+            ),
         }
         .into());
     }
