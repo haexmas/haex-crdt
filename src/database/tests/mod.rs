@@ -5,6 +5,7 @@
 //!   migration idempotence
 //! - [`install_crdt`] — `install_crdt` semantics: empty, backfill, sig
 //!   binding, reinstall refuse/allow, unsafe identifier
+//! - [`migration_triggers`] — tables a later migration creates get CRDT triggers
 //! - [`delegates`] — method delegates (apply/scan/cleanup)
 //! - [`stamp`] — open stamps rows the bootstrap hook wrote before the HLC
 //!   existed
@@ -34,6 +35,7 @@ mod delegates;
 mod guarded;
 mod guarded_schema;
 mod install_crdt;
+mod migration_triggers;
 mod open;
 mod stamp;
 mod write;
