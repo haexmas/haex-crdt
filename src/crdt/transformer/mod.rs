@@ -5,11 +5,30 @@ use crate::crdt::insert_transformer::InsertTransformer;
 use crate::crdt::metadata::create_hlc_assignment;
 use crate::db::error::DatabaseError;
 use sqlparser::ast::{
-    AlterTable, ColumnDef, ColumnOption, ColumnOptionDef, CreateTable, DataType, Expr, Ident,
-    ObjectName, ObjectNamePart, Query, Select, SetExpr, Statement, TableFactor, TableObject, Value,
+    AlterTable, Assignment, AssignmentTarget, ColumnDef, ColumnOption, ColumnOptionDef,
+    CreateTable, DataType, Expr, Ident, ObjectName, ObjectNamePart, Query, Select, SetExpr,
+    Statement, TableFactor, TableObject, Value,
 };
 use std::borrow::Cow;
 use uhlc::Timestamp;
+
+/// Whether every assignment targets a `_no_sync` column, the same predicate
+/// the trigger installer uses to leave a column untracked.
+fn assigns_only_no_sync(assignments: &[Assignment]) -> bool {
+    let is_no_sync = |name: &ObjectName| {
+        name.0
+            .last()
+            .and_then(|part| part.as_ident())
+            .is_some_and(|ident| ident.value.ends_with("_no_sync"))
+    };
+    !assignments.is_empty()
+        && assignments
+            .iter()
+            .all(|assignment| match &assignment.target {
+                AssignmentTarget::ColumnName(name) => is_no_sync(name),
+                AssignmentTarget::Tuple(names) => names.iter().all(is_no_sync),
+            })
+}
 
 /// Konfiguration für CRDT-Spalten
 #[derive(Clone)]
@@ -252,7 +271,12 @@ impl CrdtTransformer {
             }
             Statement::Update(update) => {
                 if let TableFactor::Table { name, .. } = &update.table.relation {
-                    if self.is_crdt_sync_table(name) {
+                    // An UPDATE confined to `_no_sync` columns changes nothing
+                    // that syncs (the update trigger tracks no other column), so
+                    // it must not move the row HLC: delete propagation compares
+                    // against it, and a device-local edit would otherwise shield
+                    // the row from a newer remote delete.
+                    if self.is_crdt_sync_table(name) && !assigns_only_no_sync(&update.assignments) {
                         // Add HLC timestamp assignment. Hard-delete + delete-log
                         // model: no soft-deleted rows live in the target table,
                         // so there is nothing to filter out.
