@@ -152,6 +152,42 @@ fn add_column_then_insert_gets_a_column_hlc() {
 }
 
 #[test]
+fn a_column_added_to_existing_rows_gets_a_baseline_hlc() {
+    let (_fx, db) = open();
+    run(
+        &db,
+        GuardedWriteOptions::default(),
+        &["INSERT INTO items (id, body) VALUES ('a', 'x')"],
+    )
+    .unwrap();
+    run(
+        &db,
+        SCHEMA,
+        &["ALTER TABLE items ADD COLUMN status TEXT DEFAULT 'draft'"],
+    )
+    .unwrap();
+    run(
+        &db,
+        GuardedWriteOptions::default(),
+        &["UPDATE items SET body = 'y' WHERE id = 'a'"],
+    )
+    .unwrap();
+
+    let (row_hlc, map) = meta(&db, "items", "a");
+    assert!(map.get("status").is_some(), "status needs its own entry");
+    let changes = db
+        .scan_table_for_local_changes("items", None, ScanFilters::default())
+        .unwrap();
+    let status = changes.iter().find(|c| c.column_name == "status");
+    if let Some(change) = status {
+        assert_ne!(
+            change.hlc_timestamp, row_hlc,
+            "the default must not ride on the row HLC"
+        );
+    }
+}
+
+#[test]
 fn drop_column_on_a_synced_table_recreates_its_triggers() {
     let (_fx, db) = open();
     run(

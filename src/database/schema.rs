@@ -53,6 +53,7 @@ pub(crate) enum SchemaChange {
     Altered {
         table: String,
         renamed_to: Option<String>,
+        added_columns: Vec<String>,
     },
 }
 
@@ -67,6 +68,7 @@ impl SchemaChange {
             Statement::AlterTable(alter) => Some(SchemaChange::Altered {
                 table,
                 renamed_to: renamed_to(&alter.operations),
+                added_columns: added_columns(&alter.operations),
             }),
             _ => None,
         }
@@ -134,12 +136,20 @@ pub(crate) fn begin(tx: &Transaction, change: &SchemaChange) -> Result<()> {
 /// rename) and releases the savepoint. On `Err` the caller calls
 /// [`rollback`].
 pub(crate) fn complete(tx: &Transaction, change: &SchemaChange) -> Result<()> {
-    let table = match change {
-        SchemaChange::Created { table } => table,
-        SchemaChange::Altered { table, renamed_to } => renamed_to.as_ref().unwrap_or(table),
+    let (table, added) = match change {
+        SchemaChange::Created { table } => (table, &[][..]),
+        SchemaChange::Altered {
+            table,
+            renamed_to,
+            added_columns,
+        } => (
+            renamed_to.as_ref().unwrap_or(table),
+            added_columns.as_slice(),
+        ),
     };
     if let Some(actual) = crdt_table(tx, table)? {
         setup_triggers_for_table(tx, &actual, true).map_err(DatabaseError::from)?;
+        baseline_added_columns(tx, &actual, added)?;
     }
     release(tx)
 }
@@ -149,6 +159,34 @@ pub(crate) fn complete(tx: &Transaction, change: &SchemaChange) -> Result<()> {
 /// through `is_autocommit`.
 pub(crate) fn rollback(tx: &Transaction) {
     let _ = tx.execute_batch(&format!("ROLLBACK TO {SAVEPOINT}; RELEASE {SAVEPOINT}"));
+}
+
+/// HLC of a column that was added to a table that already holds rows. It is
+/// older than any real write, so a value another device wrote to the column
+/// wins over the default every existing row received, while the default
+/// still ships and fills the column on a device that never wrote it.
+const NEW_COLUMN_BASELINE_HLC: &str = "0/01";
+
+/// Gives every existing row of `table` the baseline HLC for the columns an
+/// `ALTER TABLE ... ADD COLUMN` added. Without an entry the scanner falls back
+/// to the row HLC, which would stamp the default with a time newer than a
+/// peer's real edit of that column.
+fn baseline_added_columns(tx: &Transaction, table: &str, added: &[String]) -> Result<()> {
+    for column in added {
+        if column.ends_with(NO_SYNC_SUFFIX) {
+            continue;
+        }
+        tx.execute(
+            &format!(
+                "UPDATE \"{table}\" SET {COLUMN_HLCS_COLUMN} = \
+                 json_set({COLUMN_HLCS_COLUMN}, '$.\"' || ?1 || '\"', ?2) \
+                 WHERE json_extract({COLUMN_HLCS_COLUMN}, '$.\"' || ?1 || '\"') IS NULL"
+            ),
+            [column.as_str(), NEW_COLUMN_BASELINE_HLC],
+        )
+        .map_err(DatabaseError::from)?;
+    }
+    Ok(())
 }
 
 fn release(tx: &Transaction) -> Result<()> {
@@ -330,6 +368,18 @@ fn main_crdt_table(tx: &Transaction, table: &str) -> Result<Option<String>> {
         )
         .optional()
         .map_err(DatabaseError::from)?)
+}
+
+fn added_columns(operations: &[AlterTableOperation]) -> Vec<String> {
+    operations
+        .iter()
+        .filter_map(|operation| match operation {
+            AlterTableOperation::AddColumn { column_def, .. } => {
+                Some(column_def.name.value.clone())
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 fn renamed_to(operations: &[AlterTableOperation]) -> Option<String> {
