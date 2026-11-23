@@ -1,76 +1,13 @@
 {
   "schema_version": 1,
   "checked": {
-    "source_hash": "de4880978c612170d2973fbabeae4f4706a37a5fefc088e50f839590fd88c6c4",
+    "source_hash": "a38e66f62b8f5cd47ff1399d0cf6a1e47e78878344f065111e7c6b6d4ad6fc08",
     "prompt_hash": "aad1b9eb44b8d38d2bb92a30d9806c85710edad91159543012d0d3a0c686372a"
   },
   "decisions": {
-    "0d2cd399b9a119a03b600e3c906bec535f03641b52dd6e089d8956afaee1d350": {
-      "kind": "duplicate",
-      "summary": "Both fragments give the same guidance on abstraction: don't extract one merely because code looks similar or might be reusable, but do extract when real shared behavior/duplication and cohesion justify it.",
-      "passages": [
-        {
-          "scoped_id": "com.github.haexmas.atoms.general-coding/general-coding",
-          "text_hash": "6741ac35c27b221471f2f91306fe80065e5e5d29ced544301b771bdec89f53b8",
-          "text": "- Do not abstract two things merely because they look similar. First establish\n  that they have the same behavior, ownership, change reason, and invariants.\n  A small amount of local duplication is preferable to a premature generic\n  abstraction that couples unrelated callers.\n- Refactor repeated behavior when the shared rule is real and the abstraction\n  makes both callers clearer. Keep the abstraction close to the domain that\n  owns it; avoid a generic utility module becoming a dumping ground."
-        },
-        {
-          "scoped_id": "com.github.haexmas.atoms.ponytail/ponytail",
-          "text_hash": "762e24a72676f77dd6c37bbe977676817ac4012c63ec2d09cff09a3b67f565eb",
-          "text": "- Do not introduce speculative abstractions or abstractions solely because a\n  change might be reusable. A concrete, domain-owned abstraction that\n  improves cohesion, removes real duplication, or makes a branch independently\n  testable is not premature; use it when the code evidence supports it, even\n  when the task did not name the extraction. Keep it as small as possible."
-        }
-      ],
-      "choice": {
-        "kind": "keep_all"
-      },
-      "asked_at": "2026-11-22T23:32:50Z",
-      "answered_at": "2026-11-22T23:32:50Z"
-    },
-    "43b3458be6ed92b0c0df225ecbc30af1957c2a2d4b0cceb373afad2029c52509": {
-      "kind": "duplicate",
-      "summary": "Both fragments independently require that specs/plans be checked against the constitution's principles during /speckit-plan, restating the same core requirement.",
-      "passages": [
-        {
-          "scoped_id": "com.github.haexmas.atoms.spaex-constitution/constitution-enforcement-tooling",
-          "text_hash": "339ca1f7454a677481f70a239efbccca9bb3b78fa865a801fb5125f96aff29b0",
-          "text": "`/speckit-plan` and `/speckit-analyze` MUST check plans and cross-artifact consistency against this constitution. CI does not yet mechanically enforce this; when introduced, it MUST validate that no committed file violates the no-secrets-in-git, no-local-absolute-paths, or cross-repo-refs-pin-immutable-revisions principles."
-        },
-        {
-          "scoped_id": "com.github.haexmas.atoms.spaex-constitution/speckit-workflow-adherence",
-          "text_hash": "ca90eeb6cd9958d7adeed4abbb2160528be5fca24fd5429c33b7823801066a2d",
-          "text": "Every feature or spec created via `/speckit-specify` **MUST** be checked against this constitution's principles during `/speckit-plan`; any conflict is resolved by changing the plan or escalated to a constitution amendment, never silently accepted as an exception. The project's active speckit workflow, declared at `.specify/workflows/speckit/workflow.yml`, MUST be followed for every primary task landing, invoking the named commands at their corresponding stages; when that file is absent, the built-in speckit skills serve as the implicit default and MUST still be followed. Freehand edits against source files are permitted only for review-fix responses on an already-open PR, or follow-up doc-alignment surfaced during a walkthrough test, never for the primary task landing itself."
-        }
-      ],
-      "choice": {
-        "kind": "keep_all"
-      },
-      "asked_at": "2026-11-22T23:32:50Z",
-      "answered_at": "2026-11-22T23:32:50Z"
-    },
-    "c087a2d64bb582e4a92f0e0c7f5e987ad36e7c5f767f6a08654ca7c595e5e022": {
-      "kind": "duplicate",
-      "summary": "Both passages forbid speculative or premature abstraction while permitting abstraction grounded in real, evidenced shared behavior \u2014 the same design principle restated independently in general-coding and ponytail.",
-      "passages": [
-        {
-          "scoped_id": "com.github.haexmas.atoms.general-coding/general-coding",
-          "text_hash": "8613b227dbf67ae438c4504cb917f472a3794cb67d9198fb012bbdbaf84f2637",
-          "text": "- Do not abstract two things merely because they look similar. First establish\n  that they have the same behavior, ownership, change reason, and invariants.\n  A small amount of local duplication is preferable to a premature generic\n  abstraction that couples unrelated callers."
-        },
-        {
-          "scoped_id": "com.github.haexmas.atoms.ponytail/ponytail",
-          "text_hash": "762e24a72676f77dd6c37bbe977676817ac4012c63ec2d09cff09a3b67f565eb",
-          "text": "- Do not introduce speculative abstractions or abstractions solely because a\n  change might be reusable. A concrete, domain-owned abstraction that\n  improves cohesion, removes real duplication, or makes a branch independently\n  testable is not premature; use it when the code evidence supports it, even\n  when the task did not name the extraction. Keep it as small as possible."
-        }
-      ],
-      "choice": {
-        "kind": "keep_all"
-      },
-      "asked_at": "2026-11-23T10:38:34Z",
-      "answered_at": "2026-11-23T10:38:34Z"
-    },
     "c97355e811a5542df4696e34001394201a40d3853da7953789e3adc1601b4aeb": {
       "kind": "duplicate",
-      "summary": "Both fragments require test bodies to live in dedicated files separate from production code, carving out the same exception for a language test-module declaration \u2014 the rust-testing fragment restates the general-coding rule verbatim for Rust.",
+      "summary": "Both require test implementations to live in dedicated files separate from production code, allowing only a test-module declaration to remain in the production file.",
       "passages": [
         {
           "scoped_id": "com.github.haexmas.atoms.coding-guideline-rust/rust-testing",
@@ -86,8 +23,8 @@
       "choice": {
         "kind": "keep_all"
       },
-      "asked_at": "2026-11-23T10:38:34Z",
-      "answered_at": "2026-11-23T10:38:34Z"
+      "asked_at": "2026-11-23T12:26:57Z",
+      "answered_at": "2026-11-23T12:26:57Z"
     }
   }
 }
