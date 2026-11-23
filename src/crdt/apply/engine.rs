@@ -21,6 +21,7 @@
 //!         (after the delete-log groups: propagate inbound delete-log
 //!          entries into target tables)
 //!         policy.before_commit(tx, &changes, &outcome)
+//!         persist max_accepted_hlc (so a restart cannot reissue it)
 //!         enable triggers
 //!         commit
 //!     }
@@ -171,6 +172,9 @@ pub fn apply_remote_changes(
             )?;
         }
         policy.before_commit(&tx, &changes, &outcome)?;
+        if let Some(hlc) = &max_accepted_hlc {
+            HlcService::persist_remote_timestamp(&tx, hlc).map_err(DatabaseError::from)?;
+        }
         toggle_triggers(&tx, "1")?;
         tx.commit()?;
         Ok(())

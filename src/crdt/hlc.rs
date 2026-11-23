@@ -297,6 +297,22 @@ impl HlcService {
         }
     }
 
+    /// Persists `hlc_string` inside the caller's transaction unless a
+    /// timestamp at least as new is already stored, so the stored value never
+    /// moves backwards. This is how a remote timestamp survives a restart:
+    /// [`Self::advance_past_remote`] alone only moves the in-memory clock.
+    pub fn persist_remote_timestamp(tx: &Transaction, hlc_string: &str) -> Result<(), HlcError> {
+        let remote = Timestamp::from_str(hlc_string).map_err(|e| {
+            HlcError::Parse(format!(
+                "Failed to parse remote HLC timestamp '{hlc_string}': {e:?}"
+            ))
+        })?;
+        match Self::load_last_timestamp(tx)? {
+            Some(stored) if stored >= remote => Ok(()),
+            _ => Self::persist_timestamp(tx, &remote),
+        }
+    }
+
     /// Persist a timestamp inside the caller's transaction.
     pub fn persist_timestamp(tx: &Transaction, timestamp: &Timestamp) -> Result<(), HlcError> {
         let timestamp_str = timestamp.to_string();
