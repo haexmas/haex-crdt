@@ -5,27 +5,6 @@
     "prompt_hash": "aad1b9eb44b8d38d2bb92a30d9806c85710edad91159543012d0d3a0c686372a"
   },
   "decisions": {
-    "c97355e811a5542df4696e34001394201a40d3853da7953789e3adc1601b4aeb": {
-      "kind": "duplicate",
-      "summary": "Both require test implementations to live in dedicated files separate from production code, allowing only a test-module declaration to remain in the production file.",
-      "passages": [
-        {
-          "scoped_id": "com.github.haexmas.atoms.coding-guideline-rust/rust-testing",
-          "text_hash": "a1218443de08bc595174335b4ccde4044b7707b16718b710d48a58334f1519c3",
-          "text": "- Put focused unit-test implementations in dedicated files separate from\n  production code. For module-private unit tests, a small declaration such as\n  `#[cfg(test)] mod tests;` may remain in the module under test, with the test\n  implementation in the separate test file. Use integration tests under\n  `tests/` to exercise the public API as an external consumer would. Use\n  documentation tests for public examples that should compile and remain\n  correct."
-        },
-        {
-          "scoped_id": "com.github.haexmas.atoms.general-coding/general-coding",
-          "text_hash": "2e66d07f47a07bcc5c5a7ea82b9c9d617b778f1e446d92e2fdc19739960dba91",
-          "text": "- Test code MUST be maintained in files separate from production code in every\n  language. This applies to unit, integration, contract, and end-to-end tests.\n  A language-required test-module declaration or registration may remain in\n  the production file, but test bodies and test-only helpers MUST live in\n  dedicated test files. Do not place inline test modules or test functions in\n  production files. Follow the repository's convention for test-file placement\n  and naming."
-        }
-      ],
-      "choice": {
-        "kind": "keep_all"
-      },
-      "asked_at": "2026-11-23T12:26:57Z",
-      "answered_at": "2026-11-23T12:26:57Z"
-    },
     "0d2cd399b9a119a03b600e3c906bec535f03641b52dd6e089d8956afaee1d350": {
       "kind": "duplicate",
       "summary": "Both fragments give the same guidance on abstraction: don't extract one merely because code looks similar or might be reusable, but do extract when real shared behavior/duplication and cohesion justify it.",
@@ -68,9 +47,30 @@
       "asked_at": "2026-11-22T23:32:50Z",
       "answered_at": "2026-11-22T23:32:50Z"
     },
+    "b5e634610c428d6858ec708f907226774902c5d0615e50cb3c6223f34a918e25": {
+      "kind": "duplicate",
+      "summary": "Both Rust guidance fragments require running cargo test; rust-testing adds package and test-suite scope to the broader handoff checklist.",
+      "passages": [
+        {
+          "scoped_id": "com.github.haexmas.atoms.coding-guideline-rust/rust",
+          "text_hash": "0b42940e864cc0cbeeb56811d8249f642f234a47e6d6472c398905840771ce57",
+          "text": "- Before handing off a change, run `cargo fmt --check`, `cargo check`,\n  `cargo clippy`, and `cargo test` when the project supports those commands.\n  Respect the repository's configured Clippy lint levels; enable stricter\n  categories or `-D warnings` only when the project deliberately requires\n  them. Follow documented command variants when they differ."
+        },
+        {
+          "scoped_id": "com.github.haexmas.atoms.coding-guideline-rust/rust-testing",
+          "text_hash": "616c8688ddbda5d7433a87ada332ef04395a47bda32a02aff4b668f2623cfebd",
+          "text": "- Run `cargo test` for the complete package or workspace as appropriate. This\n  includes unit, integration, and library documentation tests by default;\n  follow project-specific feature, target, and test-runner requirements too."
+        }
+      ],
+      "choice": {
+        "kind": "keep_all"
+      },
+      "asked_at": "2026-11-23T12:26:57Z",
+      "answered_at": "2026-11-23T12:26:57Z"
+    },
     "c087a2d64bb582e4a92f0e0c7f5e987ad36e7c5f767f6a08654ca7c595e5e022": {
       "kind": "duplicate",
-      "summary": "Both passages forbid speculative or premature abstraction while permitting abstraction grounded in real, evidenced shared behavior — the same design principle restated independently in general-coding and ponytail.",
+      "summary": "Both passages forbid speculative or premature abstraction while permitting abstraction grounded in real, evidenced shared behavior \u2014 the same design principle restated independently in general-coding and ponytail.",
       "passages": [
         {
           "scoped_id": "com.github.haexmas.atoms.general-coding/general-coding",
@@ -88,6 +88,27 @@
       },
       "asked_at": "2026-11-23T10:38:34Z",
       "answered_at": "2026-11-23T10:38:34Z"
+    },
+    "c97355e811a5542df4696e34001394201a40d3853da7953789e3adc1601b4aeb": {
+      "kind": "duplicate",
+      "summary": "Both require test implementations to live in dedicated files separate from production code, allowing only a test-module declaration to remain in the production file.",
+      "passages": [
+        {
+          "scoped_id": "com.github.haexmas.atoms.coding-guideline-rust/rust-testing",
+          "text_hash": "a1218443de08bc595174335b4ccde4044b7707b16718b710d48a58334f1519c3",
+          "text": "- Put focused unit-test implementations in dedicated files separate from\n  production code. For module-private unit tests, a small declaration such as\n  `#[cfg(test)] mod tests;` may remain in the module under test, with the test\n  implementation in the separate test file. Use integration tests under\n  `tests/` to exercise the public API as an external consumer would. Use\n  documentation tests for public examples that should compile and remain\n  correct."
+        },
+        {
+          "scoped_id": "com.github.haexmas.atoms.general-coding/general-coding",
+          "text_hash": "2e66d07f47a07bcc5c5a7ea82b9c9d617b778f1e446d92e2fdc19739960dba91",
+          "text": "- Test code MUST be maintained in files separate from production code in every\n  language. This applies to unit, integration, contract, and end-to-end tests.\n  A language-required test-module declaration or registration may remain in\n  the production file, but test bodies and test-only helpers MUST live in\n  dedicated test files. Do not place inline test modules or test functions in\n  production files. Follow the repository's convention for test-file placement\n  and naming."
+        }
+      ],
+      "choice": {
+        "kind": "keep_all"
+      },
+      "asked_at": "2026-11-23T12:26:57Z",
+      "answered_at": "2026-11-23T12:26:57Z"
     }
   }
 }
