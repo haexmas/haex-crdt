@@ -3,4 +3,3 @@ inheritance: true
 reviews:
   path_filters:
     - "!.specify/**" # GitHub Spec Kit, managed by the official specify CLI
-    - "!.spaex/**" # spaex: composed constitution, fragments, generated files
