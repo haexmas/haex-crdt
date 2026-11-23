@@ -6,6 +6,7 @@
 //! - [`install_crdt`] — `install_crdt` semantics: empty, backfill, sig
 //!   binding, reinstall refuse/allow, unsafe identifier
 //! - [`migration_triggers`] — tables a later migration creates get CRDT triggers
+//! - [`clock`] — a remote timestamp survives a restart
 //! - [`delegates`] — method delegates (apply/scan/cleanup)
 //! - [`stamp`] — open stamps rows the bootstrap hook wrote before the HLC
 //!   existed
@@ -31,6 +32,7 @@ use crate::error::Result;
 use crate::migration::{MigrationName, StaticMigrationSource};
 use crate::signature::{AuthorId, NoopSignatureProvider, SignatureProvider};
 
+mod clock;
 mod delegates;
 mod guarded;
 mod guarded_schema;
