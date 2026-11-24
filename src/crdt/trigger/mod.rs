@@ -294,7 +294,7 @@ fn generate_update_trigger_sql(
         update_statements.push(format!(
             "UPDATE \"{table_name}\"
             SET {COLUMN_HLCS_COLUMN} = json_set(COALESCE({COLUMN_HLCS_COLUMN}, '{{}}'), '$.{col}', NEW.\"{HLC_TIMESTAMP_COLUMN}\")
-            WHERE {pk_where} AND NEW.\"{col}\" IS NOT OLD.\"{col}\";"
+            WHERE {pk_where} AND NEW.\"{col}\" COLLATE BINARY IS NOT OLD.\"{col}\";"
         ));
     }
     let all_updates = update_statements.join("\n            ");
@@ -304,7 +304,7 @@ fn generate_update_trigger_sql(
     } else {
         cols_to_track
             .iter()
-            .map(|col| format!("NEW.\"{col}\" IS NOT OLD.\"{col}\""))
+            .map(|col| format!("NEW.\"{col}\" COLLATE BINARY IS NOT OLD.\"{col}\""))
             .collect::<Vec<_>>()
             .join(" OR ")
     };
