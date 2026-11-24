@@ -41,6 +41,7 @@ mod install_crdt;
 mod migration_triggers;
 mod no_sync_edit;
 mod open;
+mod pk_update;
 mod stamp;
 mod write;
 

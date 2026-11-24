@@ -20,7 +20,7 @@ use rusqlite::types::{ToSqlOutput, ValueRef};
 use rusqlite::{
     Connection, OptionalExtension, Params, Row, ToSql, Transaction, TransactionBehavior,
 };
-use sqlparser::ast::Statement;
+use sqlparser::ast::{Statement, TableFactor};
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 
 use super::guard::{
@@ -29,8 +29,9 @@ use super::guard::{
 };
 use super::schema::{self, SchemaChange};
 use super::Database;
+use crate::crdt::columns::HLC_TIMESTAMP_COLUMN;
 use crate::crdt::hlc::HlcService;
-use crate::db::core::execute::{parse_crdt_write, transform_write};
+use crate::db::core::execute::{explicitly_written_columns, parse_crdt_write, transform_write};
 use crate::db::core::strip_main_schema_prefix;
 use crate::db::error::DatabaseError;
 use crate::error::Result;
@@ -260,6 +261,7 @@ impl CrdtTransaction<'_> {
                 schema: None,
             });
         }
+        reject_primary_key_update(&self.tx, &statement)?;
         self.charge(params)?;
         if self.guard.is_none() {
             let (_hlc, sql, _) = transform_write(&self.tx, self.hlc, &mut statement)?;
@@ -503,4 +505,48 @@ fn value_bytes(value: ValueRef<'_>) -> usize {
         ValueRef::Integer(_) | ValueRef::Real(_) => 8,
         ValueRef::Text(bytes) | ValueRef::Blob(bytes) => bytes.len(),
     }
+}
+
+/// An UPDATE of a primary-key column of a synced table is not a rename: the
+/// peers key every column HLC and the delete log by the old key, so the row
+/// would fork. Use DELETE and INSERT instead.
+fn reject_primary_key_update(tx: &Transaction<'_>, statement: &Statement) -> Result<()> {
+    let Statement::Update(update) = statement else {
+        return Ok(());
+    };
+    let TableFactor::Table { name, .. } = &update.table.relation else {
+        return Ok(());
+    };
+    let Some(table) = name.0.last().and_then(|p| p.as_ident()) else {
+        return Ok(());
+    };
+    let written = explicitly_written_columns(statement);
+    if written.is_empty() {
+        return Ok(());
+    }
+    let mut stmt = tx
+        .prepare("SELECT name, pk FROM pragma_table_info(?1)")
+        .map_err(DatabaseError::from)?;
+    let columns: Vec<(String, i64)> = stmt
+        .query_map([&table.value], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(DatabaseError::from)?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(DatabaseError::from)?;
+    if !columns.iter().any(|(c, _)| c == HLC_TIMESTAMP_COLUMN) {
+        return Ok(());
+    }
+    if let Some((pk, _)) = columns
+        .iter()
+        .find(|(c, pk)| *pk > 0 && written.contains(&c.to_ascii_lowercase()))
+    {
+        return Err(DatabaseError::UnsupportedStatement {
+            sql: statement.to_string(),
+            reason: format!(
+                "UPDATE of primary-key column '{pk}' would fork the row across peers; \
+                 DELETE and INSERT instead"
+            ),
+        }
+        .into());
+    }
+    Ok(())
 }
