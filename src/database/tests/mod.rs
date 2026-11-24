@@ -43,6 +43,7 @@ mod migration_triggers;
 mod no_sync_edit;
 mod nocase_edit;
 mod open;
+mod pk_update;
 mod stamp;
 mod tx_control;
 mod write;
