@@ -2,7 +2,7 @@
 
 SQLite + SQLCipher storage with column-level LWW CRDT sync (uhlc-based Hybrid Logical Clocks). Extracted from haex-vault 2.x (Legacy); consumed by `haex-vault` 3.x, which supersedes it.
 
-**Status**: `v0.4.0`. Trait foundation, HLC service, SQL transformers, trigger installer, scanner, cleanup, migration engine, apply pipeline, public `Database` facade, cross-process file locking, and the plan §8 end-to-end acceptance test all land. Dual-licensed **MIT OR Apache-2.0**. Consume via `haex-crdt = { git = "https://github.com/haexmas/haex-crdt", tag = "v0.4.0" }`.
+**Status**: `v0.4.0` (unreleased). Trait foundation, HLC service, SQL transformers, trigger installer, scanner, cleanup, migration engine, apply pipeline, public `Database` facade, cross-process file locking, and the plan §8 end-to-end acceptance test all land. Dual-licensed **MIT OR Apache-2.0**. The Git dependency below will work once the `v0.4.0` tag is published: `haex-crdt = { git = "https://github.com/haexmas/haex-crdt", tag = "v0.4.0" }`.
 
 **Ownership**: source lived in haex-vault 2.x (Legacy). This repository is the extraction target; `haex-vault` 3.x depends on it. The surface only haex-vault 2.x needed (the JSON `DbConnection` layer with `execute` / `execute_with_crdt` / `select` / `select_with_crdt`, `PostWriteHook`, the `test-shims` feature) has been removed; the write path is `Database::write`, the read path `Database::read`.
 
