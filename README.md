@@ -29,6 +29,8 @@ Not provided (intentionally):
 
 `db.write(|tx| { ... })` runs one `IMMEDIATE` transaction on the CRDT write path. Every `tx.execute`, `tx.query_map` and `tx.query_row` goes through the CRDT transformer, so callers never stamp the HLC by hand, and all writes in the closure share one HLC — one transaction group for sync. Tables ending in `_no_sync` pass through untouched. The closure commits on `Ok` and rolls back on `Err` or a panic. The serialized parameters of all writes count against `DatabaseConfig::max_transaction_bytes` (default `MAX_CRDT_TRANSACTION_BYTES`); the write that would cross it fails with `TransactionTooLarge` before it runs. `DatabaseConfig::max_value_bytes` (default `MAX_VALUE_BYTES`, SQLite's own default) bounds one string or BLOB value and one row on the connection, also values SQL computes itself (`zeroblob`, `randomblob`, `printf`); a larger one fails with `ValueTooLarge` before it is allocated. It also bounds the rows of `sqlite_master`, so it must leave room for the SQL of every table and trigger.
 
+**Known limitation: primary-key-only tables.** A synced table whose columns are all primary-key columns (for example a bare junction table) has nothing to ship: the sync unit is one column of one row, so its rows are never returned by `scan_table_for_local_changes`. Give such a table at least one non-key column (a `created_at` is enough) if its rows must reach other devices.
+
 `db.read(|connection| { ... })` runs a closure on a read-only query view. The
 view exposes `query_row` and `query_map`; SQLite's `query_only` mode and an
 authorizer reject writes, PRAGMA changes, and transaction control, so a read
