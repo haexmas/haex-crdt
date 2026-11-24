@@ -37,6 +37,7 @@ mod clock;
 mod delegates;
 mod guarded;
 mod guarded_schema;
+mod insert_replace;
 mod install_crdt;
 mod migration_triggers;
 mod no_sync_edit;

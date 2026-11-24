@@ -7,7 +7,7 @@ use crate::db::error::DatabaseError;
 use sqlparser::ast::{
     AlterTable, Assignment, AssignmentTarget, ColumnDef, ColumnOption, ColumnOptionDef,
     CreateTable, DataType, Expr, Ident, ObjectName, ObjectNamePart, Query, Select, SetExpr,
-    Statement, TableFactor, TableObject, Value,
+    SqliteOnConflict, Statement, TableFactor, TableObject, Value,
 };
 use std::borrow::Cow;
 use uhlc::Timestamp;
@@ -262,6 +262,17 @@ impl CrdtTransformer {
             Statement::Insert(insert_stmt) => {
                 if let TableObject::TableName(name) = &insert_stmt.table {
                     if self.is_crdt_sync_table(name) {
+                        if insert_stmt.replace_into
+                            || matches!(insert_stmt.or, Some(SqliteOnConflict::Replace))
+                        {
+                            return Err(DatabaseError::UnsupportedStatement {
+                                sql: insert_stmt.to_string(),
+                                reason: "INSERT OR REPLACE removes the old row without a \
+                                         delete-log entry; use DELETE then INSERT, or \
+                                         ON CONFLICT DO UPDATE"
+                                    .to_string(),
+                            });
+                        }
                         // Hard Delete: Kein Schema-Lookup mehr nötig (kein ON CONFLICT)
                         let insert_transformer = InsertTransformer::new();
                         insert_transformer.transform_insert(insert_stmt, hlc_timestamp)?;
