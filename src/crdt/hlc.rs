@@ -373,10 +373,10 @@ pub fn hlc_node_id_suffix(hlc: &str) -> Option<&str> {
     hlc.split_once('/').map(|(_, node)| node)
 }
 
-/// Parse the hex node-id suffix of an HLC into a `u128`. uhlc strips leading
-/// zeros when serialising the 16-byte ID (`format!("{:x}", _)`), so a numeric
-/// comparison is required for robust equality — string equality would treat
-/// `"01"` and `"1"` as different node-ids.
+/// Decode the hex node-id suffix of an HLC into the `u128` uhlc built it
+/// from (a device UUID, see [`device_uuid_to_hlc_node`]). This is identity
+/// decoding for callers that need the UUID back, not a comparison: to compare
+/// or order nodes use [`compare_hlc_strings`] or [`hlc_is_from_node`].
 pub fn parse_hlc_node_hex(node_hex: &str) -> Option<u128> {
     u128::from_str_radix(node_hex, 16).ok()
 }
@@ -391,12 +391,10 @@ pub fn device_uuid_to_hlc_node(uuid_str: &str) -> Option<u128> {
 }
 
 /// Returns true iff the HLC timestamp's node-id matches `expected_node`.
-/// Returns `false` for malformed HLCs (no `/`, non-hex suffix).
+/// Returns `false` for malformed HLCs (no `/`, non-hex suffix). Uses the same
+/// comparison as [`compare_hlc_strings`], see [`crate::crdt::hlc_order`].
 pub fn hlc_is_from_node(hlc: &str, expected_node: u128) -> bool {
-    hlc_node_id_suffix(hlc)
-        .and_then(parse_hlc_node_hex)
-        .map(|n| n == expected_node)
-        .unwrap_or(false)
+    crate::crdt::hlc_order::is_node(hlc, expected_node)
 }
 
 #[cfg(test)]

@@ -55,6 +55,19 @@ pub(crate) fn compare(a: &str, b: &str) -> Ordering {
     cmp_keys(time_key(a), time_key(b)).then_with(|| cmp_keys(node_key(a), node_key(b)))
 }
 
+/// Whether the node part of `hlc` is `node`, compared with the same key order
+/// as [`compare`] (so `"01"` and `"1"` are one node). A missing or malformed
+/// node part never matches, not even node zero.
+pub(crate) fn is_node(hlc: &str, node: u128) -> bool {
+    let (_, part) = split(hlc);
+    !part.is_empty()
+        && part.bytes().all(|b| b.is_ascii_hexdigit())
+        && cmp_keys(
+            node_key(hlc),
+            key(&format!("{node:x}"), u8::is_ascii_hexdigit),
+        ) == Ordering::Equal
+}
+
 /// SQL expression for the time key of the HLC in `column` (an already quoted
 /// identifier). Mirrors [`time_key`]; NULL stays NULL.
 pub(crate) fn sql_time_key(column: &str) -> String {

@@ -101,3 +101,17 @@ fn u64_time_key_has_no_leading_zeros_and_zero_is_empty() {
     assert_eq!(u64_time_key(0), "");
     assert_eq!(u64_time_key(u64::MAX), "18446744073709551615");
 }
+
+#[test]
+fn is_node_matches_by_key_and_never_on_malformed_parts() {
+    assert!(is_node("5/01", 1));
+    assert!(is_node("5/AB", 0xab));
+    assert!(is_node("5/0", 0));
+    assert!(!is_node("5/1", 2));
+    assert!(!is_node("5", 0));
+    assert!(!is_node("5/", 0));
+    assert!(!is_node("5/zz", 0));
+    let wide = "1".to_string() + &"0".repeat(31);
+    assert!(is_node(&format!("5/{wide}"), 1u128 << 124));
+    assert!(!is_node(&format!("5/1{wide}"), 1u128 << 124));
+}
