@@ -367,34 +367,28 @@ pub fn hlc_min<'a>(iter: impl Iterator<Item = &'a str>) -> Option<&'a str> {
     iter.min_by(|a, b| compare_hlc_strings(a, b))
 }
 
-/// Returns the node-id suffix of an HLC timestamp string.
-/// Format: `<u64_ntp_nanoseconds>/<node_id_hex>`.
-pub fn hlc_node_id_suffix(hlc: &str) -> Option<&str> {
-    hlc.split_once('/').map(|(_, node)| node)
+/// The device that wrote `hlc`: its node id read back as the UUID uhlc was
+/// built from. uhlc serialises the 16-byte id **little-endian** and strips
+/// leading zeros, so the node part is 1 to 32 hex digits and the least
+/// significant byte of the number is `uuid.as_bytes()[0]`. A missing or
+/// malformed node part, or one wider than 32 digits, has no origin.
+///
+/// This is identity decoding. To order or compare HLCs use
+/// [`compare_hlc_strings`]; to test the writer use [`hlc_is_from_node`].
+pub fn hlc_origin(hlc: &str) -> Option<Uuid> {
+    let (_, node) = hlc.split_once('/')?;
+    if node.is_empty() || node.len() > 32 || !node.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let node = u128::from_str_radix(node, 16).ok()?;
+    Some(Uuid::from_bytes(node.to_le_bytes()))
 }
 
-/// Decode the hex node-id suffix of an HLC into the `u128` uhlc built it
-/// from (a device UUID, see [`device_uuid_to_hlc_node`]). This is identity
-/// decoding for callers that need the UUID back, not a comparison: to compare
-/// or order nodes use [`compare_hlc_strings`] or [`hlc_is_from_node`].
-pub fn parse_hlc_node_hex(node_hex: &str) -> Option<u128> {
-    u128::from_str_radix(node_hex, 16).ok()
-}
-
-/// Convert a device UUID (the same form passed to `HlcService`) to the `u128`
-/// representation used by uhlc node-ids. uhlc serialises the 16-byte ID
-/// **little-endian** — the least significant byte of the resulting u128 is
-/// `uuid.as_bytes()[0]`, not `[15]`.
-pub fn device_uuid_to_hlc_node(uuid_str: &str) -> Option<u128> {
-    let uuid = Uuid::parse_str(uuid_str).ok()?;
-    Some(u128::from_le_bytes(*uuid.as_bytes()))
-}
-
-/// Returns true iff the HLC timestamp's node-id matches `expected_node`.
-/// Returns `false` for malformed HLCs (no `/`, non-hex suffix). Uses the same
+/// Returns true iff the HLC timestamp was written by `origin`. Returns
+/// `false` for malformed HLCs (no `/`, non-hex node part). Uses the same
 /// comparison as [`compare_hlc_strings`], see [`crate::crdt::hlc_order`].
-pub fn hlc_is_from_node(hlc: &str, expected_node: u128) -> bool {
-    crate::crdt::hlc_order::is_node(hlc, expected_node)
+pub fn hlc_is_from_node(hlc: &str, origin: &Uuid) -> bool {
+    crate::crdt::hlc_order::is_node(hlc, u128::from_le_bytes(*origin.as_bytes()))
 }
 
 #[cfg(test)]

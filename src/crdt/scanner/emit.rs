@@ -12,6 +12,7 @@ use crate::db::core::convert_value_ref_to_json;
 use crate::db::error::DatabaseError;
 use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
+use uuid::Uuid;
 
 /// Per-row column-change emitter. Reads column values from `row`, builds
 /// the canonical PK JSON in schema-declaration order, applies the
@@ -28,7 +29,7 @@ pub(super) fn emit_row_changes(
     table_name: &str,
     after_hlc: Option<&str>,
     device_id: &str,
-    origin_node_filter: Option<u128>,
+    origin_node_filter: Option<Uuid>,
     row_pks_filter: Option<&HashSet<String>>,
     out: &mut Vec<ColumnChange>,
 ) -> Result<(), DatabaseError> {
@@ -116,7 +117,7 @@ pub(super) fn emit_row_changes(
             None => true,
         };
         let passes_origin = match origin_node_filter {
-            Some(our_node) => hlc_is_from_node(hlc_to_use, our_node),
+            Some(our_node) => hlc_is_from_node(hlc_to_use, &our_node),
             None => true,
         };
 

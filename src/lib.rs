@@ -69,9 +69,8 @@ pub use crdt::cleanup::{
     CrdtStats, ForeignKeyGuard, RetentionPolicy,
 };
 pub use crdt::hlc::{
-    compare_hlc_strings, device_uuid_to_hlc_node, hlc_is_from_node, hlc_is_newer, hlc_max, hlc_min,
-    hlc_node_id_suffix, parse_hlc_node_hex, remote_hlc_drift, HlcError, HlcService,
-    MAX_REMOTE_HLC_DRIFT,
+    compare_hlc_strings, hlc_is_from_node, hlc_is_newer, hlc_max, hlc_min, hlc_origin,
+    remote_hlc_drift, HlcError, HlcService, MAX_REMOTE_HLC_DRIFT,
 };
 pub use crdt::scanner::{
     paginate_changes, scan_dirty_tables, scan_table_for_local_changes, ColumnChange, Paginable,

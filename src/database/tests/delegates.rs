@@ -6,7 +6,6 @@ use serde_json::json;
 use super::super::*;
 use super::{source, Fixture};
 use crate::crdt::cleanup::RetentionPolicy;
-use crate::crdt::hlc::device_uuid_to_hlc_node;
 use crate::crdt::scanner::ColumnChange;
 use crate::db::error::DatabaseError;
 use crate::error::Error;
@@ -91,7 +90,7 @@ fn store_scan_after_apply_returns_the_applied_change() {
     );
     // Sanity: the origin_node filter for our own device must drop the row
     // (author was the foreign node) — proves the filter is wired.
-    let node = device_uuid_to_hlc_node(&fx.device.to_string()).unwrap();
+    let node = fx.device;
     let self_only = db
         .scan_table_for_local_changes(
             "items",

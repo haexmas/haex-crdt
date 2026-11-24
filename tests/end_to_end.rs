@@ -37,9 +37,9 @@ use std::sync::Arc;
 use haex_crdt::crdt::columns::HLC_TIMESTAMP_COLUMN;
 use haex_crdt::rusqlite::params;
 use haex_crdt::{
-    device_uuid_to_hlc_node, hlc_is_from_node, Database, DatabaseBootstrap, DatabaseConfig,
-    InstallCrdtOptions, MigrationName, NoopSignatureProvider, ScanFilters, SqlCipherKey,
-    StaticDeviceId, StaticMigrationSource, DEFAULT_TRIGGER_VERSION,
+    hlc_is_from_node, Database, DatabaseBootstrap, DatabaseConfig, InstallCrdtOptions,
+    MigrationName, NoopSignatureProvider, ScanFilters, SqlCipherKey, StaticDeviceId,
+    StaticMigrationSource, DEFAULT_TRIGGER_VERSION,
 };
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -244,9 +244,9 @@ fn two_devices_sync_backfilled_and_fresh_writes_end_to_end() {
         fresh_change.value,
         serde_json::json!("fresh body from device_a")
     );
-    let node_a = device_uuid_to_hlc_node(&device_a.to_string()).expect("device_a → hlc node");
+    let node_a = device_a;
     assert!(
-        hlc_is_from_node(&fresh_change.hlc_timestamp, node_a),
+        hlc_is_from_node(&fresh_change.hlc_timestamp, &node_a),
         "fresh write's HLC must carry device_a's node id; got {}",
         fresh_change.hlc_timestamp,
     );
@@ -276,7 +276,7 @@ fn two_devices_sync_backfilled_and_fresh_writes_end_to_end() {
         .expect("readback fresh row on device_b");
     assert_eq!(body_on_b, "fresh body from device_a");
     assert!(
-        hlc_is_from_node(&hlc_on_b, node_a),
+        hlc_is_from_node(&hlc_on_b, &node_a),
         "readback HLC on device_b must still be tagged with device_a's node; got {hlc_on_b}",
     );
     assert_eq!(hlc_on_b, fresh_change.hlc_timestamp);

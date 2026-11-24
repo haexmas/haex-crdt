@@ -26,7 +26,7 @@ fn origin_node_filter_emits_only_this_nodes_writes() {
     )
     .unwrap();
 
-    let our_node = device_uuid_to_hlc_node(&dev.to_string()).expect("dev uuid parses");
+    let our_node = dev;
     let changes = scan_table_for_local_changes(
         &conn,
         "items",

@@ -4,7 +4,7 @@ use super::*;
 use crate::crdt::columns::{
     COLUMN_HLCS_COLUMN, COLUMN_SIGS_COLUMN, HLC_TIMESTAMP_COLUMN, UUID_FUNCTION_NAME,
 };
-use crate::crdt::hlc::{device_uuid_to_hlc_node, HlcService};
+use crate::crdt::hlc::HlcService;
 use crate::crdt::trigger::{ensure_crdt_columns_and_triggers, setup_triggers_for_table};
 use crate::db::connection_context::ConnectionContext;
 use crate::db::core::init::{install_tx_hlc_hooks, register_current_hlc_udf};
