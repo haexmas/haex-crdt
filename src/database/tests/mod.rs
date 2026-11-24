@@ -42,6 +42,7 @@ mod migration_triggers;
 mod no_sync_edit;
 mod open;
 mod stamp;
+mod tx_control;
 mod write;
 
 pub(super) fn source(entries: &[(&str, &str)]) -> Arc<StaticMigrationSource> {
