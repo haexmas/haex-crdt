@@ -16,6 +16,7 @@
 //! crash-recovery — the crate refuses that shape.
 
 use crate::crdt::columns::{DELETED_ROWS_TABLE, HLC_TIMESTAMP_COLUMN};
+use crate::crdt::hlc_order;
 use crate::db::error::DatabaseError;
 use crate::table_names::TABLE_CRDT_CONFIGS;
 use rusqlite::{Connection, OptionalExtension, Transaction};
@@ -167,10 +168,10 @@ where
                 };
                 let sql = format!(
                     "DELETE FROM \"{DELETED_ROWS_TABLE}\" \
-                     WHERE {HLC_TIMESTAMP_COLUMN} IS NOT NULL \
-                       AND CAST(substr({HLC_TIMESTAMP_COLUMN}, 1, instr({HLC_TIMESTAMP_COLUMN}, '/') - 1) AS INTEGER) < ?1"
+                     WHERE {HLC_TIMESTAMP_COLUMN} IS NOT NULL AND {}",
+                    hlc_order::sql_time_lt(HLC_TIMESTAMP_COLUMN, "?1")
                 );
-                tx.execute(&sql, [cutoff])?
+                tx.execute(&sql, [hlc_order::u64_time_key(cutoff)])?
             }
         };
 
@@ -254,7 +255,7 @@ pub fn get_crdt_stats(conn: &Connection) -> Result<CrdtStats, DatabaseError> {
 fn read_max_prunable_hlc(
     tx: &Transaction,
     policy: RetentionPolicy,
-    cutoff: Option<i64>,
+    cutoff: Option<u64>,
 ) -> Result<Option<String>, DatabaseError> {
     match policy {
         RetentionPolicy::All => {
@@ -263,9 +264,9 @@ fn read_max_prunable_hlc(
                     &format!(
                         "SELECT {HLC_TIMESTAMP_COLUMN} FROM \"{DELETED_ROWS_TABLE}\" \
                          WHERE {HLC_TIMESTAMP_COLUMN} IS NOT NULL \
-                         ORDER BY \
-                           CAST(substr({HLC_TIMESTAMP_COLUMN}, 1, instr({HLC_TIMESTAMP_COLUMN}, '/') - 1) AS INTEGER) DESC \
-                         LIMIT 1"
+                         ORDER BY {} \
+                         LIMIT 1",
+                        hlc_order::sql_time_order_desc(HLC_TIMESTAMP_COLUMN)
                     ),
                     [],
                     |row| row.get(0),
@@ -282,12 +283,13 @@ fn read_max_prunable_hlc(
                     &format!(
                         "SELECT {HLC_TIMESTAMP_COLUMN} FROM \"{DELETED_ROWS_TABLE}\" \
                          WHERE {HLC_TIMESTAMP_COLUMN} IS NOT NULL \
-                           AND CAST(substr({HLC_TIMESTAMP_COLUMN}, 1, instr({HLC_TIMESTAMP_COLUMN}, '/') - 1) AS INTEGER) < ?1 \
-                         ORDER BY \
-                           CAST(substr({HLC_TIMESTAMP_COLUMN}, 1, instr({HLC_TIMESTAMP_COLUMN}, '/') - 1) AS INTEGER) DESC \
-                         LIMIT 1"
+                           AND {} \
+                         ORDER BY {} \
+                         LIMIT 1",
+                        hlc_order::sql_time_lt(HLC_TIMESTAMP_COLUMN, "?1"),
+                        hlc_order::sql_time_order_desc(HLC_TIMESTAMP_COLUMN)
                     ),
-                    [cutoff],
+                    [hlc_order::u64_time_key(cutoff)],
                     |row| row.get(0),
                 )
                 .optional()?;
@@ -298,10 +300,11 @@ fn read_max_prunable_hlc(
 
 /// For `TimeBasedDays`: computes the cutoff HLC time-part from the
 /// current HLC in `haex_crdt_configs_no_sync`. Returns `None` when no HLC has
-/// been recorded yet, when the policy is [`RetentionPolicy::All`], or when
-/// the cutoff would overflow `i64` (SQLite stores integers signed 64-bit;
-/// an `as i64` cast on `u64 > i64::MAX` would wrap negative and silently
-/// skew the comparison).
+/// been recorded yet or when the policy is [`RetentionPolicy::All`].
+///
+/// The cutoff is a `u64` time, not an SQLite integer: SQLite integers are
+/// signed 64-bit and would stop working in 2038. Bind
+/// [`hlc_order::u64_time_key`] of it to [`hlc_order::sql_time_lt`] to compare.
 ///
 /// Exposed publicly so consumers that need to prune a separate delete-log
 /// under the same policy (e.g. haex-vault's shared-space log) reuse the
@@ -310,7 +313,7 @@ fn read_max_prunable_hlc(
 pub fn compute_cutoff(
     tx: &Transaction,
     policy: RetentionPolicy,
-) -> Result<Option<i64>, DatabaseError> {
+) -> Result<Option<u64>, DatabaseError> {
     let days = match policy {
         RetentionPolicy::TimeBasedDays { days } => days,
         RetentionPolicy::All => return Ok(None),
@@ -332,18 +335,17 @@ pub fn compute_cutoff(
             reason: format!("cleanup: invalid HLC in config '{current_hlc_str}': {e:?}"),
         })?;
 
-    Ok(compute_cutoff_hlc_num(
+    Ok(Some(compute_cutoff_hlc_num(
         current_timestamp.get_time().as_u64(),
         days,
-    ))
+    )))
 }
 
-/// Converts a current HLC time and retention window into SQLite's signed cutoff.
-fn compute_cutoff_hlc_num(current_hlc_num: u64, retention_days: u32) -> Option<i64> {
+/// Converts a current HLC time and retention window into the cutoff time.
+fn compute_cutoff_hlc_num(current_hlc_num: u64, retention_days: u32) -> u64 {
     let ns_per_day: u64 = 24 * 60 * 60 * 1_000_000_000;
     let retention_ns = u64::from(retention_days).saturating_mul(ns_per_day);
-    let cutoff = current_hlc_num.saturating_sub(retention_ns);
-    i64::try_from(cutoff).ok()
+    current_hlc_num.saturating_sub(retention_ns)
 }
 
 /// Returns whether SQLite foreign-key enforcement is currently enabled.

@@ -11,6 +11,8 @@ use crate::crdt::columns::{
 };
 use rusqlite::Connection;
 
+mod wide_time;
+
 // -----------------------------------------------------------------------
 // FK-guard mechanics
 // -----------------------------------------------------------------------
@@ -187,10 +189,8 @@ fn with_fk_disabled_transaction_pattern_works() {
 const NS_PER_DAY: u64 = 24 * 60 * 60 * 1_000_000_000;
 
 /// Encodes an HLC string in uhlc's on-the-wire format: `<decimal time>/<hex node>`.
-/// The SQL `CAST(substr(...) AS INTEGER)` in the cleanup module keys on the
-/// leading decimal digits — hex time-parts would silently cast to 0 and
-/// break ordering. Zero-pad to 16 digits so string comparisons over the
-/// full HLC also line up numerically for reader ergonomics.
+/// A zero-padded 16-digit time keeps the full HLC strings readable in the
+/// assertions; the comparison itself ignores leading zeros.
 fn hlc_at(ns: u64) -> String {
     format!("{ns:016}/deadbeef")
 }
