@@ -35,6 +35,21 @@ pub const MAX_CRDT_TRANSACTION_BYTES: usize = 100 * 1024 * 1024;
 /// transformer would see the write and it would run unstamped.
 pub(crate) fn parse_crdt_write(sql: &str) -> Result<Statement, DatabaseError> {
     let statement = parse_single_statement(sql)?;
+    if matches!(
+        statement,
+        Statement::Commit { .. }
+            | Statement::Rollback { .. }
+            | Statement::StartTransaction { .. }
+            | Statement::Savepoint { .. }
+            | Statement::ReleaseSavepoint { .. }
+    ) {
+        return Err(DatabaseError::UnsupportedStatement {
+            reason: "a write runs inside a transaction the crate owns; it cannot commit, \
+                     roll back or nest one"
+                .to_string(),
+            sql: sql.to_string(),
+        });
+    }
     if let Statement::Query(query) = &statement {
         if matches!(*query.body, SetExpr::Insert(_) | SetExpr::Update(_)) {
             return Err(DatabaseError::UnsupportedStatement {
