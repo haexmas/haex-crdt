@@ -300,3 +300,25 @@ fn remote_hlc_drift_is_none_for_a_malformed_timestamp() {
         "an unparseable node id leaves the drift undefined"
     );
 }
+
+#[test]
+fn hlc_origin_reads_back_the_device_uuid() {
+    let device = Uuid::new_v4();
+    let svc = HlcService::new_with_uuid(device);
+    let ts = svc.new_timestamp().unwrap().to_string();
+    assert_eq!(hlc_origin(&ts), Some(device));
+    assert!(hlc_is_from_node(&ts, &device));
+    assert!(!hlc_is_from_node(&ts, &Uuid::new_v4()));
+}
+
+#[test]
+fn hlc_origin_is_none_for_a_node_part_that_is_not_a_uuid() {
+    assert_eq!(hlc_origin("5"), None);
+    assert_eq!(hlc_origin("5/"), None);
+    assert_eq!(hlc_origin("5/zz"), None);
+    assert_eq!(hlc_origin(&format!("5/1{}", "0".repeat(32))), None);
+    assert_eq!(
+        hlc_origin("5/1"),
+        Some(Uuid::from_bytes(1u128.to_le_bytes()))
+    );
+}

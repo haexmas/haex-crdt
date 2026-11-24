@@ -41,6 +41,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
+use uuid::Uuid;
 
 /// The serve-side per-page byte budget for a paginated pull. Sized equal to
 /// [`MAX_CRDT_TRANSACTION_BYTES`], the default cap `Database::write` checks a
@@ -132,10 +133,10 @@ pub fn scan_dirty_tables(conn: &Connection) -> Result<Vec<String>, DatabaseError
 /// a consumer draining several tables passes the same filters to each.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ScanFilters<'a> {
-    /// When `Some(node_id)`, emits only columns whose HLC's node-id
-    /// matches. Use to skip columns freshly applied from remote peers so
+    /// When `Some(device)`, emits only columns whose HLC was written by
+    /// that device (its UUID, as given to `HlcService`). Use to skip columns freshly applied from remote peers so
     /// they are not pushed back (ping-pong prevention).
-    pub origin_node: Option<u128>,
+    pub origin_node: Option<Uuid>,
     /// When `Some(&set)`, emits only rows whose canonical PK JSON is in
     /// the set. Applied BEFORE parsing the HLC/sig blobs so a large table
     /// with few allow-listed rows pays deserialisation cost only on the
