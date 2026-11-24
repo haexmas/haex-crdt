@@ -6,6 +6,7 @@ pub mod apply;
 pub mod cleanup;
 pub mod columns;
 pub mod hlc;
+pub mod hlc_order;
 pub mod insert_transformer;
 pub(crate) mod metadata;
 pub mod scanner;

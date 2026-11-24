@@ -40,6 +40,10 @@ path cannot bypass the CRDT transformer.
 
 `db.write_guarded_with(&guard, GuardedWriteOptions { schema_mode, local }, ...)` is for migrations. In every guarded write a `CREATE TABLE` or `ALTER TABLE` of a synced table recreates its triggers in the same transaction (under the new name after `RENAME TO`). Schema mode switches foreign keys off before the transaction and runs `PRAGMA foreign_key_check` before the commit; `tx.copy_rows_verbatim("INSERT INTO __new_x (...) SELECT ... FROM x")` copies a table rebuild with the CRDT columns unchanged and the triggers off, so Drizzle's rebuild sequence neither re-stamps rows nor writes delete markers. Local mode creates tables without CRDT columns and triggers; writes to a table without CRDT columns pass through unstamped, tables with them are still stamped.
 
+## HLC order
+
+An HLC is stored as `<time>/<node>`. The crate orders HLCs in one place, `crdt::hlc_order`, for Rust and for SQL: time and node are compared as numbers of any width (by length, then digit by digit), never parsed into a fixed-size integer and never cast to an SQLite integer. Applying, scanning (including the `after_hlc` prefilter) and delete-log cleanup therefore agree on the order. A malformed part counts as zero, so such an HLC loses every comparison. `compute_cutoff` returns a `u64` time; compare it in SQL with `hlc_order::sql_time_lt` and `hlc_order::u64_time_key`. The remaining bound is `uhlc`, whose time is a `u64` (about the year 2106): the crate cannot create or accept a newer timestamp.
+
 ## rusqlite version contract
 
 `write` and `read` take and hand out `rusqlite` types (`ToSql`, `Row`), and

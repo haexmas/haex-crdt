@@ -301,11 +301,13 @@ pub fn scan_table_for_local_changes(
         // so the row could only ever converge on a full scan. The per-column
         // loop re-checks each HLC against `after_hlc`, so widening here cannot
         // leak stale columns — rows with no usable HLC are still skipped.
-        params.push(hlc.to_string());
+        // Only the time part is compared (`>=`, so an equal time lets the row
+        // through); the node part decides in the per-column check below.
+        params.push(crate::crdt::hlc_order::time_key(hlc).to_string());
+        let quoted = format!("\"{HLC_TIMESTAMP_COLUMN}\"");
         predicates.push(format!(
-            "(\"{col}\" > ?{n} OR \"{col}\" IS NULL OR \"{col}\" = '')",
-            col = HLC_TIMESTAMP_COLUMN,
-            n = params.len()
+            "({ge} OR {quoted} IS NULL OR {quoted} = '')",
+            ge = crate::crdt::hlc_order::sql_time_ge(&quoted, &format!("?{}", params.len()))
         ));
     }
 

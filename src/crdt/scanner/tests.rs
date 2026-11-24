@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 mod filters;
 mod pagination;
+mod wide_time;
 
 // -----------------------------------------------------------------------
 // Fixtures
